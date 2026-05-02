@@ -1,0 +1,209 @@
+{% extends 'admin/base.html' %}
+{% load i18n %}
+
+{% block title %}Dashboard | {{ site_title|default:"Travel & Tour Admin" }}{% endblock %}
+
+{% block content %}
+<div class="py-6">
+
+  {# ── Page Heading ────────────────────────────────────────────────────────── #}
+  <div class="mb-8">
+    <h1 class="font-bold text-2xl text-important">Dashboard</h1>
+    <p class="mt-1 text-sm text-subtle">Overview of your travel platform</p>
+  </div>
+
+  {# ── KPI Cards — Row 1: Packages / Bookings / Revenue ───────────────────── #}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#BD8F3A;">luggage</span>
+      <div>
+        <div class="text-3xl font-bold text-important">{{ kpi_active_packages }}</div>
+        <div class="text-sm text-subtle mt-0.5">Active Packages</div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#3B82F6;">book_online</span>
+      <div>
+        <div class="text-3xl font-bold text-important">{{ kpi_total_bookings }}</div>
+        <div class="text-sm text-subtle mt-0.5">Total Bookings</div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#10B981;">payments</span>
+      <div>
+        <div class="text-xl font-bold text-important">{{ kpi_total_revenue }}</div>
+        <div class="text-sm text-subtle mt-0.5">Total Revenue</div>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── KPI Cards — Row 2: Pending / Users / Reviews ────────────────────────── #}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#F59E0B;">pending_actions</span>
+      <div>
+        <div class="text-3xl font-bold text-important">{{ kpi_pending_bookings }}</div>
+        <div class="text-sm text-subtle mt-0.5">Pending Bookings</div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#8B5CF6;">people</span>
+      <div>
+        <div class="text-3xl font-bold text-important">{{ kpi_total_users }}</div>
+        <div class="text-sm text-subtle mt-0.5">Registered Users</div>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 flex items-center gap-4">
+      <span class="material-symbols-outlined text-4xl" style="color:#F59E0B;">star</span>
+      <div>
+        <div class="text-3xl font-bold text-important">
+          {{ kpi_published_reviews }}
+          {% if kpi_avg_rating > 0 %}
+            <span class="text-base font-normal text-subtle ml-1">{{ kpi_avg_rating }}★</span>
+          {% endif %}
+        </div>
+        <div class="text-sm text-subtle mt-0.5">Published Reviews</div>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── Charts Row 1: Category bar + Status doughnut ────────────────────────── #}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+    <div class="lg:col-span-2 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6">
+      <h2 class="font-semibold text-base text-important mb-4">Packages by Category</h2>
+      {% if category_chart %}
+        <div class="relative" style="height:260px;">
+          <canvas class="chart" data-type="bar" data-value="{{ category_chart }}"
+            data-options="{&quot;maintainAspectRatio&quot;:false,&quot;plugins&quot;:{&quot;legend&quot;:{&quot;display&quot;:false}}}">
+          </canvas>
+        </div>
+      {% else %}
+        <p class="text-subtle text-sm">No package data yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6">
+      <h2 class="font-semibold text-base text-important mb-4">Bookings by Status</h2>
+      {% if status_chart %}
+        <div class="relative" style="height:260px;">
+          <canvas class="chart" data-type="doughnut" data-value="{{ status_chart }}"
+            data-options="{&quot;maintainAspectRatio&quot;:false,&quot;cutout&quot;:&quot;65%&quot;}">
+          </canvas>
+        </div>
+      {% else %}
+        <p class="text-subtle text-sm">No booking data yet.</p>
+      {% endif %}
+    </div>
+
+  </div>
+
+  {# ── Chart: Bookings — last 30 days (full width line) ────────────────────── #}
+  <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-semibold text-base text-important">Bookings — Last 30 Days</h2>
+      <span class="text-sm text-subtle">{{ kpi_bookings_this_month }} this month</span>
+    </div>
+    <div class="relative" style="height:220px;">
+      <canvas class="chart" data-type="line" data-value="{{ daily_chart }}"
+        data-options="{&quot;maintainAspectRatio&quot;:false,&quot;plugins&quot;:{&quot;legend&quot;:{&quot;display&quot;:false}}}">
+      </canvas>
+    </div>
+  </div>
+
+  {# ── Charts Row 2: Revenue bar + Tier doughnut ────────────────────────────── #}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+    <div class="lg:col-span-2 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6">
+      <h2 class="font-semibold text-base text-important mb-4">Revenue — Last 6 Months (GHS)</h2>
+      <div class="relative" style="height:240px;">
+        <canvas class="chart" data-type="bar" data-value="{{ revenue_chart }}"
+          data-options="{&quot;maintainAspectRatio&quot;:false,&quot;plugins&quot;:{&quot;legend&quot;:{&quot;display&quot;:false}}}">
+        </canvas>
+      </div>
+    </div>
+
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default p-6">
+      <h2 class="font-semibold text-base text-important mb-4">Packages by Price Option</h2>
+      <div class="relative" style="height:240px;">
+        <canvas class="chart" data-type="doughnut" data-value="{{ tier_chart }}"
+          data-options="{&quot;maintainAspectRatio&quot;:false,&quot;cutout&quot;:&quot;65%&quot;}">
+        </canvas>
+      </div>
+    </div>
+
+  </div>
+
+  {# ── Recent Bookings Table ────────────────────────────────────────────────── #}
+  <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default overflow-hidden">
+    <div class="border-b border-base-200 dark:border-base-800 flex items-center justify-between px-6 py-4">
+      <h2 class="font-semibold text-base text-important">Recent Bookings</h2>
+      <a href="{% url 'admin:bookings_booking_changelist' %}" class="text-sm" style="color:#BD8F3A;">View all →</a>
+    </div>
+
+    {% if recent_bookings %}
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-base-50 dark:bg-base-800 text-left">
+              <th class="px-6 py-3 font-medium text-subtle">Reference</th>
+              <th class="px-6 py-3 font-medium text-subtle">Guest</th>
+              <th class="px-6 py-3 font-medium text-subtle">Package</th>
+              <th class="px-6 py-3 font-medium text-subtle">Travel Date</th>
+              <th class="px-6 py-3 font-medium text-subtle">Amount</th>
+              <th class="px-6 py-3 font-medium text-subtle">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for booking in recent_bookings %}
+            <tr class="border-t border-base-100 dark:border-base-800 hover:bg-base-50 dark:hover:bg-base-800 transition-colors">
+              <td class="px-6 py-3">
+                <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="font-mono font-medium" style="color:#BD8F3A;">
+                  {{ booking.reference }}
+                </a>
+              </td>
+              <td class="px-6 py-3 text-important">{{ booking.full_name }}</td>
+              <td class="px-6 py-3 text-subtle">{{ booking.package.title|truncatechars:30 }}</td>
+              <td class="px-6 py-3 text-subtle">{{ booking.travel_date|date:"d M Y" }}</td>
+              <td class="px-6 py-3 font-medium text-important">{{ booking.currency }} {{ booking.total_amount|floatformat:2 }}</td>
+              <td class="px-6 py-3">
+                {% if booking.status == 'confirmed' %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(16,185,129,0.12);color:#10B981;">
+                    Confirmed
+                  </span>
+                {% elif booking.status == 'pending' %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(245,158,11,0.12);color:#F59E0B;">
+                    Pending
+                  </span>
+                {% elif booking.status == 'cancelled' %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(239,68,68,0.12);color:#EF4444;">
+                    Cancelled
+                  </span>
+                {% elif booking.status == 'completed' %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium" style="background:rgba(59,130,246,0.12);color:#3B82F6;">
+                    Completed
+                  </span>
+                {% else %}
+                  <span class="text-subtle">{{ booking.get_status_display }}</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="px-6 py-8 text-subtle text-sm text-center">No bookings yet.</p>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}

@@ -1,0 +1,11 @@
+.agents/
+.claude/
+
+.env
+.venv
+venv
+
+skills-lock.json
+skills.json
+
+db.sqlite3

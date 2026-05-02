@@ -1,0 +1,66 @@
+# ============================================================
+# .dockerignore — Build context exclusions
+# ============================================================
+# Keeps the build context lean; improves build speed and
+# prevents secrets / dev artefacts from leaking into images.
+# ============================================================
+
+# Python artefacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Django development artefacts
+db.sqlite3
+*.sqlite3
+media/
+staticfiles/
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Environment files — NEVER bake into images
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker files themselves (not needed inside image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI / agent tooling
+.agents/
+.claude/
+
+# Docs
+*.md
+LICENSE
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,63 @@
+# ============================================================
+# docker-compose.yml  — DEVELOPMENT
+# ============================================================
+# Spins up the Django dev server using SQLite (zero extra infra).
+# Source code is volume-mounted for instant hot-reload.
+#
+# Usage:
+#   docker-compose up --build
+# ============================================================
+
+services:
+  web:
+    build:
+      context: .
+      target: development        # Uses the 'development' stage
+    image: traveltour-backend:dev
+    container_name: traveltour_dev
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app                   # Live source-code mount (hot-reload)
+      - /app/.venv               # Keep container venv isolated
+      - media_data:/app/media    # Persist uploaded media across restarts
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DJANGO_ENV=development
+      - DEBUG=True
+      - ALLOWED_HOSTS=*
+      - DATABASE_URL=postgres://traveltour_user:traveltour_pass@db:5432/traveltour
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  db:
+    image: postgres:16-alpine
+    container_name: traveltour_dev_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=traveltour
+      - POSTGRES_USER=traveltour_user
+      - POSTGRES_PASSWORD=traveltour_pass
+    ports:
+      - "5432:5432"              # Exposed so you can connect via a local GUI
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U traveltour_user -d traveltour"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  media_data:
+  postgres_data:
