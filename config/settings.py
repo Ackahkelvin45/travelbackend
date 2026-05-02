@@ -38,11 +38,11 @@ SECRET_KEY = os.environ.get(
 DEBUG = os.environ.get("DEBUG", "True").lower() not in ("false", "0", "no")
 
 # In production set ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com in .env.prod
-_allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "azuratravelsbackend.cc,localhost:3000,127.0.0.1:8000,https://azuratravelsbackend.cc,azuratravels.live,https://azuratravels.live")
+_allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "azuratravelsbackend.cc,azuratravels.live,localhost,127.0.0.1")
 ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()]
 
 # In production set CORS_ALLOWED_ORIGINS=https://yourdomain.com in .env.prod
-_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,azuratravelsbackend.cc,azuratravels.live,https://azuratravels.live")
+_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()]
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
