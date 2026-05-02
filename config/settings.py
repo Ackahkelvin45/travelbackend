@@ -47,6 +47,10 @@ CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()]
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
+# CSRF Trusted Origins (Required for Django 4.0+)
+_csrf_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live")
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_env.split(",") if o.strip()]
+
 # Application definition
 
 INSTALLED_APPS = [
