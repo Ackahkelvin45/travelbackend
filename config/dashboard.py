@@ -27,8 +27,8 @@ def dashboard_callback(request, context):
     total_revenue = revenue_agg["total"] or 0
 
     total_users = User.objects.count()
-    published_reviews = Review.objects.filter(is_published=True).count()
-    avg_rating_agg = Review.objects.filter(is_published=True).aggregate(avg=Avg("rating"))
+    published_reviews = Review.objects.count()
+    avg_rating_agg = Review.objects.aggregate(avg=Avg("rating"))
     avg_rating = round(avg_rating_agg["avg"] or 0, 1)
 
     bookings_this_month = Booking.objects.filter(
