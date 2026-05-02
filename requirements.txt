@@ -1,28 +1,26 @@
 asgiref==3.11.1
-django-cors-headers
-django-filter
-django-unfold==0.91.0
+certifi==2026.4.22
+charset-normalizer==3.4.7
 django==6.0.4
+django-cors-headers==4.9.0
+django-filter==25.2
+django-unfold==0.91.0
 djangorestframework==3.17.1
 djangorestframework-simplejwt==5.5.1
 drf-yasg==1.21.15
+gunicorn==25.3.0
+idna==3.13
 inflection==0.5.1
 packaging==26.2
+pillow==12.2.0
+pip==25.1.1
+psycopg2-binary==2.9.12
 pyjwt==2.12.1
+python-dotenv==1.2.2
 pytz==2026.1.post1
 pyyaml==6.0.3
-requests>=2.32.0
+requests==2.33.1
 sqlparse==0.5.5
 uritemplate==4.2.0
-
-# Production server
-gunicorn>=22.0.0
-
-# PostgreSQL adapter
-psycopg2-binary>=2.9.9
-
-# Static file serving in production
-whitenoise>=6.7.0
-
-# Environment variable loading
-python-dotenv>=1.0.1
+urllib3==2.6.3
+whitenoise==6.12.0
