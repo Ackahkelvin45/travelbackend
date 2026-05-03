@@ -42,13 +42,13 @@ _allowed_hosts_env = os.environ.get("ALLOWED_HOSTS", "azuratravelsbackend.cc,azu
 ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()]
 
 # In production set CORS_ALLOWED_ORIGINS=https://yourdomain.com in .env.prod
-_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live")
+_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live,https://www.azuratravels.live")
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()]
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
 # CSRF Trusted Origins (Required for Django 4.0+)
-_csrf_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live")
+_csrf_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://azuratravelsbackend.cc,https://azuratravels.live,https://www.azuratravels.live")
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_env.split(",") if o.strip()]
 
 # Application definition
@@ -243,6 +243,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+# Trust the X-Forwarded-Proto header from the proxy (Nginx)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 ROOT_URLCONF = "config.urls"
 
