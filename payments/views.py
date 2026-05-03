@@ -126,7 +126,7 @@ class InitializePaymentView(APIView):
                 email=booking.email,
                 amount_kobo=amount_subunits,
                 reference=payment.paystack_reference,
-                currency=booking.currency,
+                currency="GHS",   # Force GHS for Paystack Ghana accounts
                 metadata={
                     "booking_reference": booking.reference,
                     "customer_name": booking.full_name,
@@ -146,7 +146,7 @@ class InitializePaymentView(APIView):
             "access_code": payment.paystack_access_code,
             "reference": payment.paystack_reference,
             "amount": str(booking.total_amount),
-            "currency": booking.currency,
+            "currency": "GHS",
             "booking_reference": booking.reference,
         }, status=status.HTTP_200_OK)
 

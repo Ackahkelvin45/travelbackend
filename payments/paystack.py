@@ -44,7 +44,13 @@ def _raise_for_paystack_error(response: requests.Response) -> dict:
     Parse the Paystack JSON response, raise ValueError if status == false,
     and return the ``data`` dict on success.
     """
-    response.raise_for_status()          # raises HTTPError on 4xx / 5xx
+    try:
+        response.raise_for_status()          # raises HTTPError on 4xx / 5xx
+    except requests.exceptions.HTTPError as e:
+        # Log the full response body to see the specific error message from Paystack
+        logger.error("Paystack Error Response: %s", response.text)
+        raise e
+
     body = response.json()
     if not body.get("status"):
         raise ValueError(body.get("message", "Paystack returned an error."))
@@ -72,7 +78,7 @@ def initialize_transaction(
     """
     payload: dict = {
         "email": email,
-        "amount": str(amount_kobo),   # must be a string in kobo/pesewas
+        "amount": amount_kobo,        # Must be an integer in kobo/pesewas
         "reference": reference,
         "currency": currency,
     }
@@ -81,7 +87,7 @@ def initialize_transaction(
     if metadata:
         payload["metadata"] = json.dumps(metadata)
 
-    logger.info("Paystack initialize | ref=%s email=%s amount=%s", reference, email, amount_kobo)
+    logger.info("Paystack initialize | payload=%s", payload)
 
     response = requests.post(
         f"{PAYSTACK_BASE_URL}/transaction/initialize",
