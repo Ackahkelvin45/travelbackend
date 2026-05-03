@@ -28,8 +28,12 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 def _headers() -> dict:
     """Build the authorization header for every Paystack request."""
+    key = settings.PAYSTACK_SECRET_KEY
+    if not key:
+        logger.error("PAYSTACK_SECRET_KEY is missing or empty! Check your .env or .env.prod file.")
+
     return {
-        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
     }
