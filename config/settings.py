@@ -356,4 +356,5 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 # ── Resend ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
 

@@ -9,14 +9,14 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-def _generate_qr_base64(data: str) -> str:
+def _generate_qr_bytes(data: str) -> bytes:
     qr = qrcode.QRCode(version=1, box_size=8, border=2)
     qr.add_data(data)
     qr.make(fit=True)
     img = qr.make_image(fill_color="#1a1a2e", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 def _build_html(booking, payment) -> str:
@@ -198,21 +198,25 @@ def _build_html(booking, payment) -> str:
 
 
 def send_booking_confirmation(booking, payment) -> None:
+    if not settings.RESEND_API_KEY:
+        logger.error("RESEND_API_KEY is not set. Cannot send confirmation email.")
+        return
+
     resend.api_key = settings.RESEND_API_KEY
 
     try:
-        qr_b64 = _generate_qr_code(booking)
+        qr_bytes = _generate_qr_bytes(f"https://azuratravels.live/booking/{booking.reference}")
         html = _build_html(booking, payment)
 
         params: resend.Emails.SendParams = {
-            "from": "Azura Travels <bookings@azuratravels.live>",
+            "from": settings.RESEND_FROM_EMAIL,
             "to": [booking.email],
             "subject": f"Booking Confirmed – {booking.reference} | Azura Travels",
             "html": html,
             "attachments": [
                 {
                     "filename": "qr-code.png",
-                    "content": qr_b64,
+                    "content": list(qr_bytes),  # Resend SDK often prefers a list of ints for raw content
                     "content_type": "image/png",
                     "content_id": "qr-code",
                 }
@@ -220,10 +224,7 @@ def send_booking_confirmation(booking, payment) -> None:
         }
 
         email = resend.Emails.send(params)
-        logger.info("Confirmation email sent id=%s to=%s booking=%s", email["id"], booking.email, booking.reference)
-    except Exception:
-        logger.exception("Failed to send confirmation email for booking %s", booking.reference)
+        logger.info("Confirmation email sent id=%s to=%s booking=%s", email.get("id"), booking.email, booking.reference)
+    except Exception as exc:
+        logger.exception("Failed to send confirmation email for booking %s: %s", booking.reference, str(exc))
 
-
-def _generate_qr_code(booking) -> str:
-    return _generate_qr_base64(f"https://azuratravels.live/booking/{booking.reference}")

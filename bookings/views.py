@@ -159,14 +159,26 @@ class BookingStatusView(APIView):
         },
     )
     def get(self, request, reference):
-        try:
+        # Try finding by booking reference first
+        booking = (
+            Booking.objects
+            .select_related("package")
+            .prefetch_related("payment")
+            .filter(reference=reference)
+            .first()
+        )
+
+        # If not found, try finding by the associated payment reference (e.g. AZT-PAY-AZT-...)
+        if not booking:
             booking = (
                 Booking.objects
                 .select_related("package")
                 .prefetch_related("payment")
-                .get(reference=reference)
+                .filter(payment__paystack_reference=reference)
+                .first()
             )
-        except Booking.DoesNotExist:
+
+        if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = BookingDetailSerializer(booking)
