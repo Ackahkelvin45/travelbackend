@@ -8,4 +8,5 @@ venv
 skills-lock.json
 skills.json
 
+media/
 db.sqlite3
