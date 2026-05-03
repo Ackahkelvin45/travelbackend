@@ -1,6 +1,6 @@
 import django_filters
 from django.db.models import Avg, Count, Q
-from .models import TravelPackage
+from .models import Destination, TravelPackage
 
 
 class DurationFilter(django_filters.CharFilter):
@@ -37,6 +37,15 @@ class TravelPackageFilter(django_filters.FilterSet):
     category = django_filters.MultipleChoiceFilter(
         choices=TravelPackage.Category.choices,
         help_text="One or more categories, e.g. ?category=luxury_travel&category=nightlife",
+    )
+
+    # ── Destinations ─────────────────────────
+    destinations = django_filters.ModelMultipleChoiceFilter(
+        field_name="destinations",
+        queryset=Destination.objects.all(),
+        to_field_name="id",
+        help_text="One or more destination UUIDs, e.g. ?destinations=<uuid>&destinations=<uuid>",
+        distinct=True,
     )
 
     # ── Price range ──────────────────────────
@@ -113,4 +122,13 @@ class TravelPackageFilter(django_filters.FilterSet):
 
     class Meta:
         model = TravelPackage
-        fields = ["category", "price_min", "price_max", "duration", "travel_from", "travel_to", "sort"]
+        fields = [
+            "category",
+            "destinations",
+            "price_min",
+            "price_max",
+            "duration",
+            "travel_from",
+            "travel_to",
+            "sort",
+        ]

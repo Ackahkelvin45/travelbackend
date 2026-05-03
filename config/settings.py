@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     'django_filters',
     # local
     "accounts",
+    "newsletter.apps.NewsletterConfig",
     "packages",
     "bookings",
     "payments",
@@ -139,6 +140,12 @@ UNFOLD = {
                         "link": "/admin/accounts/user/",
                         "permission": lambda request: request.user.is_staff,
                     },
+                    {
+                        "title": _("Newsletter"),
+                        "icon": "mail",
+                        "link": "/admin/newsletter/newslettersubscriber/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
                 ],
             },
             {
@@ -146,6 +153,12 @@ UNFOLD = {
                 "separator": True,
                 "collapsible": False,
                 "items": [
+                    {
+                        "title": _("Destinations"),
+                        "icon": "place",
+                        "link": "/admin/packages/destination/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
                     {
                         "title": _("Travel Packages"),
                         "icon": "luggage",
@@ -357,4 +370,3 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 # ── Resend ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
-

@@ -21,6 +21,7 @@ def _generate_qr_bytes(data: str) -> bytes:
 
 def _build_html(booking, payment) -> str:
     package = booking.package
+    destination_names = ", ".join(destination.name for destination in package.destinations.all()) or "N/A"
     travel_date = booking.travel_date.strftime("%B %d, %Y")
     duration = f"{package.duration_days} day{'s' if package.duration_days != 1 else ''}"
     full_name = f"{booking.first_name} {booking.last_name}"
@@ -95,7 +96,7 @@ def _build_html(booking, payment) -> str:
                       <tr>
                         <td style="padding-right:24px;padding-bottom:16px;vertical-align:top;">
                           <p style="margin:0 0 2px;color:#aaa;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Destination</p>
-                          <p style="margin:0;color:#1a1a2e;font-size:13px;font-weight:600;">{package.destination}</p>
+                          <p style="margin:0;color:#1a1a2e;font-size:13px;font-weight:600;">{destination_names}</p>
                         </td>
                         <td style="padding-bottom:16px;vertical-align:top;">
                           <p style="margin:0 0 2px;color:#aaa;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Duration</p>
@@ -227,4 +228,3 @@ def send_booking_confirmation(booking, payment) -> None:
         logger.info("Confirmation email sent id=%s to=%s booking=%s", email.get("id"), booking.email, booking.reference)
     except Exception as exc:
         logger.exception("Failed to send confirmation email for booking %s: %s", booking.reference, str(exc))
-

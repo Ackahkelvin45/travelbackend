@@ -1,6 +1,11 @@
 from django.urls import path
 from reviews.views import PackageReviewListCreateView, PackageReviewDestroyView
 from .views import (
+    GalleryImagesView,
+    DestinationListCreateView,
+    DestinationDetailView,
+    DestinationImageListCreateView,
+    DestinationImageDetailView,
     TravelPackageListCreateView,
     TravelPackageDetailView,
     TrendingPackagesView,
@@ -14,6 +19,15 @@ from .views import (
 )
 
 urlpatterns = [
+    # Gallery
+    path("gallery/", GalleryImagesView.as_view(), name="gallery-images"),
+
+    # Destinations
+    path("destinations/", DestinationListCreateView.as_view(), name="destination-list-create"),
+    path("destinations/<uuid:id>/", DestinationDetailView.as_view(), name="destination-detail"),
+    path("destinations/<uuid:destination_id>/images/", DestinationImageListCreateView.as_view(), name="destination-image-list-create"),
+    path("destinations/<uuid:destination_id>/images/<uuid:id>/", DestinationImageDetailView.as_view(), name="destination-image-detail"),
+
     # Packages
     path("", TravelPackageListCreateView.as_view(), name="package-list-create"),
     path("trending/", TrendingPackagesView.as_view(), name="package-trending"),

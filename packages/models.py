@@ -2,6 +2,66 @@ from django.db import models
 import uuid
 
 
+class Destination(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200, unique=True)
+    description = models.TextField()
+    map_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="Google Maps or any map embed/share URL",
+    )
+    latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        blank=True,
+        null=True,
+        help_text="Decimal latitude, e.g. 5.603717",
+    )
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        blank=True,
+        null=True,
+        help_text="Decimal longitude, e.g. -0.186964",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class DestinationImage(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    destination = models.ForeignKey(
+        Destination,
+        on_delete=models.CASCADE,
+        related_name="images",
+    )
+    image = models.ImageField(upload_to="destinations/images/")
+    caption = models.CharField(max_length=200, blank=True, null=True)
+    is_cover = models.BooleanField(default=False, help_text="Mark as the hero/cover image")
+    order = models.PositiveIntegerField(default=0, help_text="Display order (lower = first)")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "uploaded_at"]
+
+    def __str__(self):
+        return f"Image for {self.destination.name} ({'cover' if self.is_cover else f'order {self.order}'})"
+
+    def save(self, *args, **kwargs):
+        # Ensure only one cover image per destination
+        if self.is_cover:
+            DestinationImage.objects.filter(destination=self.destination, is_cover=True).exclude(pk=self.pk).update(is_cover=False)
+        super().save(*args, **kwargs)
+
+
 class TravelPackage(models.Model):
     class Category(models.TextChoices):
         LUXURY_TRAVEL = "luxury_travel", "Luxury Travel"
@@ -23,26 +83,10 @@ class TravelPackage(models.Model):
         blank=True,
         help_text="What is included in the package, e.g. ['Beverages', 'Lunch', 'Hotel pickup']",
     )
-    destination = models.CharField(max_length=200)
-    map_url = models.URLField(
-        max_length=500,
+    destinations = models.ManyToManyField(
+        Destination,
+        related_name="packages",
         blank=True,
-        null=True,
-        help_text="Google Maps or any map embed/share URL",
-    )
-    latitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        blank=True,
-        null=True,
-        help_text="Decimal latitude, e.g. 5.603717",
-    )
-    longitude = models.DecimalField(
-        max_digits=9,
-        decimal_places=6,
-        blank=True,
-        null=True,
-        help_text="Decimal longitude, e.g. -0.186964",
     )
     duration_days = models.PositiveIntegerField()
     max_guests = models.PositiveIntegerField(default=10)

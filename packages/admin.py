@@ -3,7 +3,14 @@ from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline, StackedInline
 from unfold.widgets import UnfoldAdminTextareaWidget
 
-from .models import Itinerary, PackageFAQ, PackageImage, TravelPackage
+from .models import (
+    Destination,
+    DestinationImage,
+    Itinerary,
+    PackageFAQ,
+    PackageImage,
+    TravelPackage,
+)
 
 
 class LineByLineArrayField(forms.CharField):
@@ -60,6 +67,13 @@ class PackageImageInline(TabularInline):
     ordering = ["order"]
 
 
+class DestinationImageInline(TabularInline):
+    model = DestinationImage
+    extra = 1
+    fields = ["image", "caption", "is_cover", "order"]
+    ordering = ["order"]
+
+
 class PackageFAQInline(StackedInline):
     model = PackageFAQ
     extra = 1
@@ -78,22 +92,20 @@ class ItineraryInline(StackedInline):
 @admin.register(TravelPackage)
 class TravelPackageAdmin(ModelAdmin):
     form = TravelPackageForm
-    list_display = ["title", "category", "destination", "duration_days", "price_shared", "price_private", "price_vip", "currency", "is_featured", "is_active"]
+    list_display = ["title", "category", "destinations_display", "duration_days", "price_shared", "price_private", "price_vip", "currency", "is_featured", "is_active"]
     list_filter = ["category", "is_active", "is_featured"]
     list_editable = ["is_featured", "is_active"]
-    search_fields = ["title", "destination", "description"]
+    search_fields = ["title", "destinations__name", "description"]
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-is_featured", "title"]
+    autocomplete_fields = ["destinations"]
     inlines = [PackageImageInline, PackageFAQInline, ItineraryInline]
     fieldsets = (
         (None, {
-            "fields": ("title", "slug", "category", "destination"),
+            "fields": ("title", "slug", "category", "destinations"),
         }),
         ("Content", {
             "fields": ("description", "highlights", "whats_included"),
-        }),
-        ("Location", {
-            "fields": ("map_url", "latitude", "longitude"),
         }),
         ("Logistics", {
             "fields": ("duration_days", "max_guests", "available_from", "available_to"),
@@ -103,5 +115,25 @@ class TravelPackageAdmin(ModelAdmin):
         }),
         ("Visibility", {
             "fields": ("is_active", "is_featured"),
+        }),
+    )
+
+    @admin.display(description="Destinations")
+    def destinations_display(self, obj):
+        return ", ".join(destination.name for destination in obj.destinations.all()) or "-"
+
+
+@admin.register(Destination)
+class DestinationAdmin(ModelAdmin):
+    list_display = ["name", "latitude", "longitude", "created_at", "updated_at"]
+    search_fields = ["name", "description"]
+    ordering = ["name"]
+    inlines = [DestinationImageInline]
+    fieldsets = (
+        (None, {
+            "fields": ("name", "description"),
+        }),
+        ("Location", {
+            "fields": ("map_url", "latitude", "longitude"),
         }),
     )

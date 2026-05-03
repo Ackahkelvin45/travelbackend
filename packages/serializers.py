@@ -1,6 +1,48 @@
 from django.db.models import Avg
 from rest_framework import serializers
-from .models import TravelPackage, Itinerary, PackageImage, PackageFAQ
+from drf_yasg.utils import swagger_serializer_method
+from .models import (
+    TravelPackage,
+    Itinerary,
+    PackageImage,
+    PackageFAQ,
+    Destination,
+    DestinationImage,
+)
+
+
+class DestinationImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DestinationImage
+        fields = ["id", "image", "caption", "is_cover", "order", "uploaded_at"]
+        read_only_fields = ["id", "uploaded_at"]
+
+
+class DestinationSerializer(serializers.ModelSerializer):
+    images = DestinationImageSerializer(many=True, read_only=True)
+    package_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Destination
+        fields = [
+            "id",
+            "name",
+            "description",
+            "map_url",
+            "latitude",
+            "longitude",
+            "package_count",
+            "images",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    @swagger_serializer_method(serializer_or_field=serializers.IntegerField())
+    def get_package_count(self, obj):
+        if hasattr(obj, "package_count"):
+            return obj.package_count
+        return obj.packages.count()
 
 
 class PackageImageSerializer(serializers.ModelSerializer):
@@ -8,6 +50,62 @@ class PackageImageSerializer(serializers.ModelSerializer):
         model = PackageImage
         fields = ["id", "image", "caption", "is_cover", "order", "uploaded_at"]
         read_only_fields = ["id", "uploaded_at"]
+
+
+class GalleryPackageImageSerializer(serializers.ModelSerializer):
+    package_id = serializers.UUIDField(source="package.id", read_only=True)
+    package_title = serializers.CharField(source="package.title", read_only=True)
+    image_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PackageImage
+        fields = [
+            "id",
+            "image",
+            "caption",
+            "is_cover",
+            "order",
+            "uploaded_at",
+            "image_type",
+            "package_id",
+            "package_title",
+        ]
+
+    @swagger_serializer_method(serializer_or_field=serializers.CharField())
+    def get_image_type(self, obj):
+        return "package"
+
+
+class GalleryDestinationImageSerializer(serializers.ModelSerializer):
+    destination_id = serializers.UUIDField(source="destination.id", read_only=True)
+    destination_name = serializers.CharField(source="destination.name", read_only=True)
+    image_type = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DestinationImage
+        fields = [
+            "id",
+            "image",
+            "caption",
+            "is_cover",
+            "order",
+            "uploaded_at",
+            "image_type",
+            "destination_id",
+            "destination_name",
+        ]
+
+    @swagger_serializer_method(serializer_or_field=serializers.CharField())
+    def get_image_type(self, obj):
+        return "destination"
+
+
+class GalleryResponseSerializer(serializers.Serializer):
+    packages = GalleryPackageImageSerializer(many=True)
+    destinations = GalleryDestinationImageSerializer(many=True)
+    total_packages = serializers.IntegerField()
+    total_destinations = serializers.IntegerField()
+    total_images = serializers.IntegerField()
 
 
 class PackageFAQSerializer(serializers.ModelSerializer):
@@ -33,6 +131,8 @@ class ItinerarySerializer(serializers.ModelSerializer):
 class TravelPackageListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list views — includes cover image and rating summary."""
     category_display = serializers.CharField(source="get_category_display", read_only=True)
+    destination = serializers.SerializerMethodField()
+    destinations = DestinationSerializer(many=True, read_only=True)
     cover_image = serializers.SerializerMethodField()
     avg_rating = serializers.SerializerMethodField()
     review_count = serializers.SerializerMethodField()
@@ -46,6 +146,7 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
             "category",
             "category_display",
             "destination",
+            "destinations",
             "duration_days",
             "price_shared",
             "price_private",
@@ -66,6 +167,9 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
             return PackageImageSerializer(cover, context=self.context).data
         return None
 
+    def get_destination(self, obj):
+        return ", ".join(destination.name for destination in obj.destinations.all()) or None
+
     def get_avg_rating(self, obj):
         if hasattr(obj, "avg_rating"):
             val = obj.avg_rating
@@ -83,6 +187,15 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
 class TravelPackageDetailSerializer(serializers.ModelSerializer):
     """Full serializer with nested images, itineraries, and review stats."""
     category_display = serializers.CharField(source="get_category_display", read_only=True)
+    destination = serializers.SerializerMethodField()
+    destinations = DestinationSerializer(many=True, read_only=True)
+    destination_ids = serializers.PrimaryKeyRelatedField(
+        source="destinations",
+        many=True,
+        queryset=Destination.objects.all(),
+        write_only=True,
+        required=False,
+    )
     images = PackageImageSerializer(many=True, read_only=True)
     itineraries = ItinerarySerializer(many=True, read_only=True)
     faqs = PackageFAQSerializer(many=True, read_only=True)
@@ -101,9 +214,8 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "highlights",
             "whats_included",
             "destination",
-            "map_url",
-            "latitude",
-            "longitude",
+            "destinations",
+            "destination_ids",
             "duration_days",
             "max_guests",
             "price_shared",
@@ -123,6 +235,9 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_destination(self, obj):
+        return ", ".join(destination.name for destination in obj.destinations.all()) or None
 
     def get_avg_rating(self, obj):
         if hasattr(obj, "avg_rating"):
