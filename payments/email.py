@@ -19,7 +19,7 @@ def _generate_qr_base64(data: str) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _build_html(booking, payment, qr_b64: str) -> str:
+def _build_html(booking, payment) -> str:
     package = booking.package
     travel_date = booking.travel_date.strftime("%B %d, %Y")
     duration = f"{package.duration_days} day{'s' if package.duration_days != 1 else ''}"
@@ -127,7 +127,7 @@ def _build_html(booking, payment, qr_b64: str) -> str:
                            style="border:1px solid #e8e0d0;border-radius:10px;background:#fff;">
                       <tr>
                         <td style="padding:14px;">
-                          <img src="data:image/png;base64,{qr_b64}"
+                          <img src="cid:qr-code"
                                width="130" height="130" alt="QR Code"
                                style="display:block;border-radius:4px;">
                           <p style="margin:10px 0 0;color:#aaa;font-size:9px;text-align:center;letter-spacing:1.5px;text-transform:uppercase;">Scan to Verify</p>
@@ -200,21 +200,30 @@ def _build_html(booking, payment, qr_b64: str) -> str:
 def send_booking_confirmation(booking, payment) -> None:
     resend.api_key = settings.RESEND_API_KEY
 
-    qr_b64 = _generate_qr_code(booking)
-    html = _build_html(booking, payment, qr_b64)
-
     try:
-        resend.Emails.send({
+        qr_b64 = _generate_qr_code(booking)
+        html = _build_html(booking, payment)
+
+        params: resend.Emails.SendParams = {
             "from": "Azura Travels <bookings@azuratravels.live>",
             "to": [booking.email],
             "subject": f"Booking Confirmed – {booking.reference} | Azura Travels",
             "html": html,
-        })
-        logger.info("Confirmation email sent to %s for booking %s", booking.email, booking.reference)
+            "attachments": [
+                {
+                    "filename": "qr-code.png",
+                    "content": qr_b64,
+                    "content_type": "image/png",
+                    "content_id": "qr-code",
+                }
+            ],
+        }
+
+        email = resend.Emails.send(params)
+        logger.info("Confirmation email sent id=%s to=%s booking=%s", email["id"], booking.email, booking.reference)
     except Exception:
         logger.exception("Failed to send confirmation email for booking %s", booking.reference)
 
 
 def _generate_qr_code(booking) -> str:
-    qr_data = f"https://azuratravels.live/booking/{booking.reference}"
-    return _generate_qr_base64(qr_data)
+    return _generate_qr_base64(f"https://azuratravels.live/booking/{booking.reference}")

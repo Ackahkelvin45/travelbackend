@@ -207,13 +207,16 @@ class VerifyPaymentView(APIView):
             booking = payment.booking
             booking.status = Booking.Status.CONFIRMED
             booking.save(update_fields=["status", "updated_at"])
-            send_booking_confirmation(booking, payment)
         elif paystack_status == "failed":
             payment.status = Payment.Status.FAILED
         elif paystack_status == "abandoned":
             payment.status = Payment.Status.ABANDONED
 
         payment.save()
+
+        if paystack_status == "success":
+            send_booking_confirmation(booking, payment)
+
         return self._build_response(payment)
 
     @staticmethod
@@ -295,7 +298,7 @@ class PaystackWebhookView(APIView):
                 return Response(status=status.HTTP_200_OK)
 
             try:
-                payment = Payment.objects.select_related("booking").get(paystack_reference=reference)
+                payment = Payment.objects.select_related("booking__package").get(paystack_reference=reference)
             except Payment.DoesNotExist:
                 logger.info("Webhook: ref %s not found, skipping.", reference)
                 return Response(status=status.HTTP_200_OK)
@@ -304,10 +307,10 @@ class PaystackWebhookView(APIView):
                 payment.status = Payment.Status.SUCCESS
                 payment.gateway_response = data
                 payment.paid_at = timezone.now()
-                payment.save()
                 booking = payment.booking
                 booking.status = Booking.Status.CONFIRMED
                 booking.save(update_fields=["status", "updated_at"])
+                payment.save()
                 logger.info("Webhook confirmed ref=%s booking=%s", reference, booking.reference)
                 send_booking_confirmation(booking, payment)
 
