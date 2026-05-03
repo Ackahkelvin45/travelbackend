@@ -17,6 +17,7 @@ from bookings.models import Booking
 from .models import Payment
 from .paystack import initialize_transaction, verify_transaction, verify_webhook_signature
 from .serializers import InitializePaymentSerializer
+from .email import send_booking_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,7 @@ class VerifyPaymentView(APIView):
             booking = payment.booking
             booking.status = Booking.Status.CONFIRMED
             booking.save(update_fields=["status", "updated_at"])
+            send_booking_confirmation(booking, payment)
         elif paystack_status == "failed":
             payment.status = Payment.Status.FAILED
         elif paystack_status == "abandoned":
@@ -307,5 +309,6 @@ class PaystackWebhookView(APIView):
                 booking.status = Booking.Status.CONFIRMED
                 booking.save(update_fields=["status", "updated_at"])
                 logger.info("Webhook confirmed ref=%s booking=%s", reference, booking.reference)
+                send_booking_confirmation(booking, payment)
 
         return Response(status=status.HTTP_200_OK)
