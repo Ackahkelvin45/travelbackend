@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 import uuid
 
@@ -94,9 +96,11 @@ class TravelPackage(models.Model):
     # ── Pricing ───────────────────────────────────────────────────────────────
     # Each option has a min price; max is optional (null = exact / "from" price).
     # Shared is required — it is the entry-level / best-value option.
+    # Nullable: packages that sell through PackageOptions (hotel × occupancy)
+    # don't use the flat tier columns at all.
     price_shared = models.DecimalField(
-        max_digits=12, decimal_places=2,
-        help_text="Shared / Couples price (Best Value)",
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Shared / Couples price (Best Value). Leave empty for option-based packages.",
     )
     price_private = models.DecimalField(
         max_digits=12, decimal_places=2, null=True, blank=True,
@@ -107,19 +111,182 @@ class TravelPackage(models.Model):
         help_text="VIP price",
     )
 
+    whats_excluded = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="What is NOT included, e.g. ['International flights', 'Travel insurance']",
+    )
+
     currency = models.CharField(max_length=3, default="GHS")
-    available_from = models.DateField(null=True, blank=True, help_text="First date this package can be booked")
-    available_to = models.DateField(null=True, blank=True, help_text="Last date this package can be booked")
+
+    # For option-based packages these are the TOUR DATES (start / end) —
+    # the single place event dates live.
+    available_from = models.DateField(null=True, blank=True, help_text="Tour start date (first bookable date for legacy packages)")
+    available_to = models.DateField(null=True, blank=True, help_text="Tour end date (last bookable date for legacy packages)")
+
+    # ── Commercial terms for option-based packages ────────────────────────────
+    early_bird_deadline = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Early-bird option prices apply to bookings created before this moment.",
+    )
+    allow_installments = models.BooleanField(
+        default=False,
+        help_text="Allow customers to secure a booking with a deposit and pay the balance later.",
+    )
+    deposit_minimum = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Minimum deposit (in package currency) that confirms an installment booking.",
+    )
+    final_payment_deadline = models.DateField(
+        null=True, blank=True,
+        help_text="Installment balances must be fully paid by this date. "
+                  "Editing this applies to ALL bookings without a per-booking override.",
+    )
+
+    # ── Charging (Paystack Ghana settles GHS only) ────────────────────────────
+    # Non-GHS packages (e.g. USD) convert every gateway charge to GHS at
+    # PAYMENT time. The booking ledger stays in the package currency — only
+    # the charge converts, and the applied rate is snapshotted per payment.
+    class FxMode(models.TextChoices):
+        LIVE = "live", "Live market rate (+ margin)"
+        MANUAL = "manual", "Manual rate only"
+
+    fx_mode = models.CharField(
+        max_length=10,
+        choices=FxMode.choices,
+        default=FxMode.LIVE,
+        help_text="Live: fetch the current market rate automatically (manual rate is the "
+                  "emergency fallback). Manual: always use the rate below.",
+    )
+    fx_margin_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("1.50"),
+        help_text="Percent added on top of the live market rate to absorb volatility "
+                  "between charge and settlement. Defaults to 1.50. Ignored in manual mode.",
+    )
+    charge_exchange_rate = models.DecimalField(
+        max_digits=12, decimal_places=4, null=True, blank=True,
+        help_text="GHS per 1 unit of the package currency (e.g. 15.5000 for USD→GHS). "
+                  "In live mode this is only the fallback when the rate feed is down.",
+    )
+
+    # ── Visa add-on (non-refundable third-party cost) ─────────────────────────
+    visa_addon_enabled = models.BooleanField(default=False)
+    visa_fee = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Visa-on-arrival fee per guest, in package currency.",
+    )
+    visa_info = models.TextField(
+        blank=True, null=True,
+        help_text="Guidance shown to guests about the visa process.",
+    )
+
+    # ── Refund policy tiers ───────────────────────────────────────────────────
+    # Ordered list of {"min_days": int, "percent": int}: the first tier whose
+    # min_days <= days-before-departure applies... tiers are matched from most
+    # to least days. Snapshotted onto each booking at creation — editing this
+    # never changes existing customers' contractual terms.
+    refund_tiers = models.JSONField(
+        default=list, blank=True,
+        help_text='Refund tiers, e.g. [{"min_days": 60, "percent": 90}, '
+                  '{"min_days": 30, "percent": 60}, {"min_days": 14, "percent": 40}, '
+                  '{"min_days": 0, "percent": 0}]',
+    )
     is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-is_featured", "price_shared"]
+        ordering = ["-is_featured", "-created_at"]
 
     def __str__(self):
         return self.title
+
+    @property
+    def has_options(self):
+        """Option-based packages use the new hotel/occupancy booking flow."""
+        return self.options.filter(is_active=True).exists()
+
+    @property
+    def early_bird_active(self):
+        from django.utils import timezone
+        return bool(self.early_bird_deadline and timezone.now() <= self.early_bird_deadline)
+
+    @property
+    def from_price(self):
+        """Cheapest current entry price — option-based or legacy tier."""
+        prices = [
+            (o.early_bird_price_per_person if self.early_bird_active and o.early_bird_price_per_person else o.price_per_person)
+            for o in self.options.all() if o.is_active
+        ]
+        if prices:
+            return min(prices)
+        return self.price_shared
+
+
+class PackageOption(models.Model):
+    """
+    A bookable variant of an option-based package: hotel × occupancy with its
+    own standard and early-bird per-person prices. Edited inline on the
+    package admin page — for the flagship tour this is 4 rows
+    (Four Points/Marriott × single/double).
+    """
+
+    class Occupancy(models.TextChoices):
+        SINGLE = "single", "Single Occupancy"
+        DOUBLE = "double", "Couple / Double Occupancy"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(
+        TravelPackage,
+        on_delete=models.CASCADE,
+        related_name="options",
+    )
+    hotel_name = models.CharField(max_length=200, help_text="e.g. 'Four Points by Sheraton'")
+    star_rating = models.PositiveSmallIntegerField(default=4, help_text="Hotel star rating, e.g. 4 or 5")
+    hotel_image = models.ImageField(upload_to="packages/hotels/", null=True, blank=True)
+    occupancy = models.CharField(max_length=10, choices=Occupancy.choices)
+    price_per_person = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        help_text="Standard price per person, in the package currency.",
+    )
+    early_bird_price_per_person = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Discounted per-person price while the package's early-bird deadline has not passed.",
+    )
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0, help_text="Display order (lower = first)")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["order", "hotel_name", "occupancy"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["package", "hotel_name", "occupancy"],
+                name="unique_option_per_hotel_occupancy",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.hotel_name} ({self.star_rating}★) — {self.get_occupancy_display()}"
+
+    @property
+    def guests_per_booking(self):
+        return 2 if self.occupancy == self.Occupancy.DOUBLE else 1
+
+    def effective_price(self, at=None):
+        """(per-person price, early_bird_applied) at the given moment."""
+        from django.utils import timezone
+        at = at or timezone.now()
+        early_bird_ok = (
+            self.early_bird_price_per_person is not None
+            and self.package.early_bird_deadline is not None
+            and at <= self.package.early_bird_deadline
+        )
+        if early_bird_ok:
+            return self.early_bird_price_per_person, True
+        return self.price_per_person, False
 
 
 class PackageImage(models.Model):
@@ -192,3 +359,36 @@ class Itinerary(models.Model):
 
     def __str__(self):
         return f"{self.package.title} — Day {self.day}: {self.title}"
+
+
+class TripUpdate(models.Model):
+    """
+    An announcement for booked guests (schedule changes, travel info…),
+    surfaced on the customer dashboard. Publishing is explicit — drafts are
+    invisible to the API.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(
+        TravelPackage,
+        on_delete=models.CASCADE,
+        related_name="trip_updates",
+    )
+    title = models.CharField(max_length=200)
+    body = models.TextField()
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-published_at", "-created_at"]
+
+    def __str__(self):
+        return f"{self.package.title}: {self.title}"
+
+    def save(self, *args, **kwargs):
+        if self.is_published and self.published_at is None:
+            from django.utils import timezone
+            self.published_at = timezone.now()
+        super().save(*args, **kwargs)

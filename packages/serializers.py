@@ -8,6 +8,7 @@ from .models import (
     PackageFAQ,
     Destination,
     DestinationImage,
+    PackageOption,
 )
 
 
@@ -128,6 +129,38 @@ class ItinerarySerializer(serializers.ModelSerializer):
         ]
 
 
+class PackageOptionSerializer(serializers.ModelSerializer):
+    """A bookable hotel × occupancy variant with its current effective price."""
+
+    occupancy_display = serializers.CharField(source="get_occupancy_display", read_only=True)
+    guests_per_booking = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = PackageOption
+        fields = [
+            "id",
+            "hotel_name",
+            "star_rating",
+            "hotel_image",
+            "occupancy",
+            "occupancy_display",
+            "guests_per_booking",
+            "price_per_person",
+            "early_bird_price_per_person",
+            "is_active",
+            "order",
+        ]
+        read_only_fields = ["id"]
+
+
+class TripUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import TripUpdate
+        model = TripUpdate
+        fields = ["id", "title", "body", "published_at"]
+        read_only_fields = fields
+
+
 class TravelPackageListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list views — includes cover image and rating summary."""
     category_display = serializers.CharField(source="get_category_display", read_only=True)
@@ -159,7 +192,12 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
             "cover_image",
             "avg_rating",
             "review_count",
+            "has_options",
+            "from_price",
         ]
+
+    has_options = serializers.BooleanField(read_only=True)
+    from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
 
     def get_cover_image(self, obj):
         cover = obj.images.filter(is_cover=True).first() or obj.images.first()
@@ -199,8 +237,12 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
     images = PackageImageSerializer(many=True, read_only=True)
     itineraries = ItinerarySerializer(many=True, read_only=True)
     faqs = PackageFAQSerializer(many=True, read_only=True)
+    options = PackageOptionSerializer(many=True, read_only=True)
     avg_rating = serializers.SerializerMethodField()
     review_count = serializers.SerializerMethodField()
+    has_options = serializers.BooleanField(read_only=True)
+    from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    early_bird_active = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = TravelPackage
@@ -213,6 +255,7 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "description",
             "highlights",
             "whats_included",
+            "whats_excluded",
             "destination",
             "destinations",
             "destination_ids",
@@ -221,9 +264,21 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "price_shared",
             "price_private",
             "price_vip",
+            "from_price",
             "currency",
             "available_from",
             "available_to",
+            "has_options",
+            "options",
+            "early_bird_deadline",
+            "early_bird_active",
+            "allow_installments",
+            "deposit_minimum",
+            "final_payment_deadline",
+            "visa_addon_enabled",
+            "visa_fee",
+            "visa_info",
+            "refund_tiers",
             "is_active",
             "is_featured",
             "avg_rating",

@@ -31,6 +31,43 @@ from .serializers import (
 )
 
 
+class PackagePricingView(APIView):
+    """
+    GET /api/packages/{id}/pricing/
+
+    The full pricing matrix for an option-based package: every hotel/occupancy
+    option priced at standard and early-bird rates, visa fee, installment
+    terms, deadlines and the server clock. The booking UI renders exclusively
+    from this — selection changes are pure lookups, and countdowns are driven
+    by server_now, not the browser clock.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, id):
+        from bookings.pricing import build_pricing_matrix
+
+        try:
+            package = TravelPackage.objects.prefetch_related("options").get(id=id, is_active=True)
+        except TravelPackage.DoesNotExist:
+            return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(build_pricing_matrix(package), status=status.HTTP_200_OK)
+
+
+class TripUpdatesView(APIView):
+    """GET /api/packages/{id}/updates/ — published trip announcements."""
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, id):
+        from .models import TripUpdate
+        from .serializers import TripUpdateSerializer
+
+        updates = TripUpdate.objects.filter(package_id=id, is_published=True)
+        return Response(TripUpdateSerializer(updates, many=True).data)
+
+
 class IsAdminOrReadOnly(permissions.BasePermission):
     """Allow anyone to read; only admins can write."""
     def has_permission(self, request, view):

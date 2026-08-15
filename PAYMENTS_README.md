@@ -1,340 +1,134 @@
-# 💳 Payment Integration Guide
+# 💳 Booking & Payments Integration Guide
 
-Full guide for integrating the Paystack-powered booking and payment API into your Next.js frontend.
-
----
-
-## API Base URL
-
-```
-http://localhost:8000/api          # local dev
-https://yourdomain.com/api         # production
-```
-
+The API surface for the Azura booking + installment-payment platform.
 Interactive docs: `GET /api/docs/` (Swagger UI) · `GET /api/redoc/`
 
----
+Two booking flows coexist:
 
-## Full Payment Flow
+| Flow | Used by | Create endpoint |
+|---|---|---|
+| **Option-based** (flagship tour: hotel × occupancy, early bird, visa, installments) | packages that have `PackageOption` rows | `POST /api/bookings/checkout/` |
+| **Legacy tier** (old catalog: shared/private/vip) | packages without options | `POST /api/bookings/` |
 
-```
-Step 1  POST /api/bookings/                  → Create booking (PENDING)
-Step 2  POST /api/payments/initialize/       → Get Paystack checkout URL
-Step 3  Redirect user → authorization_url   → User pays on Paystack
-Step 4  Paystack redirects → your callback  → URL contains ?reference=AZT-PAY-...
-Step 5  GET  /api/payments/verify/<ref>/     → Confirm payment + booking
-Step 6  GET  /api/bookings/<reference>/      → Poll full status (optional)
-```
+`package.has_options` on the package detail response tells the frontend which
+flow to render.
 
 ---
 
-## Step 1 — Create a Booking
+## Option-based flow (flagship)
 
-**`POST /api/bookings/`**
+```
+Step 1  GET  /api/packages/<id>/pricing/     → full pricing matrix (see below)
+Step 2  GET  /api/bookings/policies/         → current policy documents to accept
+Step 3  POST /api/bookings/checkout/         → create booking (snapshot + acceptances)
+Step 4  POST /api/payments/initialize/       → fresh Paystack attempt (GHS charge)
+Step 5  redirect → authorization_url         → customer pays on Paystack
+Step 6  GET  /api/payments/verify/<ref>/     → ONE gateway-backed verify on return
+Step 7  GET  /api/payments/status/<ref>/     → DB-only polling (webhook is truth)
+```
 
-No auth token required. If a JWT `Authorization: Bearer <token>` header is present, the booking is linked to the user's account automatically.
+### 1. Pricing matrix — `GET /api/packages/<id>/pricing/`
 
-### Request body
+Everything the booking UI needs in ONE response — the frontend does lookups,
+never money math:
+
+- `options[]` — each hotel/occupancy with `standard_*`, `early_bird_*`,
+  `effective_*` prices and `saving_total`
+- `visa` — `enabled`, `fee_per_guest`, `info` (non-refundable)
+- `installments` — `enabled`, `deposit_minimum`, `final_payment_deadline`
+- `early_bird` — `active`, `deadline`
+- `charge` — `currency` ("GHS") + `exchange_rate` used at charge time for
+  non-GHS packages (display "Charged as GHS X")
+- `server_now` — drive countdowns from this, not the browser clock
+
+### 2. Checkout — `POST /api/bookings/checkout/`
 
 ```json
 {
-  "package_id":       "d9f1e2b3-4c5a-6789-abcd-ef1234567890",
-  "price_tier":       "shared",
-  "first_name":       "Kwame",
-  "last_name":        "Mensah",
-  "email":            "kwame@example.com",
-  "phone":            "+233201234567",
-  "country":          "Ghana",
-  "num_guests":       2,
-  "travel_date":      "2025-07-15",
-  "special_requests": "Vegetarian meals please"
+  "option_id": "<uuid>", "visa": true, "payment_plan": "installment",
+  "first_name": "...", "last_name": "...", "email": "...",
+  "accepted_policies": ["terms", "installment", "refund", "privacy"],
+  "expected_total": "4700.00"
 }
 ```
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `package_id` | UUID string | ✅ | From the packages list endpoint |
-| `price_tier` | `"shared"` \| `"private"` \| `"vip"` | ✅ | Price resolved server-side |
-| `first_name` | string | ✅ | |
-| `last_name` | string | ✅ | |
-| `email` | string | ✅ | Used by Paystack for receipt |
-| `phone` | string | | |
-| `country` | string | | |
-| `num_guests` | integer | | Default `1`. Total = unit_price × num_guests |
-| `travel_date` | `YYYY-MM-DD` | | Optional. If omitted, uses package's available_from date or today. |
-| `special_requests` | string | | |
+- Prices recomputed server-side; early-bird eligibility locks at creation.
+- Every currently-published policy type must appear in `accepted_policies`;
+  acceptances are recorded transactionally (`400` lists `missing_policies`).
+- **`409`** = the price changed (early bird expired mid-session); response
+  contains a fresh `quote` — re-confirm with the customer, never silently
+  charge the new total.
+- Response includes `amount_due_today` (deposit for installment plans).
+- Unpaid bookings expire after `PENDING_BOOKING_TTL_HOURS` (24h default).
 
-### Response `201`
+### 3. Initialize — `POST /api/payments/initialize/`
 
 ```json
-{
-  "id":           "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "reference":    "AZT-AB12CD34",
-  "total_amount": "1200.00",
-  "currency":     "GHS",
-  "status":       "pending",
-  "message":      "Booking created. Proceed to payment."
-}
+{ "booking_id": "<uuid>", "intent": "deposit" }
 ```
 
-> **Save `id` (UUID) and `reference`** — you need both in the next steps.
+- `intent`: `balance` (default — everything outstanding) · `deposit`
+  (outstanding deposit portion) · `custom` (+`amount`, server-clamped to the
+  balance). Amounts are ALWAYS server-computed.
+- Every call mints a **fresh single-use reference** — safe to retry after a
+  declined card. Prior pending attempts are auto-abandoned.
+- **Currency**: the ledger is the booking currency (USD); the gateway charge
+  is GHS at the live FX rate (+margin), returned as `charged_amount` /
+  `charged_currency` / `exchange_rate`.
+- `503` = no trustworthy FX rate available (alerts ops automatically).
 
-### Next.js example
+### 4. Verify / status / webhook
 
-```typescript
-// lib/api/bookings.ts
-export async function createBooking(data: BookingPayload) {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/bookings/`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw await res.json();
-  return res.json(); // { id, reference, total_amount, currency, status }
-}
-```
+- `GET /api/payments/verify/<ref>/` — call ONCE on the Paystack return
+  redirect (one gateway call).
+- `GET /api/payments/status/<ref>/` — poll this afterwards (DB-only, cheap);
+  returns payment + booking status, `amount_paid`, `balance`.
+- `POST /api/payments/webhook/` — Paystack server-to-server, HMAC-SHA512
+  verified. Handles `charge.success` / `charge.failed`. Idempotent; verifies
+  gateway amount+currency against the attempt before crediting; returns 5xx
+  on processing errors so Paystack retries.
+- A booking is **confirmed** when the deposit (installment plan) or full
+  amount is received. Payments are an append-only ledger; booking
+  `amount_paid`/`balance` are cached projections (audit:
+  `manage.py reconcile_bookings`).
 
 ---
 
-## Step 2 — Initialize Payment
+## Accounts & dashboard
 
-**`POST /api/payments/initialize/`**
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /api/auth/register/` · `POST /api/auth/token/` · `POST /api/auth/token/refresh/` · `GET /api/auth/me/` | — / JWT | simplejwt auth (`{access, refresh}`) |
+| `GET /api/bookings/mine/` | JWT | Full booking detail incl. payment ledger, balance, deadline |
+| `POST /api/bookings/claim/` `{token}` | JWT | Attach a guest booking via the signed link from the confirmation email |
+| `GET /api/bookings/<reference>/` | none (throttled) | Status by reference (legacy surface) |
+| `GET /api/packages/<id>/updates/` | none | Published trip announcements |
+| `GET /api/bookings/policies/` | none | Current policy documents |
 
-### Request body
+## Refunds (operator workflow)
 
-```json
-{ "booking_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890" }
-```
+1. Booking admin → **"Cancel booking + compute refund"** — computes from the
+   booking's SNAPSHOTTED tiers (days before departure × amount paid, minus
+   non-refundable components e.g. visa), decomposed into per-payment legs.
+2. Each pending Refund states the exact **GHS amount to refund on which
+   Paystack transaction** (`Execute on gateway` column).
+3. Execute in the Paystack dashboard / bank, then Refund admin →
+   **"Mark processed"** (updates cached totals; double-refund guarded).
 
-### Response `200`
+## Ops
 
-```json
-{
-  "authorization_url": "https://checkout.paystack.com/3ni8kdavz62431k",
-  "access_code":       "3ni8kdavz62431k",
-  "reference":         "AZT-PAY-AZT-AB12CD34",
-  "amount":            "1200.00",
-  "currency":          "GHS",
-  "booking_reference": "AZT-AB12CD34"
-}
-```
-
-> **Save `reference`** — you need it in Step 4 to verify the payment.
-
----
-
-## Step 3a — Redirect Flow (simplest)
-
-Redirect the user's browser to `authorization_url`. Paystack handles the payment page and redirects them back to your callback URL with:
-
-```
-https://yoursite.com/payment/callback?reference=AZT-PAY-AZT-AB12CD34&trxref=AZT-PAY-AZT-AB12CD34
-```
-
-### Next.js callback page
-
-```typescript
-// app/payment/callback/page.tsx
-"use client";
-import { useEffect, useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
-
-export default function PaymentCallback() {
-  const searchParams = useSearchParams();
-  const router = useRouter();
-  const reference = searchParams.get("reference");
-  const [result, setResult] = useState<any>(null);
-
-  useEffect(() => {
-    if (!reference) return;
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/verify/${reference}/`)
-      .then((r) => r.json())
-      .then((data) => {
-        setResult(data);
-        if (data.status === "success") {
-          router.push(`/booking/${data.booking_reference}/confirmed`);
-        }
-      });
-  }, [reference]);
-
-  if (!result) return <p>Verifying payment…</p>;
-  return <p>Payment {result.status}</p>;
-}
-```
-
----
-
-## Step 3b — Popup Flow (inline)
-
-Install the Paystack JS package:
-```bash
-npm install @paystack/inline-js
-```
-
-```typescript
-"use client";
-import PaystackPop from "@paystack/inline-js";
-
-function PayButton({ bookingId }: { bookingId: string }) {
-  const handlePay = async () => {
-    // 1. Initialize on backend
-    const res = await fetch("/api/payments/initialize/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ booking_id: bookingId }),
-    });
-    const { access_code, reference } = await res.json();
-
-    // 2. Open popup
-    const popup = new PaystackPop();
-    popup.resumeTransaction(access_code, {
-      onSuccess: async () => {
-        // 3. Verify on backend — NEVER trust client-side alone
-        const verify = await fetch(`/api/payments/verify/${reference}/`);
-        const data = await verify.json();
-        if (data.status === "success") {
-          window.location.href = `/booking/${data.booking_reference}/confirmed`;
-        }
-      },
-      onCancel: () => console.log("Payment cancelled"),
-    });
-  };
-
-  return <button onClick={handlePay}>Pay Now</button>;
-}
-```
-
----
-
-## Step 4 — Verify Payment
-
-**`GET /api/payments/verify/<reference>/`**
-
-### Response `200`
-
-```json
-{
-  "status":            "success",
-  "booking_reference": "AZT-AB12CD34",
-  "booking_status":    "confirmed",
-  "amount":            "1200.00",
-  "currency":          "GHS",
-  "paid_at":           "2025-07-02T16:00:00Z"
-}
-```
-
-| `status` value | Meaning |
-|---|---|
-| `success` | ✅ Payment confirmed — show success screen |
-| `failed` | ❌ Payment failed — ask user to retry |
-| `abandoned` | ⚠️ User closed Paystack — offer retry |
-| `pending` | ⏳ Not yet paid |
-
----
-
-## Step 5 — Poll Booking Status
-
-**`GET /api/bookings/<reference>/`**
-
-Use the `reference` from Step 1 (`AZT-AB12CD34`, not the payment reference).
-
-### Response `200`
-
-```json
-{
-  "id":               "uuid",
-  "reference":        "AZT-AB12CD34",
-  "first_name":       "Kwame",
-  "last_name":        "Mensah",
-  "email":            "kwame@example.com",
-  "package_title":    "Accra City & Culture Tour",
-  "num_guests":       2,
-  "travel_date":      "2025-07-15",
-  "unit_price":       "600.00",
-  "total_amount":     "1200.00",
-  "currency":         "GHS",
-  "status":           "confirmed",
-  "payment_status":   "success",
-  "payment_reference":"AZT-PAY-AZT-AB12CD34",
-  "created_at":       "2025-07-01T12:00:00Z"
-}
-```
-
-> Pass `reference` as `bookingReference` to the `<LeaveReply />` review component.
-
----
-
-## Webhook Setup (required for production)
-
-Paystack sends a `charge.success` event to your server after every payment. This is a safety net — if the user closes the browser before Step 4 runs, the booking still gets confirmed.
-
-1. In your **Paystack Dashboard → Settings → API Keys & Webhooks**, add:
-   ```
-   https://yourdomain.com/api/payments/webhook/
-   ```
-2. Every event is validated with HMAC-SHA512 using `PAYSTACK_SECRET_KEY`.
-
-> ⚠️ Do **not** call this endpoint from the frontend.
-
----
-
-## Environment Variables
-
-```env
-# .env.local (Next.js frontend)
-NEXT_PUBLIC_API_URL=http://localhost:8000
-
-# .env (Django backend)
-PAYSTACK_SECRET_KEY=sk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
----
-
-## Error Handling
-
-All error responses follow this shape:
-
-```json
-{ "detail": "Human-readable error message." }
-```
-
-| HTTP Code | Meaning |
-|---|---|
-| `400` | Bad request / validation error |
-| `404` | Booking or payment not found |
-| `502` | Paystack gateway unreachable — retry |
-
----
-
-## Full RTK Query Example (Redux Toolkit)
-
-```typescript
-// lib/api/paymentApi.ts
-import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-
-export const paymentApi = createApi({
-  reducerPath: "paymentApi",
-  baseQuery: fetchBaseQuery({ baseUrl: process.env.NEXT_PUBLIC_API_URL }),
-  endpoints: (builder) => ({
-    createBooking: builder.mutation({
-      query: (body) => ({ url: "/api/bookings/", method: "POST", body }),
-    }),
-    initializePayment: builder.mutation({
-      query: (body) => ({ url: "/api/payments/initialize/", method: "POST", body }),
-    }),
-    verifyPayment: builder.query({
-      query: (reference: string) => `/api/payments/verify/${reference}/`,
-    }),
-    getBookingStatus: builder.query({
-      query: (reference: string) => `/api/bookings/${reference}/`,
-    }),
-  }),
-});
-
-export const {
-  useCreateBookingMutation,
-  useInitializePaymentMutation,
-  useVerifyPaymentQuery,
-  useGetBookingStatusQuery,
-} = paymentApi;
-```
+- **Scheduling is self-managing — no crontab required.** An in-app scheduler
+  (Admin → Payments → *Scheduled Tasks*) runs `refresh_fx_rates` hourly and
+  `send_payment_reminders` daily, triggered by normal traffic, claimed under a
+  row lock so multiple workers never double-run. Tasks can be paused there and
+  show their last run/result. `entrypoint.sh` also seeds FX rates at every
+  container start. (Running the commands manually or via a real cron remains
+  safe — everything is idempotent.)
+- **Alert email**: set in Admin → Payments → *Operational Settings* (falls
+  back to the `ADMIN_ALERT_EMAIL` env var). Receives gateway mismatches,
+  overpayments and FX-outage alerts.
+- **Secrets stay in env** (`.env.prod`): Paystack keys, Resend key — never in
+  the database. See `.env.prod.example` for FX tuning knobs.
+- **Offline payments** (USD bank wires): Booking admin → add a Payment inline
+  row (method = bank transfer) — routed through the same service as gateway
+  payments (same confirmation, receipts, totals).

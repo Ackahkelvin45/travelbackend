@@ -6,6 +6,8 @@ from .views import (
     DestinationDetailView,
     DestinationImageListCreateView,
     DestinationImageDetailView,
+    PackagePricingView,
+    TripUpdatesView,
     TravelPackageListCreateView,
     TravelPackageDetailView,
     TrendingPackagesView,
@@ -33,6 +35,8 @@ urlpatterns = [
     path("trending/", TrendingPackagesView.as_view(), name="package-trending"),
     path("past/", PastPackagesView.as_view(), name="package-past"),
     path("<uuid:id>/", TravelPackageDetailView.as_view(), name="package-detail"),
+    path("<uuid:id>/pricing/", PackagePricingView.as_view(), name="package-pricing"),
+    path("<uuid:id>/updates/", TripUpdatesView.as_view(), name="package-updates"),
 
     # Itineraries (nested under package)
     path("<uuid:package_id>/itineraries/", ItineraryListCreateView.as_view(), name="itinerary-list-create"),

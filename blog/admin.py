@@ -2,11 +2,23 @@ import json
 
 from django import forms
 from django.contrib import admin
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from unfold.admin import ModelAdmin, TabularInline
+from unfold.contrib.filters.admin import ChoicesDropdownFilter
+from unfold.decorators import display
 
+from config.unfold_theme import BLOG_STATUS_BADGE
 from .models import Blog, BlogImage, PendingBlog
+
+# Tailwind classes from unfold's stylesheet — theme- and dark-mode-aware,
+# mirroring unfold/helpers/label.html's neutral badge.
+TAG_PILL_CLASSES = (
+    "inline-block font-semibold rounded-default text-[11px] uppercase "
+    "whitespace-nowrap h-5 leading-5 px-1.5 mr-1 mb-1 "
+    "bg-base-500/8 text-base-700 dark:bg-base-500/20 dark:text-base-200"
+)
+IMAGE_PREVIEW_CLASSES = "rounded-default border border-base-200 dark:border-base-800"
 
 
 # ---------------------------------------------------------------------------
@@ -131,16 +143,15 @@ class BlogImageInline(TabularInline):
     fields = ["image_preview", "image", "caption", "is_cover", "order"]
     readonly_fields = ["image_preview"]
 
+    @admin.display(description="Preview")
     def image_preview(self, obj):
         if obj.image:
             return format_html(
-                '<img src="{}" style="max-height:90px; border-radius:6px; '
-                'box-shadow:0 1px 4px rgba(0,0,0,.25);" />',
+                '<img src="{}" class="max-h-[90px] {}" />',
                 obj.image.url,
+                IMAGE_PREVIEW_CLASSES,
             )
         return "—"
-
-    image_preview.short_description = "Preview"
 
 
 # ---------------------------------------------------------------------------
@@ -156,11 +167,11 @@ class BlogAdmin(ModelAdmin):
         "title",
         "author_display",
         "category",
-        "status",
+        "status_badge",
         "published_at",
         "created_at",
     ]
-    list_filter = ["status", "category"]
+    list_filter = [("status", ChoicesDropdownFilter), ("category", ChoicesDropdownFilter)]
     search_fields = [
         "title",
         "excerpt",
@@ -209,11 +220,15 @@ class BlogAdmin(ModelAdmin):
         name = obj.author_full_name
         return name if name != "Unknown" else (str(obj.author) if obj.author else "—")
 
+    @display(description="Status", ordering="status", label=BLOG_STATUS_BADGE)
+    def status_badge(self, obj):
+        return obj.status, obj.get_status_display()
+
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
-    @admin.action(description="✅  Approve selected blogs (publish immediately)")
+    @admin.action(description="Approve selected blogs (publish immediately)")
     def approve_selected(self, request, queryset):
         updated = queryset.filter(status=Blog.Status.DRAFT).update(
             status=Blog.Status.PUBLISHED
@@ -234,16 +249,15 @@ class PendingBlogImageInline(TabularInline):
     fields = ["image_preview_large", "caption", "is_cover"]
     readonly_fields = ["image_preview_large", "caption", "is_cover"]
 
+    @admin.display(description="Image")
     def image_preview_large(self, obj):
         if obj.image:
             return format_html(
-                '<img src="{}" style="max-width:320px; border-radius:8px; '
-                'box-shadow:0 2px 8px rgba(0,0,0,.3);" />',
+                '<img src="{}" class="max-w-[320px] {}" />',
                 obj.image.url,
+                IMAGE_PREVIEW_CLASSES,
             )
         return "No image"
-
-    image_preview_large.short_description = "Image"
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -272,7 +286,7 @@ class PendingBlogAdmin(ModelAdmin):
         "cover_thumbnail",
         "created_at",
     ]
-    list_filter = ["category"]
+    list_filter = [("category", ChoicesDropdownFilter)]
     search_fields = ["title", "excerpt", "author_first_name", "author_last_name"]
     ordering = ["-created_at"]
 
@@ -338,23 +352,23 @@ class PendingBlogAdmin(ModelAdmin):
         cover = obj.images.filter(is_cover=True).first() or obj.images.first()
         if cover and cover.image:
             return format_html(
-                '<img src="{}" style="height:48px; border-radius:4px; '
-                'box-shadow:0 1px 3px rgba(0,0,0,.2);" />',
+                '<img src="{}" class="h-12 {}" />',
                 cover.image.url,
+                IMAGE_PREVIEW_CLASSES,
             )
         return "—"
 
     @admin.display(description="Excerpt")
     def excerpt_display(self, obj):
         return format_html(
-            '<p style="font-size:1rem; line-height:1.6; max-width:720px;">{}</p>',
+            '<p class="text-base leading-relaxed max-w-3xl">{}</p>',
             obj.excerpt,
         )
 
     @admin.display(description="Body")
     def body_display(self, obj):
         return format_html(
-            '<div style="font-size:.95rem; line-height:1.7; max-width:720px;">{}</div>',
+            '<div class="text-sm leading-7 max-w-3xl">{}</div>',
             mark_safe(obj.body),
         )
 
@@ -362,19 +376,15 @@ class PendingBlogAdmin(ModelAdmin):
     def tags_display(self, obj):
         if not obj.tags:
             return "—"
-        badges = "".join(
-            f'<span style="display:inline-block; margin:2px 4px; padding:2px 10px; '
-            f'border-radius:999px; background:#e0f2fe; color:#0369a1; font-size:.8rem;">'
-            f"{tag}</span>"
-            for tag in obj.tags
+        return format_html_join(
+            "", '<span class="{}">{}</span>', ((TAG_PILL_CLASSES, tag) for tag in obj.tags)
         )
-        return mark_safe(badges)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
-    @admin.action(description="✅  Approve selected blogs (publish immediately)")
+    @admin.action(description="Approve selected blogs (publish immediately)")
     def approve_selected(self, request, queryset):
         from django.utils import timezone
 

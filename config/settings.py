@@ -12,9 +12,13 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from datetime import timedelta
+from django.templatetags.static import static
 from django.utils.translation import gettext_lazy as _
 import os
+import sys
 from dotenv import load_dotenv
+
+from config.unfold_theme import AURORA_GREY, GOLD
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -89,27 +93,34 @@ UNFOLD = {
     "SITE_SYMBOL": "travel_explore",
     "SHOW_HISTORY": True,
     "SHOW_VIEW_ON_SITE": True,
+    "BORDER_RADIUS": "8px",
+    # Brand logo shared with the customer frontend (travelfrontend/assets/logo)
+    "SITE_LOGO": {
+        "light": lambda request: static("admin/img/logo.png"),
+        "dark": lambda request: static("admin/img/logodark.png"),
+    },
+    "LOGIN": {
+        "image": lambda request: static("admin/img/login-hero.jpg"),
+    },
+    "STYLES": [
+        lambda request: static("admin/admin-aurora.css"),
+    ],
+    "SCRIPTS": [
+        lambda request: static("admin/admin-aurora.js"),
+    ],
     "COLORS": {
+        # Neutral surfaces/borders/text derive from the Aurora grey scale;
+        # brand gold stays the primary accent. Values must be full CSS colors
+        # (Unfold emits them verbatim into --color-* custom properties).
+        "base": AURORA_GREY,
+        "primary": GOLD,
         "font": {
-            "subtle-light": "107 114 128",
-            "subtle-dark": "156 163 175",
-            "default-light": "75 85 99",
-            "default-dark": "209 213 219",
-            "important-light": "17 24 39",
-            "important-dark": "243 244 246",
-        },
-        "primary": {
-            "50": "253 248 238",
-            "100": "249 239 209",
-            "200": "242 220 163",
-            "300": "231 195 108",
-            "400": "214 168 79",
-            "500": "189 143 58",
-            "600": "161 117 41",
-            "700": "128 91 30",
-            "800": "99 70 21",
-            "900": "73 52 15",
-            "950": "47 33 9",
+            "subtle-light": "var(--color-base-400)",
+            "subtle-dark": "var(--color-base-400)",
+            "default-light": "var(--color-base-600)",
+            "default-dark": "var(--color-base-300)",
+            "important-light": "var(--color-base-800)",
+            "important-dark": "var(--color-base-100)",
         },
     },
     "SIDEBAR": {
@@ -165,6 +176,12 @@ UNFOLD = {
                         "link": "/admin/packages/travelpackage/",
                         "permission": lambda request: request.user.is_staff,
                     },
+                    {
+                        "title": _("Trip Updates"),
+                        "icon": "campaign",
+                        "link": "/admin/packages/tripupdate/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
                 ],
             },
             {
@@ -182,6 +199,36 @@ UNFOLD = {
                         "title": _("Payments"),
                         "icon": "payments",
                         "link": "/admin/payments/payment/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
+                    {
+                        "title": _("Refunds"),
+                        "icon": "currency_exchange",
+                        "link": "/admin/payments/refund/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
+                    {
+                        "title": _("Exchange Rates"),
+                        "icon": "trending_up",
+                        "link": "/admin/payments/fxrate/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
+                    {
+                        "title": _("Scheduled Tasks"),
+                        "icon": "schedule",
+                        "link": "/admin/payments/scheduledtask/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
+                    {
+                        "title": _("Operational Settings"),
+                        "icon": "settings",
+                        "link": "/admin/payments/opsconfig/",
+                        "permission": lambda request: request.user.is_staff,
+                    },
+                    {
+                        "title": _("Policy Documents"),
+                        "icon": "gavel",
+                        "link": "/admin/bookings/policydocument/",
                         "permission": lambda request: request.user.is_staff,
                     },
                 ],
@@ -236,6 +283,13 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'config.pagination.StandardPagination',
     'PAGE_SIZE': 10,
+    'DEFAULT_THROTTLE_RATES': {
+        # Scoped throttles on the payment surface: initialize/verify are
+        # human-triggered; status is a poll target and gets more headroom.
+        'payments': '30/min',
+        'payment-status': '120/min',
+        'booking-status': '60/min',
+    },
 }
 
 SIMPLE_JWT = {
@@ -255,7 +309,13 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # In-app scheduler (FX refresh, payment reminders) — replaces host crontab.
+    "payments.autotasks.AutoTaskMiddleware",
 ]
+
+# The in-app scheduler never runs inside the test suite (tasks reach the
+# network); management commands can still be invoked explicitly in tests.
+AUTOTASKS_ENABLED = "test" not in sys.argv
 
 # Trust the X-Forwarded-Proto header from the proxy (Nginx)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -346,6 +406,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "static/"
+# Project-level static assets (admin theme CSS lives here)
+STATICFILES_DIRS = [BASE_DIR / "static"]
 # collectstatic writes here; Nginx/WhiteNoise serves from here
 STATIC_ROOT = BASE_DIR / "staticfiles"
 # WhiteNoise: serve compressed, cache-busted static files
@@ -360,6 +422,33 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
+
+# ── Frontend ─────────────────────────────────────────────────────────────────
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://azuratravels.live")
+
+# ── Bookings ─────────────────────────────────────────────────────────────────
+# Unpaid option-based bookings expire this many hours after creation (lazy —
+# enforced at payment-initialize, no cron required). Also bounds how long a
+# locked-in early-bird price can sit unpaid.
+PENDING_BOOKING_TTL_HOURS = int(os.environ.get("PENDING_BOOKING_TTL_HOURS", "24"))
+
+# ── FX (live exchange rates for GHS gateway charges) ─────────────────────────
+# How long a fetched market rate is reused before refreshing (seconds).
+FX_CACHE_SECONDS = int(os.environ.get("FX_CACHE_SECONDS", "3600"))
+# How old a stored rate may be and still serve as a fallback when the
+# provider is unreachable (hours). Older than this -> manual rate or refuse.
+FX_MAX_STALENESS_HOURS = int(os.environ.get("FX_MAX_STALENESS_HOURS", "24"))
+# Reject a fetched rate deviating more than this % from the last stored rate
+# (guards against corrupted/hijacked feeds ever setting prices).
+FX_SANITY_MAX_DEVIATION_PERCENT = int(os.environ.get("FX_SANITY_MAX_DEVIATION_PERCENT", "20"))
+# Absolute plausibility band per pair — protects even the FIRST fetch on a
+# fresh database (the relative check above needs history). A rate outside the
+# band is rejected no matter what any provider claims. Review yearly.
+FX_HARD_BOUNDS = {
+    "USD:GHS": ("5", "60"),
+}
+# Email that receives critical payment/FX alerts (empty = log only).
+ADMIN_ALERT_EMAIL = os.environ.get("ADMIN_ALERT_EMAIL", "")
 
 # ── Paystack ─────────────────────────────────────────────────────────────────
 # Set PAYSTACK_SECRET_KEY in your .env file or shell environment.

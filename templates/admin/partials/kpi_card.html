@@ -1,0 +1,10 @@
+{# One KPI stat tile. Context: `card` = {icon, color, value, label, sub?, compact_value?} — built in config/dashboard.py from config/unfold_theme.py colors. #}
+<div class="dash-card p-6 flex items-center gap-4">
+  <span class="material-symbols-outlined text-4xl" style="color:{{ card.color }};">{{ card.icon }}</span>
+  <div>
+    <div class="{% if card.compact_value %}text-xl{% else %}text-3xl{% endif %} font-bold text-important">{{ card.value }}</div>
+    <div class="text-sm text-subtle mt-0.5">
+      {{ card.label }}{% if card.sub %} <span class="font-medium">· {{ card.sub }}</span>{% endif %}
+    </div>
+  </div>
+</div>

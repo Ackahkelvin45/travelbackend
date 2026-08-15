@@ -1,0 +1,13 @@
+{% load i18n static %}
+{# Overrides unfold's login/password-reset header: brand logo + Aurora title. #}
+<div class="border-b border-base-200 mb-8 pb-6 dark:border-base-800">
+    <img src="{% static 'admin/img/logo.png' %}" alt="Azura Travels" class="h-14 mb-4 dark:hidden" />
+    <img src="{% static 'admin/img/logodark.png' %}" alt="Azura Travels" class="h-14 mb-4 hidden dark:block" />
+
+    <h1 class="font-semibold">
+        {% if subtitle %}
+            <span class="block text-sm text-font-subtle-light dark:text-font-subtle-dark">{{ subtitle }} </span>
+        {% endif %}
+        <span class="block font-bold text-primary-600 tracking-tight text-2xl dark:text-primary-500">{{ title }}</span>
+    </h1>
+</div>

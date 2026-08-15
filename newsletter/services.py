@@ -82,24 +82,31 @@ def send_new_package_announcement(package_id) -> None:
     html = _build_announcement_html(package)
     subject = f"New Travel Package: {package.title}"
 
+    # Send in batches of 100 (Resend batch API limit) — each recipient gets
+    # an individually-addressed email, so addresses are never exposed.
     sent_count = 0
     failed_count = 0
+    BATCH_SIZE = 100
 
-    for recipient in recipients:
-        try:
-            params: resend.Emails.SendParams = {
+    for start in range(0, len(recipients), BATCH_SIZE):
+        chunk = recipients[start : start + BATCH_SIZE]
+        batch_params = [
+            {
                 "from": settings.RESEND_FROM_EMAIL,
                 "to": [recipient],
                 "subject": subject,
                 "html": html,
             }
-            resend.Emails.send(params)
-            sent_count += 1
+            for recipient in chunk
+        ]
+        try:
+            resend.Batch.send(batch_params)
+            sent_count += len(chunk)
         except Exception as exc:
-            failed_count += 1
+            failed_count += len(chunk)
             logger.exception(
-                "Failed sending package announcement to %s for package %s: %s",
-                recipient,
+                "Failed sending package announcement batch (%s recipients) for package %s: %s",
+                len(chunk),
                 package.id,
                 str(exc),
             )
@@ -110,4 +117,3 @@ def send_new_package_announcement(package_id) -> None:
         sent_count,
         failed_count,
     )
-

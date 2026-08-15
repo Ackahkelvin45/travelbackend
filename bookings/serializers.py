@@ -112,8 +112,13 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     """
 
     package_title = serializers.CharField(source="package.title", read_only=True)
+    package_id = serializers.UUIDField(source="package.id", read_only=True)
+    payment_deadline = serializers.SerializerMethodField()
     payment_status = serializers.SerializerMethodField()
     payment_reference = serializers.SerializerMethodField()
+    balance = serializers.SerializerMethodField()
+    payment_state = serializers.SerializerMethodField()
+    payments = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -126,24 +131,101 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "phone",
             "country",
             "package_title",
+            "package_id",
             "num_guests",
             "travel_date",
             "unit_price",
             "total_amount",
+            "amount_paid",
+            "amount_refunded",
+            "balance",
+            "payment_state",
+            "payment_plan",
+            "deposit_required",
+            "payment_deadline",
+            "early_bird_applied",
+            "early_bird_discount",
+            "addons",
             "currency",
             "status",
             "payment_status",
             "payment_reference",
+            "payments",
             "created_at",
         ]
         read_only_fields = fields
 
+    # ── Latest-payment fields, kept for backwards compatibility with the
+    #    deployed frontend (which predates the multi-payment ledger). ──
+    def _latest_payment(self, obj):
+        payments = list(obj.payments.all())
+        return payments[0] if payments else None  # Payment.Meta orders -created_at
+
     def get_payment_status(self, obj):
-        if hasattr(obj, "payment"):
-            return obj.payment.status
-        return None
+        payment = self._latest_payment(obj)
+        return payment.status if payment else None
 
     def get_payment_reference(self, obj):
-        if hasattr(obj, "payment"):
-            return obj.payment.paystack_reference
-        return None
+        payment = self._latest_payment(obj)
+        return payment.paystack_reference if payment else None
+
+    def get_balance(self, obj):
+        return str(obj.balance)
+
+    def get_payment_deadline(self, obj):
+        return obj.effective_payment_deadline
+
+    def get_payment_state(self, obj):
+        """Derived label — never stored. unpaid | partially_paid | fully_paid."""
+        if obj.is_paid:
+            return "fully_paid"
+        if obj.amount_paid > 0:
+            return "partially_paid"
+        return "unpaid"
+
+    def get_payments(self, obj):
+        return [
+            {
+                "id": str(p.id),
+                "reference": p.paystack_reference,
+                "amount": str(p.amount),
+                "currency": p.currency,
+                "charged_amount": str(p.charged_amount) if p.charged_amount is not None else None,
+                "charged_currency": p.charged_currency,
+                "purpose": p.purpose,
+                "method": p.method,
+                "status": p.status,
+                "paid_at": p.paid_at,
+                "created_at": p.created_at,
+            }
+            for p in obj.payments.all()
+        ]
+
+
+class CheckoutSerializer(serializers.Serializer):
+    """
+    POST /api/bookings/checkout/ — the option-based (flagship tour) create
+    endpoint. Prices are entirely server-computed; `expected_total` exists
+    only so a stale checkout page (e.g. early bird expired mid-session) gets
+    a 409 with fresh numbers instead of a silent price change.
+    """
+
+    option_id = serializers.UUIDField()
+    visa = serializers.BooleanField(default=False)
+    payment_plan = serializers.ChoiceField(
+        choices=["full", "installment"], default="full"
+    )
+    first_name = serializers.CharField(max_length=100)
+    last_name = serializers.CharField(max_length=100)
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    country = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    special_requests = serializers.CharField(required=False, allow_blank=True)
+    accepted_policies = serializers.ListField(
+        child=serializers.CharField(), default=list,
+        help_text="Policy types the customer ticked, e.g. ['terms', 'refund'].",
+    )
+    expected_total = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False,
+        help_text="The total the customer was shown. Mismatch returns 409 with a fresh quote.",
+    )

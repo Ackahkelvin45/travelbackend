@@ -4,12 +4,19 @@ from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Booking
-from .serializers import BookingDetailSerializer, CreateBookingSerializer
+from .pricing import QuoteError, compute_quote
+from .serializers import (
+    BookingDetailSerializer,
+    CheckoutSerializer,
+    CreateBookingSerializer,
+)
+from .services import PolicyAcceptanceRequired, create_option_booking
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +138,208 @@ class CreateBookingView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class CheckoutView(APIView):
+    """Option-based booking creation (hotel × occupancy flagship flow)."""
+
+    permission_classes = [AllowAny]
+
+    @swagger_auto_schema(
+        tags=["Bookings"],
+        operation_id="booking_checkout",
+        operation_summary="Create an option-based booking (flagship flow)",
+        operation_description=(
+            "Creates a fully-snapshotted booking for a hotel/occupancy option. "
+            "All prices are computed server-side from the package's pricing matrix; "
+            "early-bird eligibility locks at creation time.\n\n"
+            "Every currently-published policy document must be listed in "
+            "`accepted_policies` — acceptances are recorded transactionally with "
+            "the booking.\n\n"
+            "**409** is returned when `expected_total` no longer matches the "
+            "server's price (e.g. early bird expired while the page was open); "
+            "the response includes a fresh quote to re-confirm with the customer."
+        ),
+        request_body=CheckoutSerializer,
+        responses={
+            201: openapi.Response("Booking created.", schema=_booking_create_response),
+            400: openapi.Response("Validation / policy acceptance error.", schema=_error_schema),
+            404: openapi.Response("Option not found.", schema=_error_schema),
+            409: openapi.Response("Price changed — re-confirm with the fresh quote."),
+        },
+    )
+    def post(self, request):
+        serializer = CheckoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        from packages.models import PackageOption
+
+        try:
+            option = PackageOption.objects.select_related("package").get(id=data["option_id"])
+        except PackageOption.DoesNotExist:
+            return Response({"detail": "Room option not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Stale-page guard: the customer confirmed a number — if it changed
+        # (early bird expired, admin repriced), never silently charge the new
+        # one. 409 + fresh quote → the UI re-confirms explicitly.
+        try:
+            quote = compute_quote(option, visa=data["visa"], payment_plan=data["payment_plan"])
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        expected_total = data.get("expected_total")
+        if expected_total is not None and expected_total != quote.total:
+            return Response(
+                {
+                    "detail": "The price has changed since this page was loaded.",
+                    "quote": quote.as_dict(),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            booking = create_option_booking(
+                option=option,
+                visa=data["visa"],
+                payment_plan=data["payment_plan"],
+                contact={
+                    "first_name": data["first_name"],
+                    "last_name": data["last_name"],
+                    "email": data["email"],
+                    "phone": data.get("phone") or None,
+                    "country": data.get("country") or None,
+                    "special_requests": data.get("special_requests") or None,
+                },
+                accepted_policy_types=data["accepted_policies"],
+                user=request.user if request.user.is_authenticated else None,
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except PolicyAcceptanceRequired as exc:
+            return Response(
+                {
+                    "detail": "All booking policies must be accepted.",
+                    "missing_policies": exc.missing_types,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            "id": str(booking.id),
+            "reference": booking.reference,
+            "total_amount": str(booking.total_amount),
+            "amount_due_today": str(
+                booking.deposit_required
+                if booking.payment_plan == Booking.PaymentPlan.INSTALLMENT
+                else booking.total_amount
+            ),
+            "deposit_required": str(booking.deposit_required) if booking.deposit_required else None,
+            "early_bird_applied": booking.early_bird_applied,
+            "currency": booking.currency,
+            "status": booking.status,
+            "message": "Booking created. Proceed to payment.",
+        }, status=status.HTTP_201_CREATED)
+
+
+class CurrentPoliciesView(APIView):
+    """GET /api/bookings/policies/ — the currently-published policy documents
+    customers must accept at checkout."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .models import PolicyDocument
+
+        docs = PolicyDocument.objects.filter(is_current=True, published_at__isnull=False)
+        return Response([
+            {
+                "type": d.type,
+                "type_display": d.get_type_display(),
+                "version": d.version,
+                "title": d.title,
+                "body": d.body,
+                "published_at": d.published_at,
+            }
+            for d in docs
+        ])
+
+
+class MyBookingsView(APIView):
+    """Authenticated dashboard listing — strictly the user's own bookings."""
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=["Bookings"],
+        operation_id="booking_mine",
+        operation_summary="List my bookings (dashboard)",
+        operation_description=(
+            "Full booking detail (totals, balance, payment ledger, deadlines) for "
+            "every booking attached to the authenticated account. Guest bookings "
+            "are attached via the claim link in the confirmation email."
+        ),
+        responses={200: BookingDetailSerializer(many=True)},
+    )
+    def get(self, request):
+        bookings = (
+            Booking.objects
+            .filter(user=request.user)
+            .select_related("package")
+            .prefetch_related("payments")
+            .order_by("-created_at")
+        )
+        # Hide stale abandoned checkouts from the dashboard.
+        visible = [b for b in bookings if not b.is_expired]
+        return Response(BookingDetailSerializer(visible, many=True).data, status=status.HTTP_200_OK)
+
+
+class ClaimBookingView(APIView):
+    """
+    Attach a guest booking to the calling account via the signed token from
+    the confirmation email. Email-match alone never grants access — anyone can
+    register any address, so possession of the emailed link is the proof.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        tags=["Bookings"],
+        operation_id="booking_claim",
+        operation_summary="Claim a guest booking",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=["token"],
+            properties={"token": openapi.Schema(type=openapi.TYPE_STRING)},
+        ),
+        responses={
+            200: openapi.Response("Booking attached to this account."),
+            400: openapi.Response("Invalid or expired token.", schema=_error_schema),
+        },
+    )
+    def post(self, request):
+        from django.core import signing
+
+        token = request.data.get("token", "")
+        try:
+            payload = signing.loads(token, salt="booking-claim", max_age=60 * 60 * 24 * 90)
+        except signing.BadSignature:
+            return Response({"detail": "Invalid or expired claim link."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking = Booking.objects.filter(id=payload.get("booking")).first()
+        if booking is None:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_400_BAD_REQUEST)
+        if booking.user and booking.user != request.user:
+            return Response({"detail": "This booking belongs to another account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking.user = request.user
+        booking.save(update_fields=["user", "updated_at"])
+        return Response({"reference": booking.reference, "detail": "Booking attached to your account."})
+
+
 class BookingStatusView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "booking-status"
 
     @swagger_auto_schema(
         tags=["Bookings"],
@@ -163,7 +370,7 @@ class BookingStatusView(APIView):
         booking = (
             Booking.objects
             .select_related("package")
-            .prefetch_related("payment")
+            .prefetch_related("payments")
             .filter(reference=reference)
             .first()
         )
@@ -173,8 +380,8 @@ class BookingStatusView(APIView):
             booking = (
                 Booking.objects
                 .select_related("package")
-                .prefetch_related("payment")
-                .filter(payment__paystack_reference=reference)
+                .prefetch_related("payments")
+                .filter(payments__paystack_reference=reference)
                 .first()
             )
 
