@@ -76,6 +76,19 @@ img[src*="/admin/img/logodark.png"] {
   max-width: none !important;
 }
 
+/* ── Wide-screen layout ─────────────────────────────────────────────────── */
+/* Unfold wraps admin content in Tailwind's `.container`, capped at 1536px and
+   centred — on a 2560px monitor that leaves ~350px of dead space on each side
+   and the tables/forms look cramped. Let the content use the available width
+   (the outer wrapper keeps a comfortable gutter) from large screens up. */
+/* This stylesheet only loads inside the admin, so `.container` here only ever
+   matches Unfold's content wrappers. */
+@media (min-width: 1280px) {
+  .container {
+    max-width: none;
+  }
+}
+
 /* Aurora marks the active nav item with a pale primary background + primary
    text (no left bar). Unfold's default is a grey pill; retint it gold. */
 #nav-sidebar-inner a.active {
