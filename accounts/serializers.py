@@ -42,7 +42,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "full_name",
             "phone_number",
             "country",
+            "email_verified",
             "date_joined",
             "updated_at",
         ]
-        read_only_fields = ["id", "email", "date_joined", "updated_at"]
+        read_only_fields = ["id", "email", "email_verified", "date_joined", "updated_at"]

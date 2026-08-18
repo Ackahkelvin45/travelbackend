@@ -33,6 +33,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     country = models.CharField(max_length=100, blank=True, null=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    # Set True once the user clicks the verification link emailed at signup.
+    # New accounts start unverified; existing accounts are grandfathered True
+    # by the data migration so nobody is treated as unverified after rollout.
+    email_verified = models.BooleanField(default=False)
+    email_verified_at = models.DateTimeField(null=True, blank=True)
     date_joined = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

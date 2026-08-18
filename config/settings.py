@@ -289,6 +289,8 @@ REST_FRAMEWORK = {
         'payments': '30/min',
         'payment-status': '120/min',
         'booking-status': '60/min',
+        # Email verification / resend — cheap to abuse (email spam), so cap it.
+        'auth': '10/min',
     },
 }
 
