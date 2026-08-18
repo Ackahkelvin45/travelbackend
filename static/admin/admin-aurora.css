@@ -76,6 +76,18 @@ img[src*="/admin/img/logodark.png"] {
   max-width: none !important;
 }
 
+/* ── Sidebar overlap fix (1024–1279px band) ─────────────────────────────── */
+/* Unfold's sidebar wrapper is `fixed xl:relative`, so it only goes in-flow at
+   xl (1280px). Between lg (1024px) and xl it stays `fixed` while still shown —
+   overlaying the page content (the "sidebar covers the page" bug on laptops
+   and at browser zoom / OS display scaling). Make it in-flow from lg up so it
+   always reserves its width and pushes the content, exactly like it does ≥1280. */
+@media (min-width: 1024px) {
+  .xl\:relative {
+    position: relative !important;
+  }
+}
+
 /* ── Wide-screen layout ─────────────────────────────────────────────────── */
 /* Unfold wraps admin content in Tailwind's `.container`, capped at 1536px and
    centred — on a 2560px monitor that leaves ~350px of dead space on each side
