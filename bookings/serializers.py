@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from packages.models import TravelPackage
+from packages.models import TourDeparture, TravelPackage
 from .models import Booking
 
 
@@ -68,7 +68,31 @@ class CreateBookingSerializer(serializers.ModelSerializer):
                 {"package_id": "Package not found or is no longer available."}
             )
 
-        # Fallback for travel_date if not provided
+        # ── Day-tour departures ───────────────────────────────────────────────
+        # If the package runs on scheduled departure dates, the booking must
+        # land on one of them (and it must still have seats). The chosen date
+        # becomes travel_date; the actual seat reservation happens under a row
+        # lock in create().
+        active_departures = list(package.departures.filter(is_active=True))
+        if active_departures:
+            chosen = attrs.get("travel_date")
+            valid_dates = {d.date for d in active_departures}
+            if chosen is None:
+                raise serializers.ValidationError(
+                    {"travel_date": "Please choose a departure date for this tour."}
+                )
+            if chosen not in valid_dates:
+                raise serializers.ValidationError(
+                    {"travel_date": "That date is not an available departure for this tour."}
+                )
+            departure = next(d for d in active_departures if d.date == chosen)
+            if departure.is_full:
+                raise serializers.ValidationError(
+                    {"travel_date": "This departure is fully booked. Please choose another date."}
+                )
+            attrs["_departure_id"] = departure.id
+
+        # Fallback for travel_date if not provided (non-departure packages only)
         if "travel_date" not in attrs:
             from django.utils import timezone
             attrs["travel_date"] = package.available_from or timezone.now().date()
@@ -96,11 +120,33 @@ class CreateBookingSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        from django.db import transaction
+
+        departure_id = validated_data.pop("_departure_id", None)
+        num_guests = validated_data.get("num_guests", 1)
+
         # Attach logged-in user if available (guests leave this null)
         request = self.context.get("request")
         if request and request.user.is_authenticated:
             validated_data["user"] = request.user
-        return super().create(validated_data)
+
+        if departure_id is None:
+            return super().create(validated_data)
+
+        # Reserve seats atomically so a departure can never oversell under
+        # concurrent bookings (lock the departure row first, then create).
+        with transaction.atomic():
+            departure = (
+                TourDeparture.objects.select_for_update().get(pk=departure_id)
+            )
+            if departure.capacity is not None and departure.seats_taken + num_guests > departure.capacity:
+                raise serializers.ValidationError(
+                    {"travel_date": "Not enough seats left on this departure for that many guests."}
+                )
+            booking = super().create(validated_data)
+            departure.seats_taken += num_guests
+            departure.save(update_fields=["seats_taken"])
+        return booking
 
 
 class BookingDetailSerializer(serializers.ModelSerializer):

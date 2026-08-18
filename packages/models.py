@@ -191,6 +191,20 @@ class TravelPackage(models.Model):
                   '{"min_days": 30, "percent": 60}, {"min_days": 14, "percent": 40}, '
                   '{"min_days": 0, "percent": 0}]',
     )
+    # ── Day tours ─────────────────────────────────────────────────────────────
+    # Flat per-person, single-day experiences that run on scheduled Saturdays
+    # (see TourDeparture). They reuse the legacy flat-price booking flow; the
+    # chosen departure date becomes the booking's travel_date.
+    is_day_tour = models.BooleanField(
+        default=False,
+        help_text="Flat per-person single-day tour with scheduled departure dates.",
+    )
+    price_usd_estimate = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Optional ~USD figure shown alongside the GHS price (display only, "
+                  "never charged). e.g. 65 to show 'GHS 750 / ~$65'.",
+    )
+
     is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -201,6 +215,14 @@ class TravelPackage(models.Model):
 
     def __str__(self):
         return self.title
+
+    def upcoming_departures(self):
+        """Active, not-yet-past departures with seats left, soonest first."""
+        from django.utils import timezone
+        return [
+            d for d in self.departures.filter(is_active=True, date__gte=timezone.now().date()).order_by("date")
+            if not d.is_full
+        ]
 
     @property
     def has_options(self):
@@ -287,6 +309,52 @@ class PackageOption(models.Model):
         if early_bird_ok:
             return self.early_bird_price_per_person, True
         return self.price_per_person, False
+
+
+class TourDeparture(models.Model):
+    """
+    A scheduled date a day tour runs. A package has many — this is how
+    'every other Saturday' and one-off Saturdays are expressed: the operator
+    adds each bookable date (optionally with a seat cap). The chosen departure
+    becomes the booking's travel_date; `seats_taken` is incremented at booking
+    time under a row lock so a departure never oversells.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(
+        TravelPackage,
+        on_delete=models.CASCADE,
+        related_name="departures",
+    )
+    date = models.DateField(help_text="The Saturday (or any day) this tour runs.")
+    capacity = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Maximum guests for this departure. Leave blank for unlimited.",
+    )
+    seats_taken = models.PositiveIntegerField(default=0, editable=False)
+    is_active = models.BooleanField(default=True)
+    note = models.CharField(max_length=200, blank=True, null=True,
+                            help_text="Optional label, e.g. 'Limited spots' or 'Holiday special'.")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["date"]
+        constraints = [
+            models.UniqueConstraint(fields=["package", "date"], name="unique_departure_per_package_date"),
+        ]
+
+    def __str__(self):
+        return f"{self.package.title} — {self.date:%b %d, %Y}"
+
+    @property
+    def seats_left(self):
+        if self.capacity is None:
+            return None  # unlimited
+        return max(self.capacity - self.seats_taken, 0)
+
+    @property
+    def is_full(self):
+        return self.capacity is not None and self.seats_taken >= self.capacity
 
 
 class PackageImage(models.Model):

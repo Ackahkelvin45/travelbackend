@@ -430,3 +430,82 @@ class InitializeIntentTests(TestCase):
         self.assertEqual(booking.status, Booking.Status.CONFIRMED)  # deposit confirms
         self.assertEqual(booking.balance, Decimal("3700.00"))       # balance remains
         self.assertFalse(booking.is_paid)
+
+
+class DayTourBookingTests(TestCase):
+    """Flat-price day tours booked on scheduled departures: date must be valid,
+    seats never oversell, and non-departure packages keep the old behaviour."""
+
+    def _day_tour(self, capacity=None):
+        from packages.models import TourDeparture
+        pkg = make_package(
+            title="Accra City Tour", slug=f"accra-{TravelPackage.objects.count()}",
+            category=TravelPackage.Category.CULTURAL, duration_days=1, currency="GHS",
+            price_shared=Decimal("750.00"), is_day_tour=True,
+            available_from=None, available_to=None,
+        )
+        dep = TourDeparture.objects.create(
+            package=pkg, date=date(2027, 3, 6), capacity=capacity, is_active=True)
+        return pkg, dep
+
+    def _book(self, pkg, travel_date=None, guests=1, email="tour@test.com"):
+        payload = {"package_id": str(pkg.id), "price_tier": "shared",
+                   "first_name": "Kofi", "last_name": "Test", "email": email,
+                   "num_guests": guests}
+        if travel_date is not None:
+            payload["travel_date"] = str(travel_date)
+        return APIClient().post("/api/bookings/", payload, format="json")
+
+    def test_booking_requires_a_departure_date(self):
+        pkg, _ = self._day_tour()
+        r = self._book(pkg, travel_date=None)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("departure date", str(r.data["travel_date"]).lower())
+
+    def test_booking_rejects_a_non_departure_date(self):
+        pkg, _ = self._day_tour()
+        r = self._book(pkg, travel_date=date(2027, 12, 25))
+        self.assertEqual(r.status_code, 400)
+
+    def test_booking_on_valid_departure_succeeds_and_reserves_seats(self):
+        pkg, dep = self._day_tour(capacity=10)
+        r = self._book(pkg, travel_date=dep.date, guests=2)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["total_amount"], "1500.00")   # 750 × 2
+        dep.refresh_from_db()
+        self.assertEqual(dep.seats_taken, 2)
+
+    def test_departure_never_oversells(self):
+        pkg, dep = self._day_tour(capacity=3)
+        self.assertEqual(self._book(pkg, dep.date, guests=2).status_code, 201)  # 2/3
+        # 2 more would exceed 3 → rejected, seats unchanged
+        r = self._book(pkg, dep.date, guests=2)
+        self.assertEqual(r.status_code, 400)
+        dep.refresh_from_db()
+        self.assertEqual(dep.seats_taken, 2)
+        # exactly 1 fits → full
+        self.assertEqual(self._book(pkg, dep.date, guests=1).status_code, 201)
+        dep.refresh_from_db()
+        self.assertTrue(dep.is_full)
+
+    def test_unlimited_capacity_departure(self):
+        pkg, dep = self._day_tour(capacity=None)
+        self.assertEqual(self._book(pkg, dep.date, guests=50).status_code, 201)
+        dep.refresh_from_db()
+        self.assertIsNone(dep.seats_left)   # unlimited
+        self.assertFalse(dep.is_full)
+
+    def test_non_departure_package_unaffected(self):
+        # A normal legacy package (no departures) still books with any/no date.
+        pkg = make_package(price_shared=Decimal("600.00"), currency="GHS")
+        r = self._book(pkg, travel_date=None)   # date optional, defaults to available_from
+        self.assertEqual(r.status_code, 201)
+
+    def test_api_exposes_day_tour_fields_and_departures(self):
+        pkg, dep = self._day_tour(capacity=5)
+        pkg.price_usd_estimate = Decimal("65.00"); pkg.save()
+        r = APIClient().get(f"/api/packages/{pkg.id}/")
+        self.assertTrue(r.data["is_day_tour"])
+        self.assertEqual(str(r.data["price_usd_estimate"]), "65.00")
+        self.assertEqual(len(r.data["departures"]), 1)
+        self.assertEqual(r.data["departures"][0]["seats_left"], 5)

@@ -9,6 +9,7 @@ from .models import (
     Destination,
     DestinationImage,
     PackageOption,
+    TourDeparture,
 )
 
 
@@ -153,6 +154,17 @@ class PackageOptionSerializer(serializers.ModelSerializer):
         read_only_fields = ["id"]
 
 
+class TourDepartureSerializer(serializers.ModelSerializer):
+    """A single scheduled date a day tour runs, with remaining availability."""
+    seats_left = serializers.IntegerField(read_only=True)
+    is_full = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = TourDeparture
+        fields = ["id", "date", "capacity", "seats_left", "is_full", "note"]
+        read_only_fields = fields
+
+
 class TripUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         from .models import TripUpdate
@@ -194,10 +206,20 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
             "review_count",
             "has_options",
             "from_price",
+            "is_day_tour",
+            "price_usd_estimate",
+            "next_departure",
         ]
 
     has_options = serializers.BooleanField(read_only=True)
     from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    next_departure = serializers.SerializerMethodField()
+
+    def get_next_departure(self, obj):
+        if not obj.is_day_tour:
+            return None
+        upcoming = obj.upcoming_departures()
+        return upcoming[0].date if upcoming else None
 
     def get_cover_image(self, obj):
         cover = obj.images.filter(is_cover=True).first() or obj.images.first()
@@ -238,11 +260,19 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
     itineraries = ItinerarySerializer(many=True, read_only=True)
     faqs = PackageFAQSerializer(many=True, read_only=True)
     options = PackageOptionSerializer(many=True, read_only=True)
+    departures = serializers.SerializerMethodField()
     avg_rating = serializers.SerializerMethodField()
     review_count = serializers.SerializerMethodField()
     has_options = serializers.BooleanField(read_only=True)
     from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     early_bird_active = serializers.BooleanField(read_only=True)
+
+    @swagger_serializer_method(serializer_or_field=TourDepartureSerializer(many=True))
+    def get_departures(self, obj):
+        """Upcoming, bookable departures (day tours only)."""
+        if not obj.is_day_tour:
+            return []
+        return TourDepartureSerializer(obj.upcoming_departures(), many=True, context=self.context).data
 
     class Meta:
         model = TravelPackage
@@ -270,6 +300,9 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "available_to",
             "has_options",
             "options",
+            "is_day_tour",
+            "price_usd_estimate",
+            "departures",
             "early_bird_deadline",
             "early_bird_active",
             "allow_installments",

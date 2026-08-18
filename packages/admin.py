@@ -14,6 +14,7 @@ from .models import (
     PackageFAQ,
     PackageImage,
     PackageOption,
+    TourDeparture,
     TravelPackage,
     TripUpdate,
 )
@@ -132,6 +133,15 @@ class PackageOptionInline(TabularInline):
     ordering = ["order"]
 
 
+class TourDepartureInline(TabularInline):
+    """Scheduled dates a day tour runs — add one row per Saturday."""
+    model = TourDeparture
+    extra = 0
+    fields = ["date", "capacity", "seats_taken", "is_active", "note"]
+    readonly_fields = ["seats_taken"]
+    ordering = ["date"]
+
+
 class ImagePreviewMixin:
     """Read-only thumbnail column for image inlines (same look as blog's)."""
 
@@ -188,13 +198,19 @@ class TravelPackageAdmin(ModelAdmin):
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-is_featured", "title"]
     autocomplete_fields = ["destinations"]
-    inlines = [PackageOptionInline, PackageImageInline, PackageFAQInline, ItineraryInline]
+    inlines = [PackageOptionInline, TourDepartureInline, PackageImageInline, PackageFAQInline, ItineraryInline]
     fieldsets = (
         (None, {
             "fields": ("title", "slug", "category", "destinations"),
         }),
         ("Content", {
             "fields": ("description", "highlights", "whats_included", "whats_excluded"),
+        }),
+        ("Day Tour", {
+            "description": "Flat per-person single-day tours. Tick 'is day tour', set the GHS "
+                           "price under Legacy Tier Pricing (Shared), add the Saturdays under "
+                           "Departures below, and optionally a ~USD figure for display.",
+            "fields": ("is_day_tour", "price_usd_estimate"),
         }),
         ("Dates & Deadlines", {
             "description": "For option-based tours, Available From/To ARE the tour dates. "
