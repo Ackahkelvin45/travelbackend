@@ -130,9 +130,13 @@ class Command(BaseCommand):
                     highlights=spec["highlights"],
                     whats_included=spec["whats_included"],
                     duration_days=1,
-                    currency="GHS",
-                    price_shared=spec["price_ghs"],
-                    price_usd_estimate=spec["price_usd"],
+                    # Priced and charged in USD; Paystack settles the GHS
+                    # equivalent at the live rate at payment time (same as the
+                    # flagship tour). The GHS figures in whats_included are the
+                    # informational local cost of each activity.
+                    currency="USD",
+                    price_shared=spec["price_usd"],
+                    price_usd_estimate=None,
                     is_day_tour=True,
                     is_active=True,
                 ),
