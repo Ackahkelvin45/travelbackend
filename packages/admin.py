@@ -14,6 +14,7 @@ from .models import (
     PackageFAQ,
     PackageImage,
     PackageOption,
+    PackageVideo,
     TourDeparture,
     TravelPackage,
     TripUpdate,
@@ -172,6 +173,25 @@ class DestinationImageInline(ImagePreviewMixin, TabularInline):
     ordering = ["order"]
 
 
+class PackageVideoInline(TabularInline):
+    model = PackageVideo
+    extra = 0
+    fields = ["video_preview", "video", "video_url", "poster", "caption", "order"]
+    readonly_fields = ["video_preview"]
+    ordering = ["order"]
+
+    @admin.display(description="Preview")
+    def video_preview(self, obj):
+        if obj.pk and obj.video:
+            return format_html(
+                '<video src="{}" class="max-h-[90px] {}" controls muted preload="metadata"></video>',
+                obj.video.url, IMAGE_PREVIEW_CLASSES,
+            )
+        if obj.pk and obj.video_url:
+            return format_html('<a href="{}" target="_blank">external video ↗</a>', obj.video_url)
+        return "—"
+
+
 class PackageFAQInline(StackedInline):
     model = PackageFAQ
     extra = 1
@@ -198,7 +218,7 @@ class TravelPackageAdmin(ModelAdmin):
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-is_featured", "title"]
     autocomplete_fields = ["destinations"]
-    inlines = [PackageOptionInline, TourDepartureInline, PackageImageInline, PackageFAQInline, ItineraryInline]
+    inlines = [PackageOptionInline, TourDepartureInline, PackageImageInline, PackageVideoInline, PackageFAQInline, ItineraryInline]
     fieldsets = (
         (None, {
             "fields": ("title", "slug", "category", "destinations"),

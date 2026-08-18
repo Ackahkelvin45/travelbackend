@@ -383,6 +383,39 @@ class PackageImage(models.Model):
         super().save(*args, **kwargs)
 
 
+class PackageVideo(models.Model):
+    """A promotional video for a package: either an uploaded file or an external
+    embed URL (YouTube/Vimeo). A poster image shows before playback."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(
+        TravelPackage,
+        on_delete=models.CASCADE,
+        related_name="videos",
+    )
+    video = models.FileField(
+        upload_to="packages/videos/", blank=True, null=True,
+        help_text="Upload an MP4/WebM. Leave blank if using an external URL instead.",
+    )
+    video_url = models.URLField(
+        blank=True, null=True,
+        help_text="Optional external video URL (YouTube/Vimeo) — used when no file is uploaded.",
+    )
+    poster = models.ImageField(
+        upload_to="packages/video-posters/", blank=True, null=True,
+        help_text="Optional thumbnail shown before the video plays.",
+    )
+    caption = models.CharField(max_length=200, blank=True, null=True)
+    order = models.PositiveIntegerField(default=0, help_text="Display order (lower = first)")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "uploaded_at"]
+
+    def __str__(self):
+        return f"Video for {self.package.title} (order {self.order})"
+
+
 class PackageFAQ(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(

@@ -9,6 +9,7 @@ from .models import (
     Destination,
     DestinationImage,
     PackageOption,
+    PackageVideo,
     TourDeparture,
 )
 
@@ -52,6 +53,13 @@ class PackageImageSerializer(serializers.ModelSerializer):
         model = PackageImage
         fields = ["id", "image", "caption", "is_cover", "order", "uploaded_at"]
         read_only_fields = ["id", "uploaded_at"]
+
+
+class PackageVideoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PackageVideo
+        fields = ["id", "video", "video_url", "poster", "caption", "order"]
+        read_only_fields = ["id"]
 
 
 class GalleryPackageImageSerializer(serializers.ModelSerializer):
@@ -257,6 +265,7 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
         required=False,
     )
     images = PackageImageSerializer(many=True, read_only=True)
+    videos = PackageVideoSerializer(many=True, read_only=True)
     itineraries = ItinerarySerializer(many=True, read_only=True)
     faqs = PackageFAQSerializer(many=True, read_only=True)
     options = PackageOptionSerializer(many=True, read_only=True)
@@ -317,6 +326,7 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "avg_rating",
             "review_count",
             "images",
+            "videos",
             "itineraries",
             "faqs",
             "created_at",
