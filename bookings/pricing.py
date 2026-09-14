@@ -136,6 +136,183 @@ def compute_quote(option, *, visa: bool, payment_plan: str, at=None) -> Quote:
     return quote
 
 
+@dataclass
+class ConfigurableQuote:
+    """A quote for a core_plus_addons package: mandatory base + chosen add-ons,
+    with the single highest qualifying bundle discount applied to the subtotal."""
+    package: object
+    num_guests: int
+    payment_plan: str
+    base_price_per_person: Decimal
+    base_total: Decimal
+    addons: list = field(default_factory=list)
+    addons_total: Decimal = Decimal("0")
+    subtotal: Decimal = Decimal("0")
+    discount_percent: Decimal = Decimal("0")
+    discount_amount: Decimal = Decimal("0")
+    discount_note: str = ""
+    total: Decimal = Decimal("0")
+    deposit_required: Decimal | None = None
+    amount_due_today: Decimal = Decimal("0")
+
+    def as_dict(self):
+        return {
+            "package_id": str(self.package.id),
+            "pricing_model": "core_plus_addons",
+            "num_guests": self.num_guests,
+            "payment_plan": self.payment_plan,
+            "currency": self.package.currency,
+            "base_price_per_person": str(self.base_price_per_person),
+            "base_total": str(self.base_total),
+            "addons": self.addons,
+            "addons_total": str(self.addons_total),
+            "subtotal": str(self.subtotal),
+            "discount_percent": str(self.discount_percent),
+            "discount_amount": str(self.discount_amount),
+            "discount_note": self.discount_note,
+            "total": str(self.total),
+            "deposit_required": str(self.deposit_required) if self.deposit_required is not None else None,
+            "amount_due_today": str(self.amount_due_today),
+        }
+
+
+def compute_configurable_quote(package, *, num_guests: int, selected_addon_codes, payment_plan) -> ConfigurableQuote:
+    """Price a core_plus_addons selection server-side.
+
+    base_total = base_price_per_person × guests; each add-on is per-person
+    (× guests) or flat; the discount is the single highest rule whose required
+    add-ons are all selected (never stacks), applied to the subtotal.
+    """
+    from bookings.models import Booking
+    from packages.models import TravelPackage
+
+    if not package.is_active:
+        raise QuoteError("This tour is not open for booking.")
+    if package.pricing_model != TravelPackage.PricingModel.CORE_PLUS_ADDONS:
+        raise QuoteError("This tour does not use the core + add-ons pricing model.")
+    if package.base_price_per_person is None:
+        raise QuoteError("This tour has no base price configured.")
+    if not isinstance(num_guests, int) or num_guests < 1:
+        raise QuoteError("At least one guest is required.")
+    if payment_plan not in (Booking.PaymentPlan.FULL, Booking.PaymentPlan.INSTALLMENT):
+        raise QuoteError("Unknown payment plan.")
+    if payment_plan == Booking.PaymentPlan.INSTALLMENT and not package.allow_installments:
+        raise QuoteError("Installment payment is not available for this tour.")
+
+    base_pp = package.base_price_per_person
+    base_total = quantize(base_pp * num_guests)
+
+    active = {a.code: a for a in package.addons.filter(is_active=True)}
+    selected = set(selected_addon_codes or [])
+    unknown = selected - set(active)
+    if unknown:
+        raise QuoteError(f"Unknown add-on(s): {', '.join(sorted(unknown))}.")
+
+    # Group rules: single-select groups accept at most one; auto-apply a $0
+    # default (e.g. 'No Hotel') when nothing is chosen; enforce required groups.
+    by_group = {}
+    for code in selected:
+        a = active[code]
+        if a.group_id:
+            by_group.setdefault(a.group_id, []).append(a)
+    for group in package.addon_groups.all():
+        chosen = by_group.get(group.id, [])
+        if group.selection == group.Selection.SINGLE and len(chosen) > 1:
+            raise QuoteError(f"Please choose only one option in '{group.name}'.")
+        if group.selection == group.Selection.SINGLE and not chosen:
+            default = next((a for a in active.values() if a.group_id == group.id and a.is_default), None)
+            if default:
+                selected.add(default.code)
+            elif group.required:
+                raise QuoteError(f"Please choose an option in '{group.name}'.")
+
+    addons, addons_total = [], Decimal("0")
+    for code in sorted(selected, key=lambda c: (active[c].order, active[c].name)):
+        a = active[code]
+        qty = num_guests if a.unit == a.Unit.PER_PERSON else 1
+        line_total = quantize(a.price * qty)
+        addons_total += line_total
+        addons.append({
+            "code": a.code, "name": a.name, "unit": a.unit,
+            "unit_price": str(quantize(a.price)), "quantity": qty,
+            "line_total": str(line_total), "refundable": a.refundable,
+        })
+
+    subtotal = quantize(base_total + addons_total)
+
+    best_percent, note = Decimal("0"), ""
+    for rule in package.discount_rules.filter(is_active=True).prefetch_related("required_addons"):
+        req = {a.code for a in rule.required_addons.all()}
+        if req and req <= selected and rule.percent > best_percent:
+            best_percent, note = rule.percent, rule.name
+    discount_amount = quantize(subtotal * best_percent / Decimal("100"))
+    total = quantize(subtotal - discount_amount)
+
+    quote = ConfigurableQuote(
+        package=package, num_guests=num_guests, payment_plan=payment_plan,
+        base_price_per_person=quantize(base_pp), base_total=base_total,
+        addons=addons, addons_total=quantize(addons_total), subtotal=subtotal,
+        discount_percent=best_percent, discount_amount=discount_amount,
+        discount_note=note, total=total,
+    )
+    if payment_plan == Booking.PaymentPlan.INSTALLMENT:
+        if not package.deposit_minimum:
+            raise QuoteError("Installment payment is not configured for this tour.")
+        quote.deposit_required = quantize(min(package.deposit_minimum, total))
+        quote.amount_due_today = quote.deposit_required
+    else:
+        quote.amount_due_today = total
+    return quote
+
+
+def build_configurable_matrix(package) -> dict:
+    """Everything the cart UI needs for a core_plus_addons package: base price,
+    add-on groups + add-ons, and the discount rules (for transparency)."""
+    groups = []
+    for g in package.addon_groups.all():
+        groups.append({
+            "id": str(g.id), "name": g.name, "selection": g.selection, "required": g.required,
+            "addons": [
+                {
+                    "code": a.code, "name": a.name, "description": a.description,
+                    "price": str(quantize(a.price)), "unit": a.unit,
+                    "is_default": a.is_default, "refundable": a.refundable,
+                }
+                for a in package.addons.filter(is_active=True, group=g)
+            ],
+        })
+    ungrouped = [
+        {
+            "code": a.code, "name": a.name, "description": a.description,
+            "price": str(quantize(a.price)), "unit": a.unit,
+            "is_default": a.is_default, "refundable": a.refundable,
+        }
+        for a in package.addons.filter(is_active=True, group__isnull=True)
+    ]
+    rules = [
+        {"name": r.name, "percent": str(r.percent),
+         "required_addons": [a.code for a in r.required_addons.all()]}
+        for r in package.discount_rules.filter(is_active=True)
+    ]
+    return {
+        "package_id": str(package.id),
+        "pricing_model": "core_plus_addons",
+        "currency": package.currency,
+        "base_price_per_person": str(quantize(package.base_price_per_person)) if package.base_price_per_person else None,
+        "tour_start": package.available_from,
+        "tour_end": package.available_to,
+        "addon_groups": groups,
+        "ungrouped_addons": ungrouped,
+        "discount_rules": rules,
+        "installments": {
+            "enabled": bool(package.allow_installments and package.deposit_minimum),
+            "deposit_minimum": str(quantize(package.deposit_minimum)) if package.deposit_minimum else None,
+            "final_payment_deadline": package.final_payment_deadline,
+        },
+        "charge": _charge_info(package),
+    }
+
+
 def _charge_info(package) -> dict:
     if package.currency == "GHS":
         return {"currency": "GHS", "exchange_rate": None, "rate_source": None}

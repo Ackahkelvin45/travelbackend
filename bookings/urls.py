@@ -4,6 +4,7 @@ from .views import (
     BookingStatusView,
     CurrentPoliciesView,
     CheckoutView,
+    ConfigurableCheckoutView,
     ClaimBookingView,
     CreateBookingView,
     MyBookingsView,
@@ -17,6 +18,9 @@ urlpatterns = [
 
     # POST — option-based checkout (flagship hotel/occupancy flow)
     path("checkout/", CheckoutView.as_view(), name="checkout"),
+
+    # POST — core + add-ons checkout (Michael Blackson style)
+    path("checkout/configurable/", ConfigurableCheckoutView.as_view(), name="checkout-configurable"),
 
     # GET — currently-published policy documents (accepted at checkout)
     path("policies/", CurrentPoliciesView.as_view(), name="policies"),

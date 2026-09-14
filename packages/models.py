@@ -205,6 +205,29 @@ class TravelPackage(models.Model):
                   "never charged). e.g. 65 to show 'GHS 750 / ~$65'.",
     )
 
+    # ── Pricing model ─────────────────────────────────────────────────────────
+    # How this package is priced/booked. Existing packages keep their behaviour:
+    #   option_based  → base price comes from the chosen PackageOption (flagship)
+    #   flat          → base price is price_shared (day tours / legacy tiers)
+    #   core_plus_addons → mandatory base_price_per_person + configurable add-ons
+    #                      (PackageAddon) with rule-based, non-stacking discounts
+    #                      (PackageDiscountRule). e.g. the Michael Blackson package.
+    class PricingModel(models.TextChoices):
+        OPTION_BASED = "option_based", "Option-based (hotel × occupancy)"
+        FLAT = "flat", "Flat per-person (day tour / legacy)"
+        CORE_PLUS_ADDONS = "core_plus_addons", "Core tour + optional add-ons"
+
+    pricing_model = models.CharField(
+        max_length=20, choices=PricingModel.choices, default=PricingModel.FLAT,
+        help_text="option_based = priced by hotel option; flat = price_shared; "
+                  "core_plus_addons = mandatory base + configurable add-ons + bundle discounts.",
+    )
+    base_price_per_person = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Mandatory Core Tour price per person — used only by the "
+                  "'core_plus_addons' pricing model (e.g. 878.00).",
+    )
+
     is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -236,13 +259,15 @@ class TravelPackage(models.Model):
 
     @property
     def from_price(self):
-        """Cheapest current entry price — option-based or legacy tier."""
+        """Cheapest current entry price — option-based, core base, or legacy tier."""
         prices = [
             (o.early_bird_price_per_person if self.early_bird_active and o.early_bird_price_per_person else o.price_per_person)
             for o in self.options.all() if o.is_active
         ]
         if prices:
             return min(prices)
+        if self.pricing_model == self.PricingModel.CORE_PLUS_ADDONS and self.base_price_per_person is not None:
+            return self.base_price_per_person
         return self.price_shared
 
 
@@ -414,6 +439,94 @@ class PackageVideo(models.Model):
 
     def __str__(self):
         return f"Video for {self.package.title} (order {self.order})"
+
+
+class PackageAddonGroup(models.Model):
+    """A set of add-ons the customer chooses from, e.g. 'Accra Accommodation'
+    (pick one) or 'Experiences' (pick any). Used by the core_plus_addons
+    pricing model. Ungrouped add-ons are independent multi-selects."""
+
+    class Selection(models.TextChoices):
+        SINGLE = "single", "Pick one (mutually exclusive)"
+        MULTI = "multi", "Pick any"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="addon_groups")
+    name = models.CharField(max_length=120, help_text="e.g. 'Accra Accommodation'")
+    selection = models.CharField(max_length=10, choices=Selection.choices, default=Selection.SINGLE)
+    required = models.BooleanField(
+        default=False,
+        help_text="Must the customer choose one? Leave off for optional groups "
+                  "(include a $0 'No Hotel' default add-on so a null choice stays valid).",
+    )
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "name"]
+
+    def __str__(self):
+        return f"{self.package.title} — {self.name} ({self.selection})"
+
+
+class PackageAddon(models.Model):
+    """A configurable, optional line item added on top of a package's base price.
+    Supersedes the hard-coded visa add-on. Grouped add-ons follow their group's
+    single/multi selection rule; ungrouped add-ons are independent."""
+
+    class Unit(models.TextChoices):
+        PER_PERSON = "per_person", "Per person (× guests)"
+        PER_BOOKING = "per_booking", "Per booking (flat)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="addons")
+    group = models.ForeignKey(
+        PackageAddonGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name="addons",
+    )
+    code = models.SlugField(help_text="Stable machine code, e.g. 'hotel_mid', 'enzo_vip'.")
+    name = models.CharField(max_length=200, help_text="Customer-facing label.")
+    description = models.CharField(max_length=300, blank=True, null=True)
+    price = models.DecimalField(max_digits=12, decimal_places=2, help_text="In the package currency.")
+    unit = models.CharField(max_length=12, choices=Unit.choices, default=Unit.PER_PERSON)
+    is_default = models.BooleanField(
+        default=False, help_text="Pre-selected in its group (e.g. a $0 'No Hotel').",
+    )
+    refundable = models.BooleanField(
+        default=True, help_text="Untick for non-refundable components (excluded from refunds).",
+    )
+    order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["order", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["package", "code"], name="unique_addon_code_per_package"),
+        ]
+
+    def __str__(self):
+        return f"{self.package.title} — {self.name} ({self.price} {self.get_unit_display()})"
+
+
+class PackageDiscountRule(models.Model):
+    """A bundle discount: applies `percent` off the subtotal when EVERY add-on in
+    `required_addons` is in the cart. Discounts never stack — the pricing engine
+    applies only the single highest qualifying rule (max percent wins). This
+    reproduces the doc's 5/7/10/12/15% ladder with no negative conditions."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
+    name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
+    percent = models.DecimalField(max_digits=5, decimal_places=2, help_text="e.g. 10.00 for 10%.")
+    required_addons = models.ManyToManyField(
+        PackageAddon, related_name="discount_rules",
+        help_text="ALL of these must be in the cart for the rule to qualify.",
+    )
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-percent"]
+
+    def __str__(self):
+        return f"{self.package.title} — {self.name} ({self.percent}%)"
 
 
 class PackageFAQ(models.Model):

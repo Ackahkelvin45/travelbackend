@@ -275,3 +275,28 @@ class CheckoutSerializer(serializers.Serializer):
         max_digits=12, decimal_places=2, required=False,
         help_text="The total the customer was shown. Mismatch returns 409 with a fresh quote.",
     )
+
+
+class ConfigurableCheckoutSerializer(serializers.Serializer):
+    """POST /api/bookings/checkout/configurable/ — the core_plus_addons flow:
+    a mandatory base + a set of chosen add-on codes. Prices are entirely
+    server-computed; expected_total guards a stale cart (409 + fresh quote)."""
+
+    package_id = serializers.UUIDField()
+    num_guests = serializers.IntegerField(min_value=1, default=1)
+    selected_addon_codes = serializers.ListField(
+        child=serializers.CharField(), default=list,
+        help_text="Add-on codes the customer chose, e.g. ['hotel_mid', 'enzo_vip'].",
+    )
+    payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
+    first_name = serializers.CharField(max_length=100)
+    last_name = serializers.CharField(max_length=100)
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    country = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    special_requests = serializers.CharField(required=False, allow_blank=True)
+    accepted_policies = serializers.ListField(child=serializers.CharField(), default=list)
+    expected_total = serializers.DecimalField(
+        max_digits=12, decimal_places=2, required=False,
+        help_text="The total the customer was shown. Mismatch returns 409 with a fresh quote.",
+    )

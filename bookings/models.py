@@ -87,6 +87,16 @@ class Booking(models.Model):
         help_text='Add-on line items, e.g. [{"code": "visa", "name": "Visa on Arrival", '
                   '"unit_price": "150.00", "quantity": 2, "refundable": false}]',
     )
+    # Bundle discount applied at booking time (core_plus_addons packages).
+    # total_amount is already net of this — the snapshot is for the receipt/audit.
+    discount_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        help_text="Bundle discount applied to the subtotal (already reflected in total_amount).",
+    )
+    discount_note = models.CharField(
+        max_length=200, blank=True, null=True,
+        help_text="Which discount rule was applied, e.g. 'Core + Mid-Tier Hotel + all extras (10%)'.",
+    )
     refund_tiers_snapshot = models.JSONField(
         default=list, blank=True,
         help_text="Refund policy tiers the customer accepted at booking time.",

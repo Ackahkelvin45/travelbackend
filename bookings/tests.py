@@ -509,3 +509,92 @@ class DayTourBookingTests(TestCase):
         self.assertEqual(str(r.data["price_usd_estimate"]), "65.00")
         self.assertEqual(len(r.data["departures"]), 1)
         self.assertEqual(r.data["departures"][0]["seats_left"], 5)
+
+
+class ConfigurablePricingTests(TestCase):
+    """Core-tour + add-ons pricing: highest-wins non-stacking discount, group
+    rules, and correct booking snapshots. Prices verified against the guide."""
+
+    def _package(self):
+        from packages.models import PackageAddon, PackageAddonGroup, PackageDiscountRule
+        pkg = make_package(
+            title="MB Experience", slug=f"mb-{TravelPackage.objects.count()}",
+            currency="USD", duration_days=8, allow_installments=True,
+            deposit_minimum=Decimal("1000.00"),
+            pricing_model=TravelPackage.PricingModel.CORE_PLUS_ADDONS,
+            base_price_per_person=Decimal("878.00"),
+        )
+        hotels = PackageAddonGroup.objects.create(package=pkg, name="Hotel", selection="single", required=False)
+        exp = PackageAddonGroup.objects.create(package=pkg, name="Experiences", selection="multi")
+        FLAT, PP = PackageAddon.Unit.PER_BOOKING, PackageAddon.Unit.PER_PERSON
+        a = lambda code, price, unit, group, default=False: PackageAddon.objects.create(
+            package=pkg, code=code, name=code, price=Decimal(price), unit=unit, group=group, is_default=default)
+        no = a("no_hotel", "0.00", FLAT, hotels, default=True)
+        mid = a("hotel_mid", "2000.00", FLAT, hotels)
+        prem = a("hotel_premium", "3200.00", FLAT, hotels)
+        kozo = a("kozo", "100.00", PP, exp); enzo = a("enzo", "133.00", PP, exp); mas = a("mas", "107.00", PP, exp)
+        def rule(name, pct, req):
+            r = PackageDiscountRule.objects.create(package=pkg, name=name, percent=Decimal(pct)); r.required_addons.set(req)
+        rule("all extras", "5", [kozo, enzo, mas]); rule("mid", "7", [mid])
+        rule("mid+extras", "10", [mid, kozo, enzo, mas]); rule("premium", "12", [prem])
+        rule("premium+extras", "15", [prem, kozo, enzo, mas])
+        return pkg
+
+    def _quote(self, pkg, codes, guests=1, plan="full"):
+        from bookings.pricing import compute_configurable_quote
+        return compute_configurable_quote(pkg, num_guests=guests, selected_addon_codes=codes, payment_plan=plan)
+
+    def test_totals_match_the_guide(self):
+        pkg = self._package()
+        cases = {
+            (): "878.00", ("kozo", "enzo", "mas"): "1157.10",
+            ("hotel_mid",): "2676.54", ("hotel_mid", "kozo", "enzo", "mas"): "2896.20",
+            ("hotel_premium",): "3588.64", ("hotel_premium", "kozo", "enzo", "mas"): "3755.30",
+        }
+        for codes, expected in cases.items():
+            self.assertEqual(str(self._quote(pkg, list(codes)).total), expected, codes)
+
+    def test_discount_never_stacks_highest_wins(self):
+        pkg = self._package()
+        q = self._quote(pkg, ["hotel_mid", "kozo", "enzo", "mas"])
+        self.assertEqual(q.discount_percent, Decimal("10.00"))  # not 5+7
+
+    def test_single_select_group_rejects_two(self):
+        from bookings.pricing import QuoteError
+        pkg = self._package()
+        with self.assertRaises(QuoteError):
+            self._quote(pkg, ["hotel_mid", "hotel_premium"])
+
+    def test_unknown_addon_rejected(self):
+        from bookings.pricing import QuoteError
+        with self.assertRaises(QuoteError):
+            self._quote(self._package(), ["nope"])
+
+    def test_no_hotel_default_auto_applied(self):
+        pkg = self._package()
+        q = self._quote(pkg, [])  # nothing chosen
+        self.assertIn("no_hotel", {a["code"] for a in q.addons})
+        self.assertEqual(q.total, Decimal("878.00"))
+
+    def test_per_person_addons_scale_with_guests(self):
+        pkg = self._package()
+        q = self._quote(pkg, ["kozo"], guests=2)   # 878×2 + 100×2 = 1956, no discount
+        self.assertEqual(q.base_total, Decimal("1756.00"))
+        self.assertEqual(q.addons_total, Decimal("200.00"))
+
+    def test_checkout_creates_snapshotted_booking(self):
+        pkg = self._package()
+        r = APIClient().post("/api/bookings/checkout/configurable/", {
+            "package_id": str(pkg.id), "num_guests": 1,
+            "selected_addon_codes": ["hotel_mid", "kozo", "enzo", "mas"],
+            "payment_plan": "installment", "first_name": "M", "last_name": "B",
+            "email": "mb@test.com", "accepted_policies": [],
+        }, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["total_amount"], "2896.20")
+        self.assertEqual(r.data["discount_amount"], "321.80")
+        b = Booking.objects.get(reference=r.data["reference"])
+        self.assertEqual(b.discount_amount, Decimal("321.80"))
+        self.assertIn("10.00%", b.discount_note)
+        from payments.receipts import compute_line_items
+        self.assertTrue(compute_line_items(b)["reconciles"])

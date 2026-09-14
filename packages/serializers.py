@@ -312,6 +312,8 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "is_day_tour",
             "price_usd_estimate",
             "departures",
+            "pricing_model",
+            "base_price_per_person",
             "early_bird_deadline",
             "early_bird_active",
             "allow_installments",

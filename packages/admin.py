@@ -12,6 +12,9 @@ from .models import (
     DestinationImage,
     Itinerary,
     PackageFAQ,
+    PackageAddon,
+    PackageAddonGroup,
+    PackageDiscountRule,
     PackageImage,
     PackageOption,
     PackageVideo,
@@ -143,6 +146,33 @@ class TourDepartureInline(TabularInline):
     ordering = ["date"]
 
 
+class PackageAddonGroupInline(TabularInline):
+    """Choice groups for core_plus_addons packages (e.g. 'Accra Accommodation'
+    single-select, 'Experiences' multi-select)."""
+    model = PackageAddonGroup
+    extra = 0
+    fields = ["name", "selection", "required", "order"]
+    ordering = ["order"]
+
+
+class PackageAddonInline(TabularInline):
+    """Optional add-ons for core_plus_addons packages (hotels, experiences).
+    Assign each to a group, or leave ungrouped for an independent option."""
+    model = PackageAddon
+    extra = 0
+    fields = ["name", "code", "group", "price", "unit", "is_default", "refundable", "order", "is_active"]
+    ordering = ["order"]
+
+
+class PackageDiscountRuleInline(StackedInline):
+    """Non-stacking bundle discounts. Add the required add-ons after saving the
+    add-ons above (the engine applies only the single highest qualifying rule)."""
+    model = PackageDiscountRule
+    extra = 0
+    fields = ["name", "percent", "required_addons", "is_active"]
+    filter_horizontal = ["required_addons"]
+
+
 class ImagePreviewMixin:
     """Read-only thumbnail column for image inlines (same look as blog's)."""
 
@@ -218,7 +248,8 @@ class TravelPackageAdmin(ModelAdmin):
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-is_featured", "title"]
     autocomplete_fields = ["destinations"]
-    inlines = [PackageOptionInline, TourDepartureInline, PackageImageInline, PackageVideoInline, PackageFAQInline, ItineraryInline]
+    inlines = [PackageOptionInline, TourDepartureInline, PackageAddonGroupInline, PackageAddonInline,
+               PackageDiscountRuleInline, PackageImageInline, PackageVideoInline, PackageFAQInline, ItineraryInline]
     fieldsets = (
         (None, {
             "fields": ("title", "slug", "category", "destinations"),
@@ -231,6 +262,13 @@ class TravelPackageAdmin(ModelAdmin):
                            "price under Legacy Tier Pricing (Shared), add the Saturdays under "
                            "Departures below, and optionally a ~USD figure for display.",
             "fields": ("is_day_tour", "price_usd_estimate"),
+        }),
+        ("Pricing Model", {
+            "description": "How this package is priced. 'Core tour + add-ons' uses the mandatory "
+                           "base price per person below, plus the Add-on Groups / Add-ons / "
+                           "Discount Rules inlines (e.g. the Michael Blackson experience). Leave "
+                           "as option-based (hotel options) or flat (day tour / legacy) otherwise.",
+            "fields": ("pricing_model", "base_price_per_person"),
         }),
         ("Dates & Deadlines", {
             "description": "For option-based tours, Available From/To ARE the tour dates. "

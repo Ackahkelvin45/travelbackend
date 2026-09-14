@@ -228,6 +228,12 @@ class PaymentAdmin(ModelAdmin):
                 bd["currency"], f"{bd['discount']:,.2f}")
             if bd["discount"] > 0 else ""
         )
+        if bd.get("bundle_discount", 0) > 0:
+            discount = format_html(
+                '{}<tr><td style="padding:7px 0;color:#0a7d3f;">{}</td>'
+                '<td style="padding:7px 0;text-align:right;color:#0a7d3f;">− {} {}</td></tr>',
+                discount, bd.get("discount_note") or "Bundle discount",
+                bd["currency"], f"{bd['bundle_discount']:,.2f}")
         recon = (
             mark_safe('<span style="color:#0a7d3f;">✓ reconciles with booking total</span>')
             if bd["reconciles"] else

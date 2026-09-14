@@ -10,13 +10,18 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Booking
-from .pricing import QuoteError, compute_quote
+from .pricing import QuoteError, compute_configurable_quote, compute_quote
 from .serializers import (
     BookingDetailSerializer,
     CheckoutSerializer,
+    ConfigurableCheckoutSerializer,
     CreateBookingSerializer,
 )
-from .services import PolicyAcceptanceRequired, create_option_booking
+from .services import (
+    PolicyAcceptanceRequired,
+    create_configurable_booking,
+    create_option_booking,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +240,97 @@ class CheckoutView(APIView):
             ),
             "deposit_required": str(booking.deposit_required) if booking.deposit_required else None,
             "early_bird_applied": booking.early_bird_applied,
+            "currency": booking.currency,
+            "status": booking.status,
+            "message": "Booking created. Proceed to payment.",
+        }, status=status.HTTP_201_CREATED)
+
+
+class ConfigurableCheckoutView(APIView):
+    """POST /api/bookings/checkout/configurable/ — core_plus_addons flow:
+    mandatory base + chosen add-ons + the highest qualifying bundle discount.
+    Prices are server-computed and snapshotted; a stale cart gets a 409 + fresh
+    quote (same guard as the option flow)."""
+
+    permission_classes = [AllowAny]
+
+    @swagger_auto_schema(
+        tags=["Bookings"],
+        operation_id="booking_checkout_configurable",
+        operation_summary="Create a core + add-ons booking",
+        request_body=ConfigurableCheckoutSerializer,
+        responses={
+            201: openapi.Response("Booking created."),
+            400: openapi.Response("Validation / policy / add-on error.", schema=_error_schema),
+            404: openapi.Response("Package not found.", schema=_error_schema),
+            409: openapi.Response("Price changed — re-confirm with the fresh quote."),
+        },
+    )
+    def post(self, request):
+        serializer = ConfigurableCheckoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        from packages.models import TravelPackage
+
+        try:
+            package = TravelPackage.objects.get(id=data["package_id"])
+        except TravelPackage.DoesNotExist:
+            return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            quote = compute_configurable_quote(
+                package, num_guests=data["num_guests"],
+                selected_addon_codes=data["selected_addon_codes"],
+                payment_plan=data["payment_plan"],
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        expected_total = data.get("expected_total")
+        if expected_total is not None and expected_total != quote.total:
+            return Response(
+                {"detail": "The price has changed since this page was loaded.", "quote": quote.as_dict()},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            booking = create_configurable_booking(
+                package=package,
+                num_guests=data["num_guests"],
+                selected_addon_codes=data["selected_addon_codes"],
+                payment_plan=data["payment_plan"],
+                contact={
+                    "first_name": data["first_name"],
+                    "last_name": data["last_name"],
+                    "email": data["email"],
+                    "phone": data.get("phone") or None,
+                    "country": data.get("country") or None,
+                    "special_requests": data.get("special_requests") or None,
+                },
+                accepted_policy_types=data["accepted_policies"],
+                user=request.user if request.user.is_authenticated else None,
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except PolicyAcceptanceRequired as exc:
+            return Response(
+                {"detail": "All booking policies must be accepted.", "missing_policies": exc.missing_types},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            "id": str(booking.id),
+            "reference": booking.reference,
+            "total_amount": str(booking.total_amount),
+            "discount_amount": str(booking.discount_amount),
+            "amount_due_today": str(
+                booking.deposit_required
+                if booking.payment_plan == Booking.PaymentPlan.INSTALLMENT
+                else booking.total_amount
+            ),
+            "deposit_required": str(booking.deposit_required) if booking.deposit_required else None,
             "currency": booking.currency,
             "status": booking.status,
             "message": "Booking created. Proceed to payment.",

@@ -13,7 +13,7 @@ import logging
 from django.db import transaction
 
 from .models import Booking, PolicyAcceptance, PolicyDocument
-from .pricing import QuoteError, compute_quote
+from .pricing import QuoteError, compute_configurable_quote, compute_quote
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,68 @@ def create_option_booking(
         "Option booking created: ref=%s option=%s plan=%s total=%s %s eb=%s",
         booking.reference, quote.option.id, payment_plan,
         booking.total_amount, booking.currency, booking.early_bird_applied,
+    )
+    return booking
+
+
+def create_configurable_booking(
+    *,
+    package,
+    num_guests: int,
+    selected_addon_codes: list,
+    payment_plan: str,
+    contact: dict,
+    accepted_policy_types: list,
+    user=None,
+    ip_address: str | None = None,
+) -> Booking:
+    """Create a fully-snapshotted booking for a core_plus_addons package
+    (mandatory base + chosen add-ons + the highest qualifying bundle discount).
+    Mirrors create_option_booking: prices are server-computed and snapshotted,
+    policy acceptances recorded in the same transaction."""
+    quote = compute_configurable_quote(
+        package, num_guests=num_guests,
+        selected_addon_codes=selected_addon_codes, payment_plan=payment_plan,
+    )
+
+    documents = required_policy_documents()
+    missing = [d.type for d in documents if d.type not in set(accepted_policy_types)]
+    if missing:
+        raise PolicyAcceptanceRequired(missing)
+
+    with transaction.atomic():
+        booking = Booking.objects.create(
+            user=user,
+            first_name=contact["first_name"],
+            last_name=contact["last_name"],
+            email=contact["email"],
+            phone=contact.get("phone"),
+            country=contact.get("country"),
+            special_requests=contact.get("special_requests"),
+            package=package,
+            option=None,
+            payment_plan=quote.payment_plan,
+            num_guests=quote.num_guests,
+            travel_date=package.available_from,
+            unit_price=quote.base_price_per_person,
+            total_amount=quote.total,
+            currency=package.currency,
+            option_snapshot={"core_tour": True, "base_price_per_person": str(quote.base_price_per_person)},
+            addons=quote.addons,
+            discount_amount=quote.discount_amount,
+            discount_note=(f"{quote.discount_note} ({quote.discount_percent}%)" if quote.discount_note else ""),
+            refund_tiers_snapshot=package.refund_tiers,
+            deposit_required=quote.deposit_required,
+        )
+        PolicyAcceptance.objects.bulk_create([
+            PolicyAcceptance(booking=booking, document=document, email=booking.email, ip_address=ip_address)
+            for document in documents
+        ])
+
+    logger.info(
+        "Configurable booking created: ref=%s pkg=%s guests=%s plan=%s subtotal=%s discount=%s total=%s %s",
+        booking.reference, package.id, num_guests, payment_plan,
+        quote.subtotal, quote.discount_amount, booking.total_amount, booking.currency,
     )
     return booking
 

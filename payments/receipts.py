@@ -64,7 +64,12 @@ def compute_line_items(booking) -> dict:
             "category": addon.get("code", "addon"),
         })
 
+    # Early-bird saving is informational (already baked into the per-person
+    # price). A bundle discount (core_plus_addons) is actually subtracted from
+    # the total, so it must be netted off for reconciliation.
     discount = quantize(Decimal(booking.early_bird_discount or 0))
+    bundle_discount = quantize(Decimal(getattr(booking, "discount_amount", 0) or 0))
+    discount_note = getattr(booking, "discount_note", "") or ""
     component_sum = quantize(base_total + addons_total)
     total = quantize(Decimal(booking.total_amount))
 
@@ -74,9 +79,11 @@ def compute_line_items(booking) -> dict:
         "base_total": base_total,
         "addons_total": addons_total,
         "discount": discount,
+        "bundle_discount": bundle_discount,
+        "discount_note": discount_note,
         "component_sum": component_sum,
         "total": total,
-        "reconciles": component_sum == total,
+        "reconciles": (component_sum - bundle_discount) == total,
         "amount_paid": quantize(Decimal(booking.amount_paid)),
         "amount_refunded": quantize(Decimal(booking.amount_refunded)),
         "balance": quantize(Decimal(booking.balance)),
@@ -115,6 +122,12 @@ def render_receipt_html(payment, *, business_name="Azura Travels",
         f"<td style='padding:8px 0;text-align:right;color:#0a7d3f;'>− {money(bd['discount'])}</td></tr>"
         if bd["discount"] > 0 else ""
     )
+    if bd.get("bundle_discount", 0) > 0:
+        label = e(bd.get("discount_note") or "Bundle discount")
+        discount_row += (
+            f"<tr><td style='padding:8px 0;color:#0a7d3f;'>{label}</td>"
+            f"<td style='padding:8px 0;text-align:right;color:#0a7d3f;'>− {money(bd['bundle_discount'])}</td></tr>"
+        )
     refund_row = (
         f"<tr><td style='padding:8px 0;color:#b3261e;'>Refunded</td>"
         f"<td style='padding:8px 0;text-align:right;color:#b3261e;'>− {money(bd['amount_refunded'])}</td></tr>"
