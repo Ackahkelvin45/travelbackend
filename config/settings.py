@@ -291,6 +291,9 @@ REST_FRAMEWORK = {
         'booking-status': '60/min',
         # Email verification / resend — cheap to abuse (email spam), so cap it.
         'auth': '10/min',
+        # Live password-rule check from the signup form — generous for typing,
+        # capped so it can't be abused as a password-guessing oracle.
+        'password_check': '60/min',
     },
 }
 
@@ -298,6 +301,7 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'TOKEN_OBTAIN_SERIALIZER': 'accounts.jwt_serializers.VerifiedEmailTokenObtainPairSerializer',
 }
 
 MIDDLEWARE = [
@@ -381,13 +385,10 @@ AUTH_PASSWORD_VALIDATORS = [
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
-    },
-    {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
     {
-        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+        "NAME": "accounts.password_validation.PasswordStrengthValidator",
     },
 ]
 

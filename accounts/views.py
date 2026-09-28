@@ -14,6 +14,7 @@ from .emails import (
     send_welcome_email,
 )
 from .models import User
+from .password_validation import password_rule_results
 from .serializers import UserRegistrationSerializer, UserProfileSerializer
 
 
@@ -23,6 +24,23 @@ def _verification_url(request, user) -> str:
     token = make_verification_token(user)
     path = reverse("verify-email")
     return request.build_absolute_uri(f"{path}?token={token}")
+
+
+class PasswordStrengthView(APIView):
+    """POST /api/auth/password-strength/ — live per-rule check for the signup UI.
+    Body: {"password": "..."} → {"rules": {length: bool, uppercase: bool, …}, "valid": bool}.
+    Throttled so it can't be abused as an oracle for guessing passwords."""
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_check"
+
+    def post(self, request):
+        password = request.data.get("password", "")
+        if not isinstance(password, str):
+            return Response({"rules": {}, "valid": False})
+        results = password_rule_results(password)
+        rules = {rule_id: passed for rule_id, passed in results}
+        return Response({"rules": rules, "valid": all(p for _, p in results)})
 
 
 class RegisterView(generics.CreateAPIView):

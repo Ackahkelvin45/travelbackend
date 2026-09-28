@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    BookingQrCodeView,
     InitializePaymentView,
     PaymentChannelsView,
     PaymentStatusView,
@@ -22,6 +23,9 @@ urlpatterns = [
 
     # GET — DB-only poll target for the callback page
     path("status/<str:reference>/", PaymentStatusView.as_view(), name="status"),
+
+    # GET — PNG QR code encoding the booking's public verification URL
+    path("bookings/<str:reference>/qr.png", BookingQrCodeView.as_view(), name="booking-qr"),
 
     # POST — Paystack server-to-server webhook (async source of truth)
     path("webhook/", PaystackWebhookView.as_view(), name="webhook"),

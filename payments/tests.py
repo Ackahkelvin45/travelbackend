@@ -1101,6 +1101,21 @@ class MomoChannelTests(TestCase):
         _, kwargs = mock_init.call_args
         self.assertEqual(kwargs["channels"], ["card"])
 
+    @patch("payments.views.initialize_transaction")
+    def test_default_channel_offers_card_and_momo_in_popup(self, mock_init):
+        """No channel → the Paystack popup offers card AND mobile money; the
+        buyer picks the network and number inside Paystack."""
+        mock_init.return_value = {"access_code": "a", "authorization_url": "https://p/x"}
+        booking = self._booking()
+        r = self.client.post("/api/payments/initialize/", {
+            "booking_id": str(booking.id),
+        }, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["channel"], "any")
+        self.assertEqual(r.data["access_code"], "a")
+        _, kwargs = mock_init.call_args
+        self.assertEqual(kwargs["channels"], ["card", "mobile_money"])
+
     def test_momo_requires_phone_and_provider(self):
         booking = self._booking()
         r = self.client.post("/api/payments/initialize/", {
@@ -1619,3 +1634,30 @@ class EmailTemplateSelectionTests(TestCase):
                 apply_successful_payment(second, gateway_ok(second))
         self.assertEqual(conf.call_count, 0)
         self.assertEqual(rcpt.call_count, 1)
+
+
+# ── Receipt QR code ──────────────────────────────────────────────────────────
+
+from django.test import override_settings
+
+
+@override_settings(FRONTEND_URL="https://front.example/")
+class BookingQrCodeTests(TestCase):
+    def test_qr_points_at_frontend_not_api_host(self):
+        """The QR PNG is served by the API, but scanning it must open the
+        frontend's verification page — never the backend host."""
+        from .receipts import booking_verify_url
+
+        booking = make_booking(total="1200.00")
+        self.assertEqual(
+            booking_verify_url(booking),
+            f"https://front.example/payment/callback?reference={booking.reference}",
+        )
+
+        r = APIClient().get(f"/api/payments/bookings/{booking.reference}/qr.png")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r["Content-Type"], "image/png")
+
+    def test_qr_unknown_reference_404(self):
+        r = APIClient().get("/api/payments/bookings/AZT-NOPE/qr.png")
+        self.assertEqual(r.status_code, 404)

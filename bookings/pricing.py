@@ -21,6 +21,36 @@ class QuoteError(Exception):
     """Raised when a selection cannot be priced (inactive option, bad plan…)."""
 
 
+def installments_open(package, today=None) -> bool:
+    """Deposits are only offered BEFORE the final payment deadline — a booking
+    made on or after that date is payable in full (policy Part C). Ghana keeps
+    GMT year-round and settings.TIME_ZONE is UTC, so localdate() IS the
+    Africa/Accra date the policy's 23:59 boundary is expressed in."""
+    if not (package.allow_installments and package.deposit_minimum):
+        return False
+    if package.final_payment_deadline:
+        from django.utils import timezone
+        return (today or timezone.localdate()) < package.final_payment_deadline
+    return True
+
+
+def deposit_for(package, total: Decimal, num_guests: int) -> Decimal:
+    """The minimum initial payment for this cart.
+
+    per_booking  → one minimum for the whole booking (capped at the total).
+    per_traveller → the minimum for each guest, each capped at that guest's
+    share of the total, then summed: two $878 travellers owe $1,756, not
+    $1,000, while a lone $878 traveller owes $878 and never the $1,000 minimum.
+    """
+    from packages.models import TravelPackage
+
+    minimum = package.deposit_minimum
+    if package.deposit_unit == TravelPackage.DepositUnit.PER_TRAVELLER and num_guests > 0:
+        share = quantize(total / num_guests)
+        return quantize(min(minimum, share) * num_guests)
+    return quantize(min(minimum, total))
+
+
 @dataclass
 class Quote:
     option: object
@@ -128,7 +158,11 @@ def compute_quote(option, *, visa: bool, payment_plan: str, at=None) -> Quote:
     if payment_plan == Booking.PaymentPlan.INSTALLMENT:
         if not package.deposit_minimum:
             raise QuoteError("Installment payment is not configured for this tour.")
-        quote.deposit_required = quantize(min(package.deposit_minimum, quote.total))
+        if not installments_open(package):
+            raise QuoteError(
+                "The final payment deadline has passed — this booking is payable in full."
+            )
+        quote.deposit_required = deposit_for(package, quote.total, num_guests)
         quote.amount_due_today = quote.deposit_required
     else:
         quote.amount_due_today = quote.total
@@ -258,7 +292,11 @@ def compute_configurable_quote(package, *, num_guests: int, selected_addon_codes
     if payment_plan == Booking.PaymentPlan.INSTALLMENT:
         if not package.deposit_minimum:
             raise QuoteError("Installment payment is not configured for this tour.")
-        quote.deposit_required = quantize(min(package.deposit_minimum, total))
+        if not installments_open(package):
+            raise QuoteError(
+                "The final payment deadline has passed — this booking is payable in full."
+            )
+        quote.deposit_required = deposit_for(package, total, num_guests)
         quote.amount_due_today = quote.deposit_required
     else:
         quote.amount_due_today = total
@@ -305,8 +343,9 @@ def build_configurable_matrix(package) -> dict:
         "ungrouped_addons": ungrouped,
         "discount_rules": rules,
         "installments": {
-            "enabled": bool(package.allow_installments and package.deposit_minimum),
+            "enabled": installments_open(package),
             "deposit_minimum": str(quantize(package.deposit_minimum)) if package.deposit_minimum else None,
+            "deposit_unit": package.deposit_unit,
             "final_payment_deadline": package.final_payment_deadline,
         },
         "charge": _charge_info(package),
@@ -372,8 +411,9 @@ def build_pricing_matrix(package, at=None) -> dict:
             "refundable": False,
         },
         "installments": {
-            "enabled": bool(package.allow_installments and package.deposit_minimum),
+            "enabled": installments_open(package),
             "deposit_minimum": str(quantize(package.deposit_minimum)) if package.deposit_minimum else None,
+            "deposit_unit": package.deposit_unit,
             "final_payment_deadline": package.final_payment_deadline,
         },
         "early_bird": {

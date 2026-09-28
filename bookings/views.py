@@ -354,6 +354,7 @@ class CurrentPoliciesView(APIView):
                 "version": d.version,
                 "title": d.title,
                 "body": d.body,
+                "is_required": d.is_required,
                 "published_at": d.published_at,
             }
             for d in docs

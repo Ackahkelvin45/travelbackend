@@ -157,10 +157,11 @@ class PackageAddonGroupInline(TabularInline):
 
 class PackageAddonInline(TabularInline):
     """Optional add-ons for core_plus_addons packages (hotels, experiences).
-    Assign each to a group, or leave ungrouped for an independent option."""
+    Assign each to a group, or leave ungrouped for an independent option.
+    'Unit' decides whether the price is × guests or flat per booking."""
     model = PackageAddon
     extra = 0
-    fields = ["name", "code", "group", "price", "unit", "is_default", "refundable", "order", "is_active"]
+    fields = ["name", "code", "group", "description", "price", "unit", "is_default", "refundable", "order", "is_active"]
     ordering = ["order"]
 
 
@@ -274,7 +275,7 @@ class TravelPackageAdmin(ModelAdmin):
             "description": "For option-based tours, Available From/To ARE the tour dates. "
                            "The final payment deadline applies live to every booking "
                            "without a per-booking override.",
-            "fields": ("duration_days", "max_guests", "available_from", "available_to",
+            "fields": ("duration_days", "max_guests", "min_group_size", "available_from", "available_to",
                        "early_bird_deadline", "final_payment_deadline"),
         }),
         ("Payment Terms", {
@@ -282,7 +283,7 @@ class TravelPackageAdmin(ModelAdmin):
                            "time using the live market rate plus the margin (rate history is in "
                            "Payments → Exchange Rates); the manual rate is the fallback if the "
                            "rate feed is down. The ledger stays in the package currency.",
-            "fields": ("allow_installments", "deposit_minimum", "currency",
+            "fields": ("allow_installments", "deposit_minimum", "deposit_unit", "currency",
                        "fx_mode", "fx_margin_percent", "charge_exchange_rate"),
         }),
         ("Visa Add-on", {

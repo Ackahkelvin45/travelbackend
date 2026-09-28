@@ -25,8 +25,12 @@ class PolicyAcceptanceRequired(Exception):
 
 
 def required_policy_documents():
-    """Every currently-published policy version must be accepted at checkout."""
-    return list(PolicyDocument.objects.filter(is_current=True, published_at__isnull=False))
+    """Every currently-published MANDATORY policy version must be accepted at
+    checkout. Optional consents (is_required=False, e.g. media) are recorded
+    when given but never block a booking."""
+    return list(PolicyDocument.objects.filter(
+        is_current=True, published_at__isnull=False, is_required=True,
+    ))
 
 
 def create_option_booking(

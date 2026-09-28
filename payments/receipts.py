@@ -19,6 +19,37 @@ from django.utils import timezone
 
 from .money import quantize
 
+
+def booking_verify_url(booking, request=None) -> str:
+    """The URL a QR code on a receipt/ticket should carry: the public FRONTEND
+    page a scanned code resolves to. Never the request host — QR images are
+    served by the API, so that would point scanners at the backend."""
+    from django.conf import settings
+
+    base = getattr(settings, "FRONTEND_URL", "https://azuratravels.live").rstrip("/")
+    return f"{base}/payment/callback?reference={booking.reference}"
+
+
+def qr_code_data_uri(data: str) -> str | None:
+    """Inline-able PNG data URI for embedding a QR in HTML (receipts, tickets).
+    Returns None if the qrcode/Pillow packages are unavailable so callers can
+    degrade gracefully."""
+    try:
+        import base64
+
+        import qrcode
+
+        qr = qrcode.QRCode(version=1, box_size=6, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#1a1a2e", back_color="white")
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None
+
 # What Azura sells today: a package built from a hotel/occupancy OPTION, plus
 # optional per-guest add-ons (visa). There are no separate flight/ticket/tax/
 # commission/platform-fee concepts in the data model — the breakdown reflects
@@ -148,6 +179,7 @@ def render_receipt_html(payment, *, business_name="Azura Travels",
     paid_at = payment.paid_at.strftime("%B %d, %Y · %H:%M") if payment.paid_at else "—"
     generated = timezone.now().strftime("%B %d, %Y · %H:%M")
     customer = e(f"{booking.first_name} {booking.last_name}".strip())
+    qr_uri = qr_code_data_uri(booking_verify_url(booking))
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -171,10 +203,12 @@ def render_receipt_html(payment, *, business_name="Azura Travels",
     <table style="margin-bottom:26px;"><tr>
       <td><h1>{e(business_name)}</h1>
           <div style="color:#777;font-size:12px;margin-top:4px;">Premium Travel Experiences</div></td>
-      <td style="text-align:right;">
+      <td style="text-align:right;vertical-align:top;">
         <div style="font-size:12px;color:#777;text-transform:uppercase;letter-spacing:1px;">Receipt</div>
         <div style="font-weight:700;font-size:14px;">{e(receipt_number(payment))}</div>
         <div style="font-size:12px;color:#777;margin-top:4px;">Issued {generated}</div>
+        {f'<img src="{qr_uri}" width="90" height="90" alt="Booking QR code" style="margin-top:10px;border:1px solid #eee;border-radius:8px;padding:6px;background:#fff;"/>' if qr_uri else ""}
+        {f'<div style="font-size:10px;color:#999;margin-top:4px;max-width:110px;margin-left:auto;">Scan to verify booking {e(booking.reference)}</div>' if qr_uri else ""}
       </td>
     </tr></table>
 

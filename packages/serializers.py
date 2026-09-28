@@ -300,6 +300,7 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "destination_ids",
             "duration_days",
             "max_guests",
+            "min_group_size",
             "price_shared",
             "price_private",
             "price_vip",

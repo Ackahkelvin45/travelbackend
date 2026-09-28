@@ -25,15 +25,56 @@ from packages.models import (
 
 SLUG = "michael-blackson-ghana-experience"
 
+# (day, title, activities) — one activity per line, straight from the guide.
 ITINERARY = [
-    (1, "Arrival & Welcome", "Arrival in Accra, hotel check-in for guests with accommodation, orientation / leisure."),
-    (2, "Accra Cultural Experience", "National Museum, Kwame Nkrumah Mausoleum, Independence Square, Arts Centre, Art District, lunch at Buka/Baobab."),
-    (3, "Cape Coast & Crown Forest", "Cape Coast Castle, Michael Blackson Academy, lunch at Lemon Beach Resort, overnight at Crown Forest (Standard Room, included in Core)."),
-    (4, "Crown Forest Experience", "Crown Forest safari & activities, leisure, return to Accra."),
-    (5, "Michael Blackson / VIP Day", "Meet the Press / tourism engagement, proposed Jubilee House visit. Optional: Kozo/Vine Dinner, ENZO VIP Table with Michael Blackson."),
-    (6, "Eastern Region Experience", "Oboadaka Waterfalls, Aburi Botanical Gardens, Peduase Valley Resort, lunch/swimming. Optional: Waterfall Massage."),
-    (7, "Beach Day & Farewell Dinner", "Beach / leisure, official Farewell Dinner with Michael Blackson and the team."),
-    (8, "Shopping, Checkout & Departure", "Makola Market shopping where flight timing permits, checkout, airport transfers."),
+    (1, "Arrival & Welcome", [
+        "Arrival in Accra",
+        "Welcome and hotel check-in for guests who selected accommodation",
+        "Orientation / leisure",
+    ]),
+    (2, "Accra Cultural Experience", [
+        "National Museum of Ghana",
+        "Kwame Nkrumah Mausoleum",
+        "Independence Square",
+        "Accra International Arts Centre",
+        "Accra Art District",
+        "Lunch at Buka / Baobab",
+    ]),
+    (3, "Cape Coast & Crown Forest", [
+        "Travel to Cape Coast",
+        "Cape Coast Castle",
+        "Michael Blackson Academy",
+        "Lunch at Lemon Beach Resort",
+        "Travel to Crown Forest",
+        "Overnight at Crown Forest — Standard Room included in the Core Tour",
+    ]),
+    (4, "Crown Forest Experience", [
+        "Crown Forest Safari & Activities",
+        "Leisure at Crown Forest",
+        "Return to Accra",
+    ]),
+    (5, "Michael Blackson / VIP Day", [
+        "Meet the Press / tourism engagement",
+        "Proposed Jubilee House visit",
+        "Optional: Kozo / Vine Dinner",
+        "Optional: ENZO VIP Table Experience with Michael Blackson",
+    ]),
+    (6, "Eastern Region Experience", [
+        "Oboadaka Waterfalls",
+        "Aburi Botanical Gardens",
+        "Peduase Valley Resort",
+        "Lunch / swimming",
+        "Optional: Waterfall Massage",
+    ]),
+    (7, "Beach Day & Farewell Dinner", [
+        "Beach / leisure experience — venue to be confirmed",
+        "Official Farewell Dinner with Michael Blackson and the team",
+    ]),
+    (8, "Shopping, Checkout & Departure", [
+        "Makola Market / last-minute shopping where flight timing permits",
+        "Hotel checkout",
+        "Airport transfers and departures",
+    ]),
 ]
 
 
@@ -54,6 +95,12 @@ class Command(BaseCommand):
                 whats_included=["Core Tour (all listed daytime experiences)",
                                 "Crown Forest Standard Room + Safari & Activities (Jan 6)"],
                 duration_days=8,
+                min_group_size=30,
+                # Policies guide Appendix E proposed defaults (owner-approvable in admin):
+                # $1,000 per traveller capped at their package price, balance due
+                # 30 days before departure (5 Dec 2026, 23:59 Accra = UTC).
+                deposit_unit=TravelPackage.DepositUnit.PER_TRAVELLER,
+                final_payment_deadline=date(2026, 12, 5),
                 currency="USD",
                 pricing_model=TravelPackage.PricingModel.CORE_PLUS_ADDONS,
                 base_price_per_person=Decimal("878.00"),
@@ -78,19 +125,25 @@ class Command(BaseCommand):
         )
 
         # ── Add-ons ───────────────────────────────────────────────────────────
-        def addon(code, name, price, unit, group, default=False, order=0):
+        def addon(code, name, price, unit, group, default=False, order=0, description=None):
             obj, _ = PackageAddon.objects.update_or_create(
                 package=pkg, code=code,
                 defaults=dict(name=name, price=Decimal(price), unit=unit, group=group,
-                              is_default=default, order=order, is_active=True),
+                              is_default=default, order=order, is_active=True,
+                              description=description),
             )
             return obj
 
         PP = PackageAddon.Unit.PER_PERSON
         FLAT = PackageAddon.Unit.PER_BOOKING
+        # Hotels are flat per booking here; switch 'unit' in admin if the client
+        # wants them charged per guest instead.
+        HOTEL_NOTE = "6 nights in Accra (Jan 6 is the included Crown Forest overnight). Breakfast/buffet included."
         no_hotel = addon("no_hotel", "No Hotel", "0.00", FLAT, hotels, default=True, order=0)
-        mid = addon("hotel_mid", "Mid-Tier Accra Hotel (6 nights)", "2000.00", FLAT, hotels, order=1)
-        prem = addon("hotel_premium", "Premium Accra Hotel (6 nights)", "3200.00", FLAT, hotels, order=2)
+        mid = addon("hotel_mid", "Mid-Tier Accra Hotel (6 nights)", "2000.00", FLAT, hotels, order=1,
+                    description=HOTEL_NOTE)
+        prem = addon("hotel_premium", "Premium Accra Hotel (6 nights)", "3200.00", FLAT, hotels, order=2,
+                     description=HOTEL_NOTE)
         kozo = addon("kozo_vine", "Kozo / Vine Dinner", "100.00", PP, experiences, order=1)
         enzo = addon("enzo_vip", "ENZO VIP Table with Michael Blackson", "133.00", PP, experiences, order=2)
         massage = addon("waterfall_massage", "Waterfall Massage", "107.00", PP, experiences, order=3)
@@ -110,9 +163,10 @@ class Command(BaseCommand):
         rule("Core + Premium Hotel + all extras", "15.00", [prem] + all_extras)
 
         # ── Itinerary ─────────────────────────────────────────────────────────
-        for day, title, desc in ITINERARY:
+        for day, title, activities in ITINERARY:
             Itinerary.objects.update_or_create(
-                package=pkg, day=day, defaults=dict(title=title, description=desc, activities=[]))
+                package=pkg, day=day,
+                defaults=dict(title=title, description=title, activities=activities))
 
         self.stdout.write(self.style.SUCCESS(
             f"Michael Blackson package {'created' if created else 'updated'}: "

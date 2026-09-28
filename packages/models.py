@@ -91,7 +91,14 @@ class TravelPackage(models.Model):
         blank=True,
     )
     duration_days = models.PositiveIntegerField()
-    max_guests = models.PositiveIntegerField(default=10)
+    max_guests = models.PositiveIntegerField(
+        default=10, help_text="Most guests a single booking can hold.",
+    )
+    min_group_size = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Minimum planning group for the tour to run (display only, e.g. 30). "
+                  "Leave empty to hide.",
+    )
 
     # ── Pricing ───────────────────────────────────────────────────────────────
     # Each option has a min price; max is optional (null = exact / "from" price).
@@ -136,6 +143,17 @@ class TravelPackage(models.Model):
     deposit_minimum = models.DecimalField(
         max_digits=12, decimal_places=2, null=True, blank=True,
         help_text="Minimum deposit (in package currency) that confirms an installment booking.",
+    )
+
+    class DepositUnit(models.TextChoices):
+        PER_BOOKING = "per_booking", "Per booking (one deposit, whatever the guest count)"
+        PER_TRAVELLER = "per_traveller", "Per traveller (× guests, each capped at their share)"
+
+    deposit_unit = models.CharField(
+        max_length=14, choices=DepositUnit.choices, default=DepositUnit.PER_BOOKING,
+        help_text="How the minimum deposit scales with guests. Per traveller charges "
+                  "the minimum for each guest, capped at that guest's share of the "
+                  "total (so a $878 guest pays $878, never the $1,000 minimum).",
     )
     final_payment_deadline = models.DateField(
         null=True, blank=True,

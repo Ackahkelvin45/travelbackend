@@ -1,6 +1,8 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from .password_validation import PasswordStrengthValidator
+
 User = get_user_model()
 
 
@@ -19,6 +21,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "password",
             "password_confirm",
         ]
+
+    def validate_password(self, value):
+        # Same five rules as the frontend checklist; raises with readable
+        # messages so the UI can surface them if client checks were skipped.
+        PasswordStrengthValidator().validate(value)
+        return value
 
     def validate(self, data):
         if data["password"] != data.pop("password_confirm"):

@@ -23,10 +23,12 @@ class InitializePaymentSerializer(serializers.Serializer):
         help_text="Required for intent=custom. Ignored otherwise.",
     )
     channel = serializers.ChoiceField(
-        choices=["card", "momo"],
-        default="card",
+        choices=["any", "card", "momo"],
+        default="any",
         help_text=(
-            "card = hosted checkout / Inline popup (authorization_url + access_code). "
+            "any = Inline popup / hosted checkout offering card AND mobile money; "
+            "the buyer picks the method, network and number inside Paystack (default). "
+            "card = hosted checkout / Inline popup restricted to card. "
             "momo = Mobile Money: the approve-prompt is pushed straight to the "
             "buyer's phone (MTN/AirtelTigo) or a mobile-money-only hosted page "
             "is returned (Telecel)."

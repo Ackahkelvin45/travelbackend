@@ -226,8 +226,8 @@ class PolicyDocumentForm(forms.ModelForm):
 @admin.register(PolicyDocument)
 class PolicyDocumentAdmin(ModelAdmin):
     form = PolicyDocumentForm
-    list_display = ["type", "version", "title", "is_current", "published_at", "created_at"]
-    list_filter = [("type", ChoicesDropdownFilter), "is_current"]
+    list_display = ["type", "version", "title", "is_required", "is_current", "published_at", "created_at"]
+    list_filter = [("type", ChoicesDropdownFilter), "is_current", "is_required"]
     search_fields = ["title", "body"]
     ordering = ["type", "-created_at"]
     actions = ["publish_documents"]

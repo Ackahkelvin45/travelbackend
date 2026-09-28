@@ -229,6 +229,7 @@ class PolicyDocument(models.Model):
         INSTALLMENT = "installment", "Installment Payment Policy"
         REFUND = "refund", "Cancellation & Refund Policy"
         PRIVACY = "privacy", "Privacy Policy"
+        MEDIA = "media", "Photography & Media Consent"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     type = models.CharField(max_length=20, choices=Type.choices)
@@ -238,6 +239,11 @@ class PolicyDocument(models.Model):
     is_current = models.BooleanField(
         default=False,
         help_text="The version shown to customers and required at checkout.",
+    )
+    is_required = models.BooleanField(
+        default=True,
+        help_text="Untick for optional consents (e.g. photography/media): they are "
+                  "offered unticked at checkout and never block a booking.",
     )
     published_at = models.DateTimeField(
         null=True, blank=True,

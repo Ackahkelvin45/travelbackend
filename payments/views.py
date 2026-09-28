@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 
@@ -128,7 +129,7 @@ class InitializePaymentView(APIView):
         serializer.is_valid(raise_exception=True)
         booking_id = serializer.validated_data["booking_id"]
         intent = serializer.validated_data.get("intent", "balance")
-        channel = serializer.validated_data.get("channel", "card")
+        channel = serializer.validated_data.get("channel", "any")
         momo_phone = serializer.validated_data.get("momo_phone")
         momo_provider = serializer.validated_data.get("momo_provider")
 
@@ -260,11 +261,16 @@ class InitializePaymentView(APIView):
                     "If no prompt appears, dial your network's approval shortcode."
                 )
             else:
-                # Hosted checkout / Inline popup. The buyer's explicit method
-                # choice restricts what Paystack shows: Telecel MoMo goes
-                # through the hosted mobile-money page (its direct charge needs
-                # Paystack's own OTP UI); card gets a card-only page.
-                channels = ["mobile_money"] if channel == "momo" else ["card"]
+                # Hosted checkout / Inline popup. "any" (the default) lets the
+                # buyer pick card or Mobile Money — network and number included —
+                # inside Paystack's own UI. An explicit choice restricts it:
+                # Telecel MoMo goes through the hosted mobile-money page (its
+                # direct charge needs Paystack's own OTP UI); card is card-only.
+                channels = {
+                    "any": ["card", "mobile_money"],
+                    "momo": ["mobile_money"],
+                    "card": ["card"],
+                }[channel]
                 paystack_data = initialize_transaction(
                     email=booking.email,
                     amount_kobo=gateway_amount,
@@ -420,6 +426,47 @@ class PaymentStatusView(APIView):
         except Payment.DoesNotExist:
             return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(_payment_status_payload(payment), status=status.HTTP_200_OK)
+
+
+# ── 3b. Booking QR code ──────────────────────────────────────────────────────
+
+class BookingQrCodeView(APIView):
+    """PNG QR code that encodes the public verification URL for a booking.
+    Scanning it takes the guest to /payment/callback?reference=<ref>, which
+    shows the booking's live payment state. Used on receipts, tickets and the
+    dashboard booking detail."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment-status"
+
+    @swagger_auto_schema(
+        tags=["Payments"],
+        operation_id="booking_qr_code",
+        operation_summary="QR code (PNG) for a booking reference",
+        manual_parameters=[
+            openapi.Parameter("reference", openapi.IN_PATH, type=openapi.TYPE_STRING, required=True),
+        ],
+        responses={200: openapi.Response("PNG image."), 404: openapi.Response("Booking not found.", schema=_error_schema)},
+    )
+    def get(self, request, reference):
+        from django.http import HttpResponse
+
+        from .receipts import booking_verify_url, qr_code_data_uri
+
+        try:
+            booking = Booking.objects.get(reference=reference)
+        except Booking.DoesNotExist:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        png = qr_code_data_uri(booking_verify_url(booking, request))
+        if png is None:
+            return Response(
+                {"detail": "QR generation unavailable (missing qrcode package)."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        png_bytes = png.split(",", 1)[1]
+        return HttpResponse(base64.b64decode(png_bytes), content_type="image/png")
 
 
 # ── 4. Webhook ────────────────────────────────────────────────────────────────

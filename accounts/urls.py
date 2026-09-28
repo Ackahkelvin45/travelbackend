@@ -5,11 +5,15 @@ from .views import (
     ResendVerificationView,
     UserProfileView,
     VerifyEmailView,
+    PasswordStrengthView,
 )
 
 urlpatterns = [
     # Registration
     path("register/", RegisterView.as_view(), name="register"),
+
+    # Live password-rule check for the signup UI
+    path("password-strength/", PasswordStrengthView.as_view(), name="password-strength"),
 
     # Email verification
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),

@@ -598,3 +598,89 @@ class ConfigurablePricingTests(TestCase):
         self.assertIn("10.00%", b.discount_note)
         from payments.receipts import compute_line_items
         self.assertTrue(compute_line_items(b)["reconciles"])
+
+
+# ── Policy-guide acceptance checks (Appendix D) ──────────────────────────────
+
+class DepositAndDeadlineTests(TestCase):
+    """The initial-payment and deadline rules from the customer-policies guide."""
+
+    def _pkg(self, **kw):
+        from packages.models import PackageAddon, PackageAddonGroup
+        pkg = make_package(
+            title="MB", slug=f"mb-dep-{TravelPackage.objects.count()}",
+            currency="USD", duration_days=8, allow_installments=True,
+            deposit_minimum=Decimal("1000.00"),
+            pricing_model=TravelPackage.PricingModel.CORE_PLUS_ADDONS,
+            base_price_per_person=Decimal("878.00"), **kw,
+        )
+        hotels = PackageAddonGroup.objects.create(package=pkg, name="Hotel", selection="single")
+        PackageAddon.objects.create(package=pkg, group=hotels, code="no_hotel", name="No Hotel",
+                                    price=Decimal("0.00"), unit="per_booking", is_default=True)
+        mid = PackageAddon.objects.create(package=pkg, group=hotels, code="hotel_mid", name="Mid",
+                                          price=Decimal("2000.00"), unit="per_booking")
+        from packages.models import PackageDiscountRule
+        rule = PackageDiscountRule.objects.create(package=pkg, name="Core + Mid", percent=Decimal("7.00"))
+        rule.required_addons.set([mid])
+        return pkg
+
+    def _quote(self, pkg, guests=1, codes=(), plan="installment"):
+        from bookings.pricing import compute_configurable_quote
+        return compute_configurable_quote(
+            pkg, num_guests=guests, selected_addon_codes=list(codes), payment_plan=plan,
+        )
+
+    def test_core_only_never_charges_more_than_the_package(self):
+        # "Core only at $878 → full $878 payment; never a $1,000 charge."
+        self.assertEqual(self._quote(self._pkg()).amount_due_today, Decimal("878.00"))
+
+    def test_per_booking_deposit_is_one_capped_minimum(self):
+        q = self._quote(self._pkg(), guests=2)          # total 1756, one minimum
+        self.assertEqual(q.amount_due_today, Decimal("1000.00"))
+
+    def test_per_traveller_deposit_sums_capped_shares(self):
+        # "Two $878 Core travellers → initial requirement $1,756."
+        pkg = self._pkg(deposit_unit=TravelPackage.DepositUnit.PER_TRAVELLER)
+        self.assertEqual(self._quote(pkg, guests=2).amount_due_today, Decimal("1756.00"))
+        # A cart above the minimum per head still pays the minimum each.
+        q = self._quote(pkg, guests=2, codes=["hotel_mid"])   # 3493.08 total
+        self.assertEqual(q.amount_due_today, Decimal("2000.00"))
+
+    def test_balance_after_deposit(self):
+        # "Package $2,676 before due date → minimum $1,000; balance $1,676."
+        q = self._quote(self._pkg(), codes=["hotel_mid"])
+        self.assertEqual(q.total - q.deposit_required, Decimal("1676.54"))
+
+    def test_installments_closed_on_and_after_the_deadline(self):
+        from bookings.pricing import QuoteError, installments_open
+        past = self._pkg(final_payment_deadline=date.today())
+        self.assertFalse(installments_open(past))          # on the due date → full payment
+        with self.assertRaises(QuoteError):
+            self._quote(past)
+        self.assertEqual(self._quote(past, plan="full").amount_due_today, Decimal("878.00"))
+        future = self._pkg(final_payment_deadline=date.today() + timedelta(days=1))
+        self.assertTrue(installments_open(future))
+
+
+class OptionalPolicyTests(TestCase):
+    """Optional consents (media) must never block a booking."""
+
+    def test_optional_policy_is_not_required_at_checkout(self):
+        from bookings.models import PolicyDocument
+        from bookings.services import required_policy_documents
+        from django.utils import timezone
+
+        PolicyDocument.objects.create(
+            type=PolicyDocument.Type.TERMS, version="1.0", title="Terms", body="t",
+            is_current=True, published_at=timezone.now(),
+        )
+        PolicyDocument.objects.create(
+            type=PolicyDocument.Type.MEDIA, version="1.0", title="Media consent", body="m",
+            is_current=True, published_at=timezone.now(), is_required=False,
+        )
+        types = {d.type for d in required_policy_documents()}
+        self.assertEqual(types, {"terms"})
+
+        r = APIClient().get("/api/bookings/policies/")
+        self.assertEqual({d["type"]: d["is_required"] for d in r.data},
+                         {"terms": True, "media": False})
