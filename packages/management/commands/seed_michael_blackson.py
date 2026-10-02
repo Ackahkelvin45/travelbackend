@@ -117,6 +117,9 @@ class Command(BaseCommand):
                 currency="USD",
                 pricing_model=TravelPackage.PricingModel.CORE_PLUS_ADDONS,
                 base_price_per_person=Decimal("878.00"),
+                # Legacy tier prices must stay empty: listing cards prefer
+                # price_shared over the $878 core price when it is set.
+                price_shared=None, price_private=None, price_vip=None,
                 allow_installments=True,
                 deposit_minimum=Decimal("1000.00"),
                 available_from=date(2027, 1, 4),

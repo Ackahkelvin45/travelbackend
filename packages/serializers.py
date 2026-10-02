@@ -217,6 +217,7 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
             "is_day_tour",
             "price_usd_estimate",
             "next_departure",
+            "spots_left",
         ]
 
     has_options = serializers.BooleanField(read_only=True)
