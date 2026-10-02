@@ -99,6 +99,11 @@ class TravelPackage(models.Model):
         help_text="Minimum planning group for the tour to run (display only, e.g. 30). "
                   "Leave empty to hide.",
     )
+    capacity = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Total guests this tour can take across all bookings. Checkout refuses "
+                  "once reached. Leave empty for unlimited. (Day tours use per-departure seats.)",
+    )
 
     # ── Pricing ───────────────────────────────────────────────────────────────
     # Each option has a min price; max is optional (null = exact / "from" price).
@@ -264,6 +269,27 @@ class TravelPackage(models.Model):
             d for d in self.departures.filter(is_active=True, date__gte=timezone.now().date()).order_by("date")
             if not d.is_full
         ]
+
+    def guests_booked(self) -> int:
+        """Guests holding a place: confirmed/completed bookings, plus pending
+        ones that are paid or still inside the checkout window."""
+        from datetime import timedelta
+        from django.conf import settings
+        from django.db.models import Q, Sum
+        from django.utils import timezone
+
+        ttl = timedelta(hours=getattr(settings, "PENDING_BOOKING_TTL_HOURS", 24))
+        holding = Q(status__in=("confirmed", "completed")) | (
+            Q(status="pending") & (Q(amount_paid__gt=0) | Q(created_at__gte=timezone.now() - ttl))
+        )
+        return self.bookings.filter(holding).aggregate(n=Sum("num_guests"))["n"] or 0
+
+    @property
+    def spots_left(self):
+        """None = unlimited."""
+        if self.capacity is None:
+            return None
+        return max(self.capacity - self.guests_booked(), 0)
 
     @property
     def has_options(self):

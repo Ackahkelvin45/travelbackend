@@ -165,6 +165,9 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     balance = serializers.SerializerMethodField()
     payment_state = serializers.SerializerMethodField()
     payments = serializers.SerializerMethodField()
+    line_items = serializers.SerializerMethodField()
+    cure_deadline = serializers.DateTimeField(read_only=True)
+    cancellation_request = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -197,6 +200,10 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "payment_status",
             "payment_reference",
             "payments",
+            "line_items",
+            "overdue_notice_sent_at",
+            "cure_deadline",
+            "cancellation_request",
             "created_at",
         ]
         read_only_fields = fields
@@ -229,6 +236,35 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             return "partially_paid"
         return "unpaid"
 
+    def get_line_items(self, obj):
+        """What the total is made of — same decomposition the receipts use,
+        so dashboard, receipt and checkout always agree."""
+        from payments.receipts import compute_line_items
+        items = compute_line_items(obj)
+        return {
+            "lines": [
+                {"label": l["label"], "detail": l["detail"], "amount": str(l["amount"]), "category": l["category"]}
+                for l in items["lines"]
+            ],
+            "subtotal": str(items["component_sum"]),
+            "discount": str(items["bundle_discount"]),
+            "discount_note": items["discount_note"],
+            "total": str(items["total"]),
+        }
+
+    def get_cancellation_request(self, obj):
+        req = obj.cancellation_requests.order_by("-requested_at").first()
+        if not req:
+            return None
+        return {
+            "status": req.status,
+            "requested_at": req.requested_at,
+            "refund_total": (req.refund_quote or {}).get("refund_total"),
+            "percent": (req.refund_quote or {}).get("percent"),
+            "resolved_at": req.resolved_at,
+            "staff_note": req.staff_note,
+        }
+
     def get_payments(self, obj):
         return [
             {
@@ -241,6 +277,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
                 "purpose": p.purpose,
                 "method": p.method,
                 "status": p.status,
+                "disputed": p.disputed,
                 "paid_at": p.paid_at,
                 "created_at": p.created_at,
             }

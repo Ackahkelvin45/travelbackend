@@ -6,6 +6,7 @@ from .views import (
     UserProfileView,
     VerifyEmailView,
     PasswordStrengthView,
+    DeleteAccountRequestView,
 )
 
 urlpatterns = [
@@ -14,6 +15,9 @@ urlpatterns = [
 
     # Live password-rule check for the signup UI
     path("password-strength/", PasswordStrengthView.as_view(), name="password-strength"),
+
+    # Privacy: request deletion of account + personal data (ticket to the team)
+    path("delete-request/", DeleteAccountRequestView.as_view(), name="delete-request"),
 
     # Email verification
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),

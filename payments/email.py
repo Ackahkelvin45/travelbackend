@@ -2,12 +2,44 @@ import io
 import base64
 import html
 import logging
+from decimal import Decimal
 
 import qrcode
 import resend
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+def deliver(kind: str, to: str, subject: str, html_body: str, *, booking=None, attachments=None) -> bool:
+    """Send one customer email through Resend and record the attempt in
+    EmailLog (Appendix C: staff must be able to see what was sent and whether
+    the provider accepted it). Never raises."""
+    from .models import EmailLog
+
+    def _log(status, provider_id="", error=""):
+        try:
+            EmailLog.objects.create(booking=booking, kind=kind, to_email=to, subject=subject[:300],
+                                    status=status, provider_id=provider_id or "", error=error[:2000])
+        except Exception:
+            logger.exception("EmailLog write failed for %s → %s", kind, to)
+
+    if not settings.RESEND_API_KEY:
+        logger.error("RESEND_API_KEY is not set. Cannot send %s.", kind)
+        _log(EmailLog.Status.FAILED, error="RESEND_API_KEY not set")
+        return False
+    resend.api_key = settings.RESEND_API_KEY
+    params = {"from": settings.RESEND_FROM_EMAIL, "to": [to], "subject": subject, "html": html_body}
+    if attachments:
+        params["attachments"] = attachments
+    try:
+        result = resend.Emails.send(params) or {}
+        _log(EmailLog.Status.SENT, provider_id=str(result.get("id", "")))
+        return True
+    except Exception as exc:
+        logger.exception("Failed to send %s to %s", kind, to)
+        _log(EmailLog.Status.FAILED, error=str(exc))
+        return False
 
 
 def _generate_qr_bytes(data: str) -> bytes:
@@ -48,13 +80,48 @@ def _build_html(booking, payment) -> str:
     from .email import build_claim_token  # self-import safe at call time
     claim_url = f"{settings.FRONTEND_URL}/claim?token={build_claim_token(booking)}"
 
+    # Terms Part A: the confirmation identifies inclusions/add-ons and the
+    # exact policy versions accepted, with durable links to each.
+    from .receipts import compute_line_items
+    items = compute_line_items(booking)
+    rows = "".join(
+        f'<tr><td style="padding:5px 0;color:#555;font-size:13px;">{html.escape(l["label"])}'
+        f'<span style="display:block;color:#999;font-size:11px;">{html.escape(l["detail"])}</span></td>'
+        f'<td align="right" style="padding:5px 0;color:#1a1a2e;font-size:13px;white-space:nowrap;">{booking.currency} {l["amount"]:,.2f}</td></tr>'
+        for l in items["lines"]
+    )
+    if items["bundle_discount"] > 0:
+        rows += (f'<tr><td style="padding:5px 0;color:#2e7d32;font-size:13px;">{html.escape(items["discount_note"] or "Bundle discount")}</td>'
+                 f'<td align="right" style="padding:5px 0;color:#2e7d32;font-size:13px;">− {booking.currency} {items["bundle_discount"]:,.2f}</td></tr>')
+    policy_paths = {"terms": "/terms-and-conditions", "refund": "/refund-policy",
+                    "installment": "/installment-policy", "privacy": "/privacy-policy"}
+    accepted = booking.policy_acceptances.select_related("document")
+    policy_links = " · ".join(
+        f'<a href="{settings.FRONTEND_URL.rstrip("/")}{policy_paths.get(a.document.type, "/terms-and-conditions")}" '
+        f'style="color:#d4a843;text-decoration:none;">{html.escape(a.document.title)} v{html.escape(a.document.version)}</a>'
+        for a in accepted
+    )
+    booked_section = f"""
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+          <tr><td>
+            <p style="margin:0 0 8px;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;">What you booked</p>
+            <table width="100%" cellpadding="0" cellspacing="0">{rows}
+              <tr><td style="padding:8px 0 0;color:#1a1a2e;font-size:13px;font-weight:800;border-top:1px solid #eee;">Total</td>
+                  <td align="right" style="padding:8px 0 0;color:#1a1a2e;font-size:13px;font-weight:800;border-top:1px solid #eee;">{booking.currency} {items["total"]:,.2f}</td></tr>
+            </table>
+            {f'<p style="margin:12px 0 0;color:#888;font-size:11px;line-height:1.6;">You accepted: {policy_links}. These versions form your booking contract.</p>' if policy_links else ""}
+          </td></tr>
+        </table>"""
+
+    # Privacy Policy: special requests can hold dietary/medical details, so
+    # they are never echoed into email — the team confirms them privately.
     if booking.special_requests:
-        special_requests_section = f"""
+        special_requests_section = """
         <table width="100%" cellpadding="0" cellspacing="0"
                style="border-left:4px solid #d4a843;padding:0 0 0 16px;margin-bottom:24px;">
           <tr><td>
             <p style="margin:0 0 6px;color:#888;font-size:11px;text-transform:uppercase;letter-spacing:1px;">Special Requests</p>
-            <p style="margin:0;color:#1a1a2e;font-size:13px;">{html.escape(booking.special_requests)}</p>
+            <p style="margin:0;color:#1a1a2e;font-size:13px;">We've noted your requests. Our team will confirm the arrangements with you directly.</p>
           </td></tr>
         </table>"""
     else:
@@ -182,6 +249,9 @@ def _build_html(booking, payment) -> str:
           </tr>
         </table>
 
+        <!-- What you booked (same breakdown as the receipt) -->
+        {booked_section}
+
         <!-- Special requests -->
         {special_requests_section}
 
@@ -191,8 +261,9 @@ def _build_html(booking, payment) -> str:
           <tr>
             <td style="padding:24px;">
               <p style="margin:0 0 14px;color:#1a1a2e;font-size:14px;font-weight:700;">What happens next?</p>
-              <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128179; Track payments, download receipts and make top-up payments any time on
-                <a href="{claim_url}" style="color:#d4a843;text-decoration:none;font-weight:600;">your booking dashboard</a>.
+              <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128179; To track payments, download receipts and top up any time,
+                <a href="{claim_url}" style="color:#d4a843;text-decoration:none;font-weight:600;">open your booking dashboard</a>
+                and sign in — or create a free account — using <strong>this same email address</strong>. Your booking attaches to it automatically.
               </p>
               <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128222; Our team will reach out within 24 hours to confirm your trip details.</p>
               <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128203; A full itinerary will be shared with you before departure.</p>
@@ -225,35 +296,22 @@ def _build_html(booking, payment) -> str:
 
 
 def send_booking_confirmation(booking, payment) -> None:
-    if not settings.RESEND_API_KEY:
-        logger.error("RESEND_API_KEY is not set. Cannot send confirmation email.")
-        return
-
-    resend.api_key = settings.RESEND_API_KEY
-
     try:
-        qr_bytes = _generate_qr_bytes(f"https://azuratravels.live/booking/{booking.reference}")
-        html = _build_html(booking, payment)
-
-        params: resend.Emails.SendParams = {
-            "from": settings.RESEND_FROM_EMAIL,
-            "to": [booking.email],
-            "subject": f"Booking Confirmed – {booking.reference} | Azura Travels",
-            "html": html,
-            "attachments": [
-                {
-                    "filename": "qr-code.png",
-                    "content": list(qr_bytes),  # Resend SDK often prefers a list of ints for raw content
-                    "content_type": "image/png",
-                    "content_id": "qr-code",
-                }
-            ],
-        }
-
-        email = resend.Emails.send(params)
-        logger.info("Confirmation email sent id=%s to=%s booking=%s", email.get("id"), booking.email, booking.reference)
-    except Exception as exc:
-        logger.exception("Failed to send confirmation email for booking %s: %s", booking.reference, str(exc))
+        qr_bytes = _generate_qr_bytes(f"{settings.FRONTEND_URL.rstrip('/')}/payment/callback?reference={booking.reference}")
+        html_body = _build_html(booking, payment)
+    except Exception:
+        logger.exception("Could not build confirmation email for booking %s", booking.reference)
+        return
+    deliver(
+        "confirmation", booking.email,
+        f"Booking Confirmed – {booking.reference} | Azura Travels", html_body, booking=booking,
+        attachments=[{
+            "filename": "qr-code.png",
+            "content": list(qr_bytes),  # Resend SDK prefers a list of ints for raw content
+            "content_type": "image/png",
+            "content_id": "qr-code",
+        }],
+    )
 
 
 def build_claim_token(booking) -> str:
@@ -292,19 +350,18 @@ def send_payment_receipt(booking, payment) -> None:
     (installment top-ups, balance payments). Confirmation emails are sent by
     send_booking_confirmation on promotion only.
     """
-    if not settings.RESEND_API_KEY:
-        logger.error("RESEND_API_KEY is not set. Cannot send payment receipt.")
-        return
-
-    resend.api_key = settings.RESEND_API_KEY
-
     fully_paid = booking.is_paid
-    heading = "Payment Complete — Fully Paid!" if fully_paid else "Payment Received"
-    sub = (
-        "Your booking is now fully paid. We can't wait to host you!"
-        if fully_paid
-        else "Thanks — your installment payment has been applied to your booking."
-    )
+    if payment.purpose == "addon":
+        added = next((l.get("name") for l in (booking.addons or []) if l.get("code") == payment.addon_code), "Your experience")
+        heading = f"{added} added"
+        sub = "It's paid for and now part of your booking — see the updated details below."
+    else:
+        heading = "Payment Complete — Fully Paid!" if fully_paid else "Payment Received"
+        sub = (
+            "Your booking is now fully paid. We can't wait to host you!"
+            if fully_paid
+            else "Thanks — your installment payment has been applied to your booking."
+        )
     dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
 
     html = f"""<!DOCTYPE html>
@@ -332,17 +389,164 @@ def send_payment_receipt(booking, payment) -> None:
   </td></tr>
 </table></td></tr></table></body></html>"""
 
-    try:
-        email = resend.Emails.send({
-            "from": settings.RESEND_FROM_EMAIL,
-            "to": [booking.email],
-            "subject": (
-                f"Payment Complete – {booking.reference} | Azura Travels"
-                if fully_paid else
-                f"Payment Received – {booking.reference} | Azura Travels"
-            ),
-            "html": html,
-        })
-        logger.info("Receipt email sent id=%s to=%s booking=%s", email.get("id"), booking.email, booking.reference)
-    except Exception as exc:
-        logger.exception("Failed to send receipt email for booking %s: %s", booking.reference, str(exc))
+    deliver("receipt", booking.email, f"Payment Receipt – {booking.reference} | Azura Travels", html, booking=booking)
+
+
+# ── Cancellation request emails (Refund Policy, Part B) ──────────────────────
+
+def _shell(title: str, body_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>{html.escape(title)}</title></head>
+<body style="margin:0;padding:0;background:#f0ece4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0ece4;padding:40px 0;"><tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;">
+  <tr><td style="background:#1a1a2e;padding:28px 40px;text-align:center;">
+    <h1 style="color:#d4a843;margin:0;font-size:24px;letter-spacing:3px;text-transform:uppercase;">Azura Travels</h1>
+  </td></tr>
+  <tr><td style="padding:32px 40px;color:#555;font-size:14px;line-height:1.6;">{body_html}</td></tr>
+</table></td></tr></table></body></html>"""
+
+
+def _send(to: str, subject: str, html_body: str, what: str, booking=None) -> None:
+    deliver(what.replace(" ", "_"), to, subject, html_body, booking=booking)
+
+
+def send_cancellation_acknowledgment(req) -> None:
+    """Dated acknowledgment — the timestamp here is the one the refund band is
+    judged from, so the guest has it in writing immediately."""
+    b = req.booking
+    q = req.refund_quote or {}
+    received = req.requested_at.strftime("%B %d, %Y at %H:%M GMT")
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, we've received your cancellation request</p>
+    <p style="margin:0 0 14px;">Booking <strong>{b.reference}</strong> · request received <strong>{received}</strong>.
+       Your refund entitlement is calculated from this moment, not from when we finish reviewing.</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 18px;font-size:13px;">
+      <tr><td style="padding:6px 0;color:#888;">Amount paid</td><td align="right" style="padding:6px 0;">{b.currency} {q.get("net_paid", b.amount_paid)}</td></tr>
+      <tr><td style="padding:6px 0;color:#888;">Days before departure</td><td align="right" style="padding:6px 0;">{q.get("days_before_departure", "—")}</td></tr>
+      <tr><td style="padding:6px 0;color:#888;">Refund rate</td><td align="right" style="padding:6px 0;">{q.get("percent", "0")}%</td></tr>
+      <tr><td style="padding:8px 0;color:#1a1a2e;font-weight:800;border-top:1px solid #eee;">Estimated refund</td>
+          <td align="right" style="padding:8px 0;color:#1a1a2e;font-weight:800;border-top:1px solid #eee;">{b.currency} {q.get("refund_total", "0.00")}</td></tr>
+    </table>
+    <p style="margin:0 0 10px;font-size:13px;">No further payments will be collected while your request is under review.
+       We aim to review within five business days and to initiate any approved refund within ten business days of approval,
+       to your original payment method. Nothing else changes on your booking until we confirm the outcome.</p>
+    <p style="margin:0;font-size:12px;color:#888;">Questions? <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a></p>"""
+    _send(b.email, f"Cancellation request received – {b.reference} | Azura Travels",
+          _shell("Cancellation request received", body), "cancellation acknowledgment", booking=b)
+
+
+def send_cancellation_outcome(req) -> None:
+    b = req.booking
+    approved = req.status == "approved"
+    q = req.refund_quote or {}
+    note = f'<p style="margin:0 0 14px;">{html.escape(req.staff_note)}</p>' if req.staff_note else ""
+    if approved:
+        heading = "Your booking has been cancelled"
+        body_text = (f"Booking <strong>{b.reference}</strong> is now cancelled as of your request on "
+                     f"<strong>{req.requested_at.strftime('%B %d, %Y')}</strong>. "
+                     f"Refund due: <strong>{b.currency} {q.get('refund_total', '0.00')}</strong> "
+                     f"({q.get('percent', '0')}% of the amount paid), to your original payment method. "
+                     "We'll email you the refund reference once it has been initiated; bank posting times vary.")
+    else:
+        heading = "Update on your cancellation request"
+        body_text = (f"We were unable to approve the cancellation request for booking <strong>{b.reference}</strong>. "
+                     "Your booking remains active and payments can continue as before.")
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, {heading.lower()}</p>
+    <p style="margin:0 0 14px;">{body_text}</p>
+    {note}
+    <p style="margin:0;font-size:12px;color:#888;">Questions? <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a></p>"""
+    _send(b.email, f"{heading} – {b.reference} | Azura Travels", _shell(heading, body), "cancellation outcome", booking=b)
+
+
+def send_refund_processed(refund) -> None:
+    """The refund has been initiated: amount, date, reference, where it goes."""
+    b = refund.booking
+    when = (refund.processed_at or timezone_now()).strftime("%B %d, %Y")
+    via = "your original payment method" if refund.payment and refund.payment.method == "paystack" else "bank transfer"
+    gateway = (refund.breakdown or {}).get("execute_on_gateway")
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, your refund is on its way</p>
+    <p style="margin:0 0 14px;">We've initiated a refund for booking <strong>{b.reference}</strong>.</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 18px;font-size:13px;">
+      <tr><td style="padding:6px 0;color:#888;">Amount</td><td align="right" style="padding:6px 0;font-weight:800;color:#1a1a2e;">{refund.currency} {refund.amount}</td></tr>
+      {f'<tr><td style="padding:6px 0;color:#888;">Charged as</td><td align="right" style="padding:6px 0;">{html.escape(gateway)}</td></tr>' if gateway else ""}
+      <tr><td style="padding:6px 0;color:#888;">Initiated</td><td align="right" style="padding:6px 0;">{when}</td></tr>
+      <tr><td style="padding:6px 0;color:#888;">Refund reference</td><td align="right" style="padding:6px 0;">{html.escape(refund.external_reference or "—")}</td></tr>
+      <tr><td style="padding:6px 0;color:#888;">Returned to</td><td align="right" style="padding:6px 0;">{via}</td></tr>
+    </table>
+    <p style="margin:0 0 10px;font-size:13px;">Banks and card providers post refunds at different speeds — usually within 5–10 business days.
+       Quote the reference above if you need to ask us or your bank about it.</p>
+    <p style="margin:0;font-size:12px;color:#888;">Questions? <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a></p>"""
+    _send(b.email, f"Refund initiated – {b.reference} | Azura Travels", _shell("Refund initiated", body), "refund processed", booking=b)
+
+
+def timezone_now():
+    from django.utils import timezone
+    return timezone.now()
+
+
+def send_payment_failed(payment) -> None:
+    """A card/MoMo attempt failed. Nothing was charged; here's the safe retry."""
+    b = payment.booking
+    pay_url = f"{settings.FRONTEND_URL.rstrip('/')}/booking/{b.reference}/pay"
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, a payment didn't go through</p>
+    <p style="margin:0 0 14px;">Your attempt to pay <strong>{payment.currency} {payment.amount}</strong> towards booking
+       <strong>{b.reference}</strong> was declined by your bank or provider. <strong>Nothing was charged</strong>, and your booking is unchanged.</p>
+    <p style="margin:0 0 18px;">You can try again whenever you're ready — a fresh, secure payment session is created each time.</p>
+    <a href="{pay_url}" style="display:inline-block;padding:14px 24px;background:#d4a843;color:#1a1a2e;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Try again</a>
+    <p style="margin:24px 0 0;font-size:12px;color:#888;">If this keeps happening, check with your bank or contact <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a>.</p>"""
+    deliver("payment_failed", b.email, f"Payment not completed – {b.reference} | Azura Travels",
+            _shell("Payment not completed", body), booking=b)
+
+
+def send_traveller_updated(booking, previous: dict, kind: str) -> None:
+    """Terms Part A: confirm a name correction or traveller replacement in
+    writing. The new traveller gets the booking link and a claim link for
+    their own account; a replaced traveller's old address is told too."""
+    b = booking
+    status_url = f"{settings.FRONTEND_URL.rstrip('/')}/payment/callback?reference={b.reference}"
+    claim_url = f"{settings.FRONTEND_URL.rstrip('/')}/claim?token={build_claim_token(b)}"
+    what = "name corrected" if kind == "correction" else "traveller updated"
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, your booking details were updated</p>
+    <p style="margin:0 0 14px;">Booking <strong>{b.reference}</strong> · {html.escape(b.package.title)} now names
+       <strong>{html.escape(b.first_name)} {html.escape(b.last_name)}</strong> as the traveller
+       {"(previously " + html.escape(previous["first_name"] + " " + previous["last_name"]) + ")" if kind == "replacement" else "(spelling corrected)"}.
+       All payments made stay with this booking. No charge applies for this change.</p>
+    <p style="margin:0 0 18px;">You can check the booking any time at
+       <a href="{status_url}" style="color:#d4a843;">{status_url}</a>.
+       To manage payments and receipts in your own account, <a href="{claim_url}" style="color:#d4a843;font-weight:600;">open the booking dashboard</a>
+       and sign in or create an account with this email address.</p>
+    <p style="margin:0;font-size:12px;color:#888;">Didn't expect this? Contact <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a> immediately.</p>"""
+    deliver(f"traveller_{kind}", b.email, f"Booking {what} – {b.reference} | Azura Travels", _shell("Booking updated", body), booking=b)
+
+    if previous.get("email") and previous["email"].lower() != b.email.lower():
+        old_body = f"""
+        <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Booking {b.reference} has been transferred</p>
+        <p style="margin:0 0 14px;">At the request received by our team, booking <strong>{b.reference}</strong> now names a different traveller,
+           and this email address is no longer attached to it. If you did not ask for this, contact us immediately at
+           <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a>.</p>"""
+        deliver("traveller_replaced_notice", previous["email"], f"Booking {b.reference} transferred | Azura Travels",
+                _shell("Booking transferred", old_body), booking=b)
+
+
+def send_addon_removed(booking, line: dict, fee, refund) -> None:
+    b = booking
+    name = html.escape(line.get("name", "an add-on"))
+    charge = line.get("line_total", "0")
+    outcome = (
+        f"You'd already paid more than the new total, so <strong>{b.currency} {refund}</strong> is being refunded to your original payment method — we'll email the reference once it's initiated."
+        if refund and Decimal(str(refund)) > 0 else
+        f"Your remaining balance is now <strong>{b.currency} {b.balance}</strong>."
+    )
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(b.first_name)}, {name} has been removed</p>
+    <p style="margin:0 0 14px;">As requested, <strong>{name}</strong> ({b.currency} {charge}) has been cancelled on booking <strong>{b.reference}</strong>.
+       Under the booking terms, 50% of a cancelled experience is retained: a cancellation fee of <strong>{b.currency} {fee}</strong> applies.</p>
+    <p style="margin:0 0 14px;">New booking total: <strong>{b.currency} {b.total_amount}</strong>. {outcome}</p>
+    <p style="margin:0;font-size:12px;color:#888;">Questions? <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a></p>"""
+    deliver("addon_removed", b.email, f"{line.get('name', 'Add-on')} cancelled – {b.reference} | Azura Travels",
+            _shell("Add-on cancelled", body), booking=b)

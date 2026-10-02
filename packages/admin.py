@@ -275,7 +275,7 @@ class TravelPackageAdmin(ModelAdmin):
             "description": "For option-based tours, Available From/To ARE the tour dates. "
                            "The final payment deadline applies live to every booking "
                            "without a per-booking override.",
-            "fields": ("duration_days", "max_guests", "min_group_size", "available_from", "available_to",
+            "fields": ("duration_days", "max_guests", "min_group_size", "capacity", "available_from", "available_to",
                        "early_bird_deadline", "final_payment_deadline"),
         }),
         ("Payment Terms", {

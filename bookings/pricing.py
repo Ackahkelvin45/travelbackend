@@ -21,6 +21,23 @@ class QuoteError(Exception):
     """Raised when a selection cannot be priced (inactive option, bad plan…)."""
 
 
+def _fee_notice() -> str:
+    from payments.models import OpsConfig
+    return OpsConfig.get().checkout_fee_notice
+
+
+def assert_capacity(package, num_guests: int) -> None:
+    """Refuse a checkout that would exceed the tour's total capacity."""
+    left = package.spots_left
+    if left is None:
+        return
+    if num_guests > left:
+        raise QuoteError(
+            "This tour is fully booked." if left == 0
+            else f"Only {left} place{'s' if left != 1 else ''} left on this tour."
+        )
+
+
 def installments_open(package, today=None) -> bool:
     """Deposits are only offered BEFORE the final payment deadline — a booking
     made on or after that date is payable in full (policy Part C). Ghana keeps
@@ -349,6 +366,7 @@ def build_configurable_matrix(package) -> dict:
             "final_payment_deadline": package.final_payment_deadline,
         },
         "charge": _charge_info(package),
+        "notices": {"fees": _fee_notice()},
     }
 
 
@@ -425,6 +443,7 @@ def build_pricing_matrix(package, at=None) -> dict:
         # using the SAME resolution as the charge itself (live rate + margin,
         # falling back per payments.fx) so display always matches the charge.
         "charge": _charge_info(package),
+        "notices": {"fees": _fee_notice()},
         # Server clock — the frontend corrects browser clock drift with
         # offset = server_now - Date.now() and derives countdowns from it.
         "server_now": at,

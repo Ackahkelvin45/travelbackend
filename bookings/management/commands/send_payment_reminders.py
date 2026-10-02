@@ -1,6 +1,6 @@
 """
 Daily reminder emails for confirmed installment bookings with an outstanding
-balance, at 7 / 3 / 1 days before the effective payment deadline.
+balance, at 14 / 7 / 1 days before the effective payment deadline.
 
 Idempotent via per-booking `reminders_sent` markers — safe to run more than
 once a day, or after a missed day.
@@ -22,12 +22,12 @@ from bookings.models import Booking
 
 logger = logging.getLogger(__name__)
 
-REMINDER_MARKS = [7, 3, 1]  # days before deadline
+REMINDER_MARKS = [14, 7, 1]  # days before deadline (Installment Policy)
 
 
 def _build_reminder_html(booking, days_left):
     deadline = booking.effective_payment_deadline.strftime("%B %d, %Y")
-    dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
+    dashboard_url = f"{settings.FRONTEND_URL.rstrip('/')}/booking/{booking.reference}/pay"  # public pay page — no login needed
     urgency = "final reminder" if days_left <= 1 else "reminder"
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Payment {urgency} – {booking.reference}</title></head>
@@ -45,8 +45,9 @@ def _build_reminder_html(booking, days_left):
       ({days_left} day{"s" if days_left != 1 else ""} away).
     </p>
     <p style="margin:0 0 24px;color:#555;font-size:13px;line-height:1.6;">
-      Bookings not fully paid by the deadline may be cancelled and deposits may be
-      forfeited under the cancellation policy you accepted at booking.
+      Extra payments before the deadline are welcome any time. If the balance is still
+      outstanding after the deadline we will contact you before anything changes, under
+      the booking terms and refund policy you accepted at booking.
     </p>
     <a href="{dashboard_url}" style="display:inline-block;padding:14px 24px;background:#d4a843;color:#1a1a2e;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Pay your balance</a>
   </td></tr>
@@ -54,14 +55,9 @@ def _build_reminder_html(booking, days_left):
 
 
 class Command(BaseCommand):
-    help = "Send 7/3/1-day payment-deadline reminder emails (idempotent)."
+    help = "Send 14/7/1-day payment-deadline reminder emails (idempotent)."
 
     def handle(self, *args, **options):
-        if not settings.RESEND_API_KEY:
-            self.stderr.write("RESEND_API_KEY not set — cannot send reminders.")
-            return
-
-        resend.api_key = settings.RESEND_API_KEY
         today = timezone.now().date()
         sent = 0
 
@@ -85,15 +81,10 @@ class Command(BaseCommand):
             if key in (booking.reminders_sent or {}):
                 continue
 
-            try:
-                resend.Emails.send({
-                    "from": settings.RESEND_FROM_EMAIL,
-                    "to": [booking.email],
-                    "subject": f"Balance due {deadline.strftime('%b %d')} – {booking.reference} | Azura Travels",
-                    "html": _build_reminder_html(booking, days_left),
-                })
-            except Exception:
-                logger.exception("Reminder email failed for %s", booking.reference)
+            from payments.email import deliver
+            if not deliver(f"reminder_{key}", booking.email,
+                           f"Balance due {deadline.strftime('%b %d')} – {booking.reference} | Azura Travels",
+                           _build_reminder_html(booking, days_left), booking=booking):
                 continue
 
             booking.reminders_sent = {**(booking.reminders_sent or {}), key: timezone.now().isoformat()}

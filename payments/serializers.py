@@ -10,14 +10,17 @@ class InitializePaymentSerializer(serializers.Serializer):
         help_text="UUID of the Booking to pay for."
     )
     intent = serializers.ChoiceField(
-        choices=["balance", "deposit", "custom"],
+        choices=["balance", "deposit", "custom", "addon"],
         default="balance",
         help_text=(
             "balance = pay everything outstanding (default). "
             "deposit = pay the outstanding part of the installment deposit. "
-            "custom = pay `amount` (server-clamped to the outstanding balance)."
+            "custom = pay `amount` (server-clamped to the outstanding balance). "
+            "addon = buy one more experience (`addon_code`); it joins the booking when paid."
         ),
     )
+    addon_code = serializers.CharField(max_length=60, required=False,
+                                       help_text="Required for intent=addon.")
     amount = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False,
         help_text="Required for intent=custom. Ignored otherwise.",
@@ -52,6 +55,8 @@ class InitializePaymentSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"amount": "A positive amount is required for a custom payment."}
                 )
+        if attrs.get("intent") == "addon" and not attrs.get("addon_code"):
+            raise serializers.ValidationError({"addon_code": "Which experience?"})
         if attrs.get("channel") == "momo":
             if not attrs.get("momo_phone"):
                 raise serializers.ValidationError(

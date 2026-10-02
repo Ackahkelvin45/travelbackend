@@ -144,9 +144,17 @@ class InitializePaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if booking.is_paid:
+        if booking.is_paid and intent != "addon":
             return Response({"detail": "This booking has already been paid in full."},
                             status=status.HTTP_400_BAD_REQUEST)
+
+        # Refund Policy: no collection while a cancellation request is under review.
+        if booking.pending_cancellation:
+            return Response(
+                {"detail": "A cancellation request for this booking is under review — "
+                           "payments are paused until it is resolved."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Lazy expiry: an unpaid option-based booking past its TTL cannot be
         # revived — the customer rebooks at current pricing (this also bounds
@@ -171,10 +179,27 @@ class InitializePaymentView(APIView):
         elif intent == "custom":
             # Clamp, never trust: a top-up can never exceed the outstanding balance.
             amount = min(quantize(serializer.validated_data["amount"]), balance)
+            # Installment Policy: the FIRST payment must at least meet the deposit
+            # (later top-ups can be any amount).
+            if (booking.payment_plan == Booking.PaymentPlan.INSTALLMENT and booking.amount_paid == 0
+                    and booking.deposit_required and amount < min(quantize(booking.deposit_required), balance)):
+                return Response(
+                    {"detail": f"The first payment must be at least {booking.currency} {quantize(booking.deposit_required)}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif intent == "addon":
+            from bookings.services import IllegalTransition, quote_addon_addition
+            try:
+                addon_line = quote_addon_addition(booking, serializer.validated_data["addon_code"])
+            except IllegalTransition as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            amount = quantize(addon_line["line_total"])
         else:
             amount = balance
 
-        if booking.payment_plan == Booking.PaymentPlan.INSTALLMENT:
+        if intent == "addon":
+            purpose = Payment.Purpose.ADDON
+        elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT:
             purpose = (
                 Payment.Purpose.DEPOSIT
                 if booking.amount_paid < (booking.deposit_required or 0)
@@ -229,6 +254,7 @@ class InitializePaymentView(APIView):
             charged_currency=charged_currency,
             exchange_rate=exchange_rate,
             purpose=purpose,
+            addon_code=serializer.validated_data.get("addon_code", "") if intent == "addon" else "",
         )
 
         gateway_amount = to_subunits(charged_amount if charged_amount is not None else amount)
@@ -506,6 +532,29 @@ class PaystackWebhookView(APIView):
         data = event.get("data", {})
         reference = data.get("reference")
         logger.info("Paystack webhook: event=%s ref=%s", event_type, reference)
+
+        # Chargebacks: Paystack nests the transaction under data.transaction.
+        if event_type in ("charge.dispute.create", "charge.dispute.remind", "charge.dispute.resolve"):
+            tx_ref = reference or (data.get("transaction") or {}).get("reference")
+            payment = Payment.objects.select_related("booking").filter(paystack_reference=tx_ref).first() if tx_ref else None
+            if payment:
+                resolved = event_type == "charge.dispute.resolve"
+                payment.disputed = not resolved
+                payment.dispute_status = (
+                    f"resolved: {data.get('resolution') or data.get('status') or 'closed'}" if resolved
+                    else (data.get("status") or "open")
+                )[:60]
+                payment.dispute_data = data
+                payment.save(update_fields=["disputed", "dispute_status", "dispute_data", "updated_at"])
+                if not resolved:
+                    from .alerts import alert_admin
+                    alert_admin(
+                        f"dispute-{payment.pk}", f"Chargeback opened on {payment.booking.reference}",
+                        f"Payment {tx_ref} ({payment.currency} {payment.amount}) is disputed "
+                        f"(status: {payment.dispute_status}). Refunds on it are blocked until resolved. "
+                        f"Respond in the Paystack dashboard before the due date.",
+                    )
+            return Response(status=status.HTTP_200_OK)
 
         if event_type not in ("charge.success", "charge.failed") or not reference:
             return Response(status=status.HTTP_200_OK)

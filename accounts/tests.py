@@ -66,13 +66,30 @@ class SignupVerificationTests(TestCase):
         self.assertIsNone(read_verification_token("not-a-real-token"))
 
     @patch("accounts.views.send_verification_email")
-    def test_login_not_blocked_for_unverified_user(self, _v):
+    def test_login_blocked_until_email_verified(self, _v):
+        # Policy (VerifiedEmailTokenObtainPairSerializer): a correct password on
+        # an unverified account gets an actionable, machine-readable refusal —
+        # never a token, and never the generic "bad credentials" error.
         self._register()
-        r = APIClient().post("/api/auth/token/", {
-            "email": "newuser@test.com", "password": "Signup#Pass123",
-        }, format="json")
+        creds = {"email": "newuser@test.com", "password": "Signup#Pass123"}
+        r = APIClient().post("/api/auth/token/", creds, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["code"], ["email_not_verified"])
+        self.assertNotIn("access", r.data)
+
+        # Once verified, the same credentials sign in normally.
+        User.objects.filter(email="newuser@test.com").update(email_verified=True)
+        r = APIClient().post("/api/auth/token/", creds, format="json")
         self.assertEqual(r.status_code, 200)
         self.assertIn("access", r.data)
+
+    def test_wrong_password_is_not_reported_as_unverified(self):
+        # The verification check must not leak past a bad password: unknown
+        # or wrong credentials still get simplejwt's standard 401.
+        r = APIClient().post("/api/auth/token/", {
+            "email": "nobody@test.com", "password": "whatever",
+        }, format="json")
+        self.assertEqual(r.status_code, 401)
 
     @patch("accounts.views.send_verification_email")
     def test_resend_is_generic_and_only_mails_unverified(self, mock_verify):
@@ -92,10 +109,14 @@ class SignupVerificationTests(TestCase):
     @patch("accounts.views.send_verification_email")
     def test_email_verified_is_read_only_on_profile(self, _v):
         self._register()
+        # Verified so login works; the point of this test is that a signed-in
+        # user still can't flip the flag through their profile.
+        User.objects.filter(email="newuser@test.com").update(email_verified=True)
         client = APIClient()
         tok = client.post("/api/auth/token/", {
             "email": "newuser@test.com", "password": "Signup#Pass123"}, format="json").data["access"]
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {tok}")
         # attempt to self-verify via profile update — must be ignored
-        client.patch("/api/auth/me/", {"email_verified": True}, format="json")
-        self.assertFalse(User.objects.get(email="newuser@test.com").email_verified)
+        client.patch("/api/auth/me/", {"email_verified": False}, format="json")
+        # Ignored: still True from the (server-side) verification above.
+        self.assertTrue(User.objects.get(email="newuser@test.com").email_verified)

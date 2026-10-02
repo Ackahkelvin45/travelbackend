@@ -1621,7 +1621,8 @@ class EmailTemplateSelectionTests(TestCase):
     def test_topup_on_confirmed_booking_sends_receipt_not_confirmation(self):
         booking = make_booking(total="1200.00")
         first = make_payment(booking, amount=Decimal("600.00"))
-        with self.captureOnCommitCallbacks(execute=True):
+        with patch("payments.email.send_booking_confirmation"), patch("payments.email.send_payment_receipt"), \
+                self.captureOnCommitCallbacks(execute=True):
             apply_successful_payment(first, gateway_ok(first))   # 600 of 1200 — not confirmed yet
         # Force confirmation via a deposit threshold is not set, so 600 stays pending;
         # pay the rest → this promotes. Instead test an already-confirmed booking:
@@ -1661,3 +1662,813 @@ class BookingQrCodeTests(TestCase):
     def test_qr_unknown_reference_404(self):
         r = APIClient().get("/api/payments/bookings/AZT-NOPE/qr.png")
         self.assertEqual(r.status_code, 404)
+
+
+# ── Installment / Refund Policy: overdue notice, cancellation requests, line items ─
+
+from django.test import override_settings
+
+
+@override_settings(RESEND_API_KEY="test-key", RESEND_FROM_EMAIL="t@test")
+class OverdueNoticeTests(TestCase):
+    def _overdue_booking(self, days_past=1):
+        booking = make_booking(total="1200.00", status=Booking.Status.CONFIRMED)
+        booking.package.final_payment_deadline = date.today() - timedelta(days=days_past)
+        booking.package.save()
+        return booking
+
+    @patch("payments.email.resend")
+    def test_one_notice_then_idempotent(self, mock_resend):
+        from django.core.management import call_command
+        booking = self._overdue_booking()
+        call_command("send_overdue_notices")
+        call_command("send_overdue_notices")           # second run must be a no-op
+        self.assertEqual(mock_resend.Emails.send.call_count, 1)
+        booking.refresh_from_db()
+        self.assertIsNotNone(booking.overdue_notice_sent_at)
+        self.assertEqual(booking.cure_deadline, booking.overdue_notice_sent_at + timedelta(hours=72))
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)   # never auto-cancelled
+
+    @patch("payments.email.resend")
+    def test_not_overdue_gets_nothing(self, mock_resend):
+        from django.core.management import call_command
+        booking = make_booking(status=Booking.Status.CONFIRMED)
+        booking.package.final_payment_deadline = date.today() + timedelta(days=5)
+        booking.package.save()
+        call_command("send_overdue_notices")
+        self.assertEqual(mock_resend.Emails.send.call_count, 0)
+
+    def test_reminder_marks_follow_the_policy(self):
+        from bookings.management.commands.send_payment_reminders import REMINDER_MARKS
+        self.assertEqual(REMINDER_MARKS, [14, 7, 1])
+
+
+@patch("payments.email._send")
+class CancellationRequestTests(TestCase):
+    def _owned(self, **kw):
+        user = User.objects.create_user(email=f"owner{User.objects.count()}@test.com", password="x",
+                                        first_name="O", last_name="W")
+        booking = make_refundable_booking(["1000.00"], **kw)
+        booking.user = user
+        booking.save(update_fields=["user"])
+        client = APIClient(); client.force_authenticate(user)
+        return user, booking, client
+
+    def test_quote_matches_policy_band(self, _mail):
+        _, booking, client = self._owned(days_to_departure=45)
+        r = client.get(f"/api/bookings/{booking.reference}/cancellation-quote/")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data["eligible"])
+        self.assertEqual(r.data["refund_total"], "600.00")          # 60% of $1,000 paid
+
+    def test_other_users_booking_is_invisible(self, _mail):
+        _, booking, _ = self._owned()
+        stranger = User.objects.create_user(email="s@test.com", password="x", first_name="S", last_name="T")
+        c = APIClient(); c.force_authenticate(stranger)
+        self.assertEqual(c.get(f"/api/bookings/{booking.reference}/cancellation-quote/").status_code, 404)
+        self.assertEqual(c.post(f"/api/bookings/{booking.reference}/cancellation-request/", {}).status_code, 404)
+
+    def test_request_freezes_payments_and_refuses_duplicates(self, mail):
+        _, booking, client = self._owned(days_to_departure=45)
+        r = client.post(f"/api/bookings/{booking.reference}/cancellation-request/",
+                        {"reason": "Change of plans"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["refund_total"], "600.00")
+        self.assertEqual(mail.call_count, 1)                          # dated acknowledgment
+        # duplicate → refused
+        r2 = client.post(f"/api/bookings/{booking.reference}/cancellation-request/", {}, format="json")
+        self.assertEqual(r2.status_code, 400)
+        # payments paused while under review
+        p = APIClient().post("/api/payments/initialize/", {"booking_id": str(booking.id)}, format="json")
+        self.assertEqual(p.status_code, 400)
+        self.assertIn("under review", p.data["detail"])
+        # API surfaces it
+        d = APIClient().get(f"/api/bookings/{booking.reference}/")
+        self.assertEqual(d.data["cancellation_request"]["status"], "pending")
+
+    def test_approval_refunds_as_of_request_time_not_approval_time(self, mail):
+        from bookings.services import approve_cancellation, request_cancellation
+        staff = User.objects.create_user(email="staff@test.com", password="x", first_name="S", last_name="F")
+        _, booking, _ = self._owned(days_to_departure=28)           # today → 40% band
+        req = request_cancellation(booking, reason="x")
+        # Pretend the request arrived 3 days ago (31 days out → 60% band)
+        req.requested_at = timezone.now() - timedelta(days=3)
+        req.save(update_fields=["requested_at"])
+        approve_cancellation(req, by_user=staff, note="Sorry to see you go")
+        booking.refresh_from_db(); req.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.cancellation_reason, Booking.CancellationReason.CUSTOMER)
+        legs_total = sum(l.amount for l in booking.refunds.all())
+        self.assertEqual(legs_total, Decimal("600.00"))              # not the 400 of today's band
+        self.assertEqual(req.status, "approved")
+        self.assertEqual(mail.call_count, 2)                          # ack + outcome
+
+    def test_rejection_keeps_booking_and_reopens_payments(self, _mail):
+        from bookings.services import reject_cancellation, request_cancellation
+        staff = User.objects.create_user(email="staff2@test.com", password="x", first_name="S", last_name="F")
+        _, booking, _ = self._owned()
+        req = request_cancellation(booking)
+        reject_cancellation(req, by_user=staff, note="Outside policy")
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertIsNone(booking.pending_cancellation)
+
+
+class LineItemsApiTests(TestCase):
+    def test_breakdown_reconciles_to_total(self):
+        booking = make_refundable_booking(
+            ["500.00"], total="4700.00",
+            addons=[{"code": "visa", "name": "Visa on Arrival", "unit_price": "100.00",
+                     "quantity": 2, "line_total": "200.00", "refundable": False}],
+        )
+        booking.unit_price = Decimal("2250.00"); booking.save()   # 2 × 2250 + 200 = 4700
+        r = APIClient().get(f"/api/bookings/{booking.reference}/")
+        self.assertEqual(r.status_code, 200)
+        li = r.data["line_items"]
+        lines_sum = sum(Decimal(l["amount"]) for l in li["lines"])
+        self.assertEqual(lines_sum - Decimal(li["discount"]), Decimal(li["total"]))
+        self.assertEqual(li["total"], r.data["total_amount"])
+        self.assertEqual(len(li["lines"]), 2)
+
+
+# ── Staff permissions + the refund rules they gate ───────────────────────────
+
+class ArrivalAndOrganizerRefundTests(TestCase):
+    def test_arrived_guest_gets_nothing_on_voluntary_cancellation(self):
+        # Appendix D: "Early arrival then cancellation → voluntary refund is zero"
+        booking = make_refundable_booking(["1000.00"], days_to_departure=45)   # would be 60%
+        booking.arrived_at = timezone.now() - timedelta(days=1)
+        booking.save(update_fields=["arrived_at"])
+        computed = compute_refund(booking)
+        self.assertEqual(computed["refund_total"], Decimal("0.00"))
+        self.assertEqual(computed["breakdown"]["tier_applied"]["basis"], "arrived_or_started")
+
+    def test_arrival_after_request_does_not_apply(self):
+        booking = make_refundable_booking(["1000.00"], days_to_departure=45)
+        booking.arrived_at = timezone.now() + timedelta(days=2)               # arrives later
+        booking.save(update_fields=["arrived_at"])
+        self.assertEqual(compute_refund(booking)["refund_total"], Decimal("600.00"))
+
+    def test_organizer_cancellation_refunds_in_full_regardless_of_date(self):
+        from bookings.services import cancel_booking
+        booking = make_refundable_booking(["1000.00"], days_to_departure=5)    # guest band → 0%
+        cancel_booking(booking, reason=Booking.CancellationReason.ORGANIZER)
+        legs_total = sum(l.amount for l in booking.refunds.all())
+        self.assertEqual(legs_total, Decimal("1000.00"))
+        self.assertEqual(booking.refunds.first().breakdown["tier_applied"]["basis"], "organizer_cancellation")
+
+    def test_guest_cancellation_still_uses_bands(self):
+        from bookings.services import cancel_booking
+        booking = make_refundable_booking(["1000.00"], days_to_departure=5)
+        cancel_booking(booking, reason=Booking.CancellationReason.CUSTOMER)
+        self.assertEqual(booking.refunds.count(), 0)                          # 0% → no legs
+
+
+class StaffGroupTests(TestCase):
+    def _user_in(self, group_name):
+        from django.contrib.auth.models import Group
+        u = User.objects.create_user(email=f"{group_name.lower().replace(' ', '')}@test.com", password="x",
+                                     first_name="S", last_name="T", is_staff=True)
+        u.groups.add(Group.objects.get(name=group_name))
+        return User.objects.get(pk=u.pk)  # fresh perm cache
+
+    def setUp(self):
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        call_command("setup_staff_groups")   # idempotent
+
+    def test_groups_nest_viewer_operations_finance(self):
+        from django.contrib.auth.models import Group
+        perms = {g.name: set(g.permissions.values_list("codename", flat=True)) for g in Group.objects.all()}
+        self.assertTrue(perms["Azura Viewer"] < perms["Azura Operations"] < perms["Azura Finance"])
+
+    def test_viewer_reads_but_cannot_act(self):
+        u = self._user_in("Azura Viewer")
+        self.assertTrue(u.has_perm("bookings.view_booking"))
+        for p in ("payments.process_refund", "bookings.cancel_booking", "bookings.mark_arrived",
+                  "bookings.resolve_cancellation", "bookings.view_special_requests", "payments.add_payment"):
+            self.assertFalse(u.has_perm(p), p)
+
+    def test_operations_runs_the_tour_but_touches_no_money(self):
+        u = self._user_in("Azura Operations")
+        for p in ("bookings.mark_arrived", "bookings.extend_deadline", "bookings.resolve_cancellation",
+                  "bookings.view_special_requests", "payments.add_payment"):
+            self.assertTrue(u.has_perm(p), p)
+        for p in ("payments.process_refund", "bookings.cancel_booking", "bookings.cancel_as_organizer"):
+            self.assertFalse(u.has_perm(p), p)
+
+    def test_finance_can_do_everything_staff_can(self):
+        u = self._user_in("Azura Finance")
+        for p in ("payments.process_refund", "bookings.cancel_booking", "bookings.cancel_as_organizer",
+                  "bookings.mark_arrived"):
+            self.assertTrue(u.has_perm(p), p)
+        # …but is still not a developer: no package/policy/user management
+        for p in ("packages.change_travelpackage", "bookings.change_policydocument", "accounts.change_user"):
+            self.assertFalse(u.has_perm(p), p)
+
+    def test_special_requests_hidden_from_viewer_in_admin(self):
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+        from bookings.admin import BookingAdmin
+        viewer, ops = self._user_in("Azura Viewer"), self._user_in("Azura Operations")
+        ma = BookingAdmin(Booking, AdminSite())
+        def fields_for(user):
+            req = RequestFactory().get("/"); req.user = user
+            return {f for _, o in ma.get_fieldsets(req, None) for f in o["fields"]}
+        self.assertNotIn("special_requests", fields_for(viewer))
+        self.assertIn("special_requests", fields_for(ops))
+
+
+# ── Staff portal API (slice 1: bookings) ─────────────────────────────────────
+
+@patch("payments.email.send_booking_confirmation")
+class StaffBookingApiTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        def staff(group, email):
+            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
+            u.groups.add(Group.objects.get(name=group))
+            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+        self.viewer = staff("Azura Viewer", "v@test.com")
+        self.ops = staff("Azura Operations", "o@test.com")
+        self.guest = APIClient(); self.guest.force_authenticate(
+            User.objects.create_user(email="g@test.com", password="x", first_name="G", last_name="U"))
+        self.booking = make_booking(total="1200.00", status=Booking.Status.CONFIRMED)
+        self.booking.special_requests = "Vegetarian; uses a wheelchair"
+        self.booking.save()
+
+    def test_non_staff_is_locked_out(self, _m):
+        self.assertEqual(self.guest.get("/api/staff/bookings/").status_code, 403)
+        self.assertEqual(self.guest.get("/api/staff/me/").status_code, 403)
+
+    def test_me_lists_capabilities_by_level(self, _m):
+        v = self.viewer.get("/api/staff/me/").data
+        o = self.ops.get("/api/staff/me/").data
+        self.assertNotIn("bookings.mark_arrived", v["perms"])
+        self.assertIn("bookings.mark_arrived", o["perms"])
+        self.assertEqual(v["groups"], ["Azura Viewer"])
+
+    def test_list_searches_and_paginates(self, _m):
+        r = self.viewer.get("/api/staff/bookings/", {"q": self.booking.reference[-6:]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(r.data["results"][0]["reference"], self.booking.reference)
+        self.assertEqual(r.data["results"][0]["payment_state"], "unpaid")
+        self.assertEqual(self.viewer.get("/api/staff/bookings/", {"q": "nobody-here"}).data["count"], 0)
+
+    def test_overdue_filter(self, _m):
+        self.booking.package.final_payment_deadline = date.today() - timedelta(days=1)
+        self.booking.package.save()
+        r = self.viewer.get("/api/staff/bookings/", {"overdue": "1"})
+        self.assertEqual([b["reference"] for b in r.data["results"]], [self.booking.reference])
+        self.assertTrue(r.data["results"][0]["is_overdue"])
+
+    def test_special_requests_only_with_permission(self, _m):
+        url = f"/api/staff/bookings/{self.booking.reference}/"
+        self.assertNotIn("special_requests", self.viewer.get(url).data)
+        self.assertEqual(self.ops.get(url).data["special_requests"], "Vegetarian; uses a wheelchair")
+
+    def test_offline_payment_goes_through_the_ledger(self, _m):
+        url = f"/api/staff/bookings/{self.booking.reference}/offline-payment/"
+        self.assertEqual(self.viewer.post(url, {"amount": "200"}, format="json").status_code, 403)
+        r = self.ops.post(url, {"amount": "200.00", "method": "bank_transfer", "note": "GCB slip 1234"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["amount_paid"], "200.00")
+        self.assertEqual(r.data["balance"], "1000.00")
+        p = self.booking.payments.get()
+        self.assertEqual(p.method, "bank_transfer"); self.assertIn("recorded by o@test.com", p.note)
+        # can't overpay
+        bad = self.ops.post(url, {"amount": "5000"}, format="json")
+        self.assertEqual(bad.status_code, 400)
+
+    def test_extend_deadline_requires_reason(self, _m):
+        url = f"/api/staff/bookings/{self.booking.reference}/extend-deadline/"
+        new = (date.today() + timedelta(days=10)).isoformat()
+        self.assertEqual(self.ops.post(url, {"date": new}, format="json").status_code, 400)
+        r = self.ops.post(url, {"date": new, "reason": "Salary delayed, agreed by phone"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["payment_deadline"], date.fromisoformat(new))
+        self.assertIn("o@test.com", r.data["payment_deadline_override_reason"])
+        self.assertEqual(self.viewer.post(url, {"date": new, "reason": "x"}, format="json").status_code, 403)
+
+    def test_mark_arrived_is_idempotent_and_gated(self, _m):
+        url = f"/api/staff/bookings/{self.booking.reference}/mark-arrived/"
+        self.assertEqual(self.viewer.post(url).status_code, 403)
+        first = self.ops.post(url).data["arrived_at"]
+        second = self.ops.post(url).data["arrived_at"]
+        self.assertIsNotNone(first); self.assertEqual(first, second)
+
+
+# ── Staff portal API (slices 2+3: cancellations, refunds) ───────────────────
+
+@patch("payments.email._send")
+class StaffCancellationAndRefundApiTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        def staff(group, email):
+            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
+            u.groups.add(Group.objects.get(name=group))
+            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+        self.viewer = staff("Azura Viewer", "v2@test.com")
+        self.ops = staff("Azura Operations", "o2@test.com")
+        self.fin = staff("Azura Finance", "f2@test.com")
+
+    def _request(self, days=45):
+        from bookings.services import request_cancellation
+        booking = make_refundable_booking(["1000.00"], days_to_departure=days)
+        return booking, request_cancellation(booking, reason="Can't travel")
+
+    def test_queue_lists_pending_with_quote(self, _m):
+        booking, req = self._request()
+        r = self.viewer.get("/api/staff/cancellations/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([x["id"] for x in r.data], [str(req.id)])
+        self.assertEqual(r.data[0]["refund_total"], "600.00")
+        self.assertEqual(r.data[0]["booking"]["reference"], booking.reference)
+
+    def test_viewer_cannot_resolve_operations_can(self, mail):
+        booking, req = self._request()
+        self.assertEqual(self.viewer.post(f"/api/staff/cancellations/{req.id}/approve/", {}, format="json").status_code, 403)
+        r = self.ops.post(f"/api/staff/cancellations/{req.id}/approve/", {"note": "Approved as per policy"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["status"], "approved")
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.refunds.count(), 1)                       # leg now waiting for Finance
+        # already resolved → 400, queue empty
+        self.assertEqual(self.ops.post(f"/api/staff/cancellations/{req.id}/reject/", {}, format="json").status_code, 400)
+        self.assertEqual(self.viewer.get("/api/staff/cancellations/").data, [])
+
+    def test_reject_keeps_booking(self, _m):
+        booking, req = self._request()
+        r = self.ops.post(f"/api/staff/cancellations/{req.id}/reject/", {"note": "Outside policy"}, format="json")
+        self.assertEqual(r.data["status"], "rejected")
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+
+    def test_refund_queue_and_processing(self, mail):
+        booking, req = self._request()
+        self.ops.post(f"/api/staff/cancellations/{req.id}/approve/", {}, format="json")
+        leg_id = self.fin.get("/api/staff/refunds/").data[0]["id"]
+        self.assertEqual(self.fin.get("/api/staff/refunds/").data[0]["amount"], "600.00")
+        # Operations can see but not pay out
+        self.assertEqual(self.ops.get("/api/staff/refunds/").status_code, 200)
+        self.assertEqual(self.ops.post(f"/api/staff/refunds/{leg_id}/process/", {"external_reference": "x"}, format="json").status_code, 403)
+        # Finance must give a reference
+        self.assertEqual(self.fin.post(f"/api/staff/refunds/{leg_id}/process/", {}, format="json").status_code, 400)
+        mail.reset_mock()
+        # the guest email is sent on commit — run commit hooks inside the test transaction
+        with self.captureOnCommitCallbacks(execute=True):
+            r = self.fin.post(f"/api/staff/refunds/{leg_id}/process/", {"external_reference": "PSK-RF-123", "note": "Done in dashboard"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["status"], "processed")
+        self.assertEqual(r.data["external_reference"], "PSK-RF-123")
+        booking.refresh_from_db()
+        self.assertEqual(booking.amount_refunded, Decimal("600.00"))
+        # guest told: amount + reference
+        self.assertEqual(mail.call_count, 1)
+        self.assertIn("PSK-RF-123", mail.call_args[0][2])
+        self.assertEqual(self.fin.get("/api/staff/refunds/").data, [])       # nothing pending
+        self.assertEqual(len(self.fin.get("/api/staff/refunds/", {"status": "processed"}).data), 1)
+
+
+# ── Policy gaps: expiry, capacity, disputes, delivery log, failed email, staff cancel, misc ─
+
+import json as _json
+
+
+@override_settings(PENDING_BOOKING_TTL_HOURS=24)
+class ExpiryAndCapacityTests(TestCase):
+    def test_any_unpaid_pending_booking_expires(self):
+        booking = make_booking()                        # legacy/flat — no hotel option
+        self.assertFalse(booking.is_expired)
+        Booking.objects.filter(pk=booking.pk).update(created_at=timezone.now() - timedelta(hours=25))
+        booking.refresh_from_db()
+        self.assertTrue(booking.is_expired)
+
+    def test_capacity_counts_holders_and_refuses_overflow(self):
+        from bookings.pricing import QuoteError, assert_capacity
+        booking = make_booking(status=Booking.Status.CONFIRMED)   # 2 guests
+        pkg = booking.package
+        self.assertIsNone(pkg.spots_left)                          # unlimited by default
+        pkg.capacity = 3; pkg.save()
+        self.assertEqual(pkg.spots_left, 1)
+        assert_capacity(pkg, 1)
+        with self.assertRaises(QuoteError):
+            assert_capacity(pkg, 2)
+        # a fresh unpaid booking holds a place; once expired it frees it again
+        stale = Booking.objects.create(package=pkg, first_name="x", last_name="y", email="x@y.com", num_guests=1,
+                                       travel_date="2027-01-04", unit_price=Decimal("600.00"),
+                                       total_amount=Decimal("600.00"), currency="GHS")
+        self.assertEqual(pkg.spots_left, 0)
+        Booking.objects.filter(pk=stale.pk).update(created_at=timezone.now() - timedelta(hours=25))
+        self.assertEqual(pkg.spots_left, 1)
+
+
+@patch("payments.alerts.alert_admin")
+@patch("payments.views.verify_webhook_signature", return_value=True)
+class DisputeTests(TestCase):
+    def _hook(self, event, reference, **data):
+        return APIClient().post("/api/payments/webhook/",
+                                data=_json.dumps({"event": event, "data": {"transaction": {"reference": reference}, **data}}),
+                                content_type="application/json")
+
+    def test_open_dispute_blocks_allocation_until_resolved(self, _sig, alert):
+        booking = make_refundable_booking(["1000.00"], days_to_departure=90)   # 90% band
+        payment = booking.payments.get()
+        r = self._hook("charge.dispute.create", payment.paystack_reference, status="awaiting-merchant-feedback")
+        self.assertEqual(r.status_code, 200)
+        payment.refresh_from_db()
+        self.assertTrue(payment.disputed)
+        self.assertEqual(alert.call_count, 1)
+        computed = compute_refund(booking)
+        self.assertEqual(computed["refund_total"], Decimal("900.00"))          # entitlement unchanged…
+        self.assertEqual(computed["allocation"], [])                            # …but nothing may be paid out
+        self.assertEqual(computed["breakdown"]["unallocatable"], "900.00")
+        self._hook("charge.dispute.resolve", payment.paystack_reference, resolution="merchant-accepted")
+        payment.refresh_from_db()
+        self.assertFalse(payment.disputed)
+        self.assertIn("resolved", payment.dispute_status)
+        self.assertEqual(len(compute_refund(booking)["allocation"]), 1)
+
+    def test_processing_a_refund_on_a_disputed_payment_is_refused(self, _sig, _alert):
+        booking = make_refundable_booking(["1000.00"], days_to_departure=90)
+        (leg,) = create_pending_refunds(booking, reason="x")
+        payment = booking.payments.get()
+        self._hook("charge.dispute.create", payment.paystack_reference)
+        staff = User.objects.create_user(email="fin@test.com", password="x", first_name="F", last_name="N")
+        with self.assertRaises(ValueError):
+            mark_refund_processed(leg, by_user=staff)
+
+    def test_payments_expose_disputed_flag(self, _sig, _alert):
+        booking = make_refundable_booking(["1000.00"])
+        self._hook("charge.dispute.create", booking.payments.get().paystack_reference)
+        r = APIClient().get(f"/api/bookings/{booking.reference}/")
+        self.assertTrue(r.data["payments"][0]["disputed"])
+
+
+@override_settings(RESEND_API_KEY="test-key", RESEND_FROM_EMAIL="t@test")
+class EmailDeliveryLogTests(TestCase):
+    @patch("payments.email.resend")
+    def test_deliver_logs_sent_with_provider_id(self, mock_resend):
+        from payments.email import deliver
+        from payments.models import EmailLog
+        mock_resend.Emails.send.return_value = {"id": "re_123"}
+        booking = make_booking()
+        self.assertTrue(deliver("test_kind", booking.email, "Subj", "<p>hi</p>", booking=booking))
+        log = EmailLog.objects.get()
+        self.assertEqual((log.status, log.provider_id, log.kind, log.booking_id), ("sent", "re_123", "test_kind", booking.id))
+
+    @patch("payments.email.resend")
+    def test_deliver_logs_failure_and_never_raises(self, mock_resend):
+        from payments.email import deliver
+        from payments.models import EmailLog
+        mock_resend.Emails.send.side_effect = RuntimeError("boom")
+        self.assertFalse(deliver("x", "a@b.com", "S", "<p/>"))
+        log = EmailLog.objects.get()
+        self.assertEqual((log.status, log.error), ("failed", "boom"))
+
+    @override_settings(RESEND_API_KEY="")
+    def test_missing_key_is_logged_not_sent(self):
+        from payments.email import deliver
+        from payments.models import EmailLog
+        self.assertFalse(deliver("x", "a@b.com", "S", "<p/>"))
+        self.assertIn("RESEND_API_KEY", EmailLog.objects.get().error)
+
+    @patch("payments.email.deliver")
+    def test_failed_payment_emails_guest_once(self, mock_deliver):
+        from payments.services import mark_payment_unsuccessful
+        booking = make_booking(); p = make_payment(booking)
+        with self.captureOnCommitCallbacks(execute=True):
+            mark_payment_unsuccessful(p, "failed", {})
+            mark_payment_unsuccessful(p, "failed", {})     # idempotent — no second email
+        self.assertEqual(mock_deliver.call_count, 1)
+        self.assertEqual(mock_deliver.call_args[0][0], "payment_failed")
+        self.assertIn(f"/booking/{booking.reference}/pay", mock_deliver.call_args[0][3])
+
+    @patch("payments.email.resend")
+    def test_confirmation_lists_what_was_booked_and_policy_versions(self, mock_resend):
+        from bookings.models import PolicyAcceptance, PolicyDocument
+        from payments.email import send_booking_confirmation
+        mock_resend.Emails.send.return_value = {"id": "re_1"}
+        booking = make_refundable_booking(["500.00"], total="4700.00",
+                                          addons=[{"code": "visa", "name": "Visa on Arrival", "unit_price": "100.00",
+                                                   "quantity": 2, "line_total": "200.00", "refundable": False}])
+        booking.unit_price = Decimal("2250.00"); booking.save()
+        doc = PolicyDocument.objects.create(type="terms", version="1.0", title="Booking Terms", body="t",
+                                            is_current=True, published_at=timezone.now())
+        PolicyAcceptance.objects.create(booking=booking, document=doc, email=booking.email)
+        send_booking_confirmation(booking, booking.payments.get())
+        html = mock_resend.Emails.send.call_args[0][0]["html"]
+        self.assertIn("What you booked", html)
+        self.assertIn("Visa on Arrival", html)
+        self.assertIn("Booking Terms v1.0", html)
+        self.assertIn("/terms-and-conditions", html)
+
+
+@patch("payments.email._send")
+@patch("payments.email.deliver")
+class StaffCancelAndMiscTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        def staff(group, email):
+            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
+            u.groups.add(Group.objects.get(name=group))
+            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+        self.viewer = staff("Azura Viewer", "v3@test.com")
+        self.ops = staff("Azura Operations", "o3@test.com")
+        self.fin = staff("Azura Finance", "f3@test.com")
+
+    def test_organizer_cancel_refunds_in_full_and_is_finance_only(self, *_):
+        booking = make_refundable_booking(["1000.00"], days_to_departure=5)      # guest band would be 0%
+        url = f"/api/staff/bookings/{booking.reference}/cancel/"
+        self.assertEqual(self.ops.post(url, {"mode": "organizer"}, format="json").status_code, 403)
+        self.assertEqual(self.fin.post(url, {"mode": "nonsense"}, format="json").status_code, 400)
+        r = self.fin.post(url, {"mode": "organizer", "note": "Tour called off"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.cancellation_reason, Booking.CancellationReason.ORGANIZER)
+        self.assertEqual(sum(l.amount for l in booking.refunds.all()), Decimal("1000.00"))
+
+    def test_guest_mode_cancel_uses_bands(self, *_):
+        booking = make_refundable_booking(["1000.00"], days_to_departure=5)
+        r = self.fin.post(f"/api/staff/bookings/{booking.reference}/cancel/", {"mode": "guest"}, format="json")
+        self.assertEqual(r.status_code, 200)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, Booking.Status.CANCELLED)
+        self.assertEqual(booking.refunds.count(), 0)                                # 0% → nothing owed
+
+    def test_email_history_endpoint(self, *_):
+        from payments.models import EmailLog
+        booking = make_booking()
+        EmailLog.objects.create(booking=booking, kind="receipt", to_email=booking.email, subject="S", status="sent", provider_id="re_1")
+        r = self.viewer.get(f"/api/staff/bookings/{booking.reference}/emails/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data[0]["kind"], "receipt")
+        self.assertEqual(APIClient().get(f"/api/staff/bookings/{booking.reference}/emails/").status_code, 401)
+
+    def test_first_installment_payment_cannot_be_below_deposit(self, *_):
+        booking = make_booking()
+        booking.payment_plan = Booking.PaymentPlan.INSTALLMENT
+        booking.deposit_required = Decimal("1000.00"); booking.save()
+        r = APIClient().post("/api/payments/initialize/", {"booking_id": str(booking.id), "intent": "custom", "amount": "200.00"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("at least", r.data["detail"])
+
+    def test_fee_notice_reaches_the_checkout_matrix(self, *_):
+        from bookings.pricing import _fee_notice
+        from payments.models import OpsConfig
+        cfg = OpsConfig.get(); cfg.checkout_fee_notice = "All taxes included."; cfg.save()
+        self.assertEqual(_fee_notice(), "All taxes included.")
+
+    def test_deletion_request_raises_a_ticket(self, *_):
+        u = User.objects.create_user(email="del@test.com", password="x", first_name="D", last_name="E")
+        c = APIClient(); c.force_authenticate(u)
+        with patch("payments.alerts.alert_admin") as alert:
+            r = c.post("/api/auth/delete-request/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(alert.call_count, 1)
+        self.assertIn("del@test.com", alert.call_args[0][1])
+        self.assertEqual(APIClient().post("/api/auth/delete-request/").status_code, 401)
+
+
+class NewsletterUnsubscribeTests(TestCase):
+    def test_signed_link_unsubscribes_and_bad_token_is_refused(self):
+        from newsletter.models import NewsletterSubscriber
+        from newsletter.services import unsubscribe_url
+        sub = NewsletterSubscriber.objects.create(email="reader@test.com")
+        url = unsubscribe_url(sub.email)
+        path = url[url.index("/api/"):]
+        r = APIClient().get(path)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("unsubscribed", r.content.decode().lower())
+        sub.refresh_from_db(); self.assertFalse(sub.is_active)
+        self.assertEqual(APIClient().get("/api/newsletter/unsubscribe/?token=forged").status_code, 400)
+
+
+# ── Back-office name correction / traveller replacement ─────────────────────
+
+@patch("payments.email.deliver")
+class TravellerChangeTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        def staff(group, email):
+            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
+            u.groups.add(Group.objects.get(name=group))
+            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+        self.viewer = staff("Azura Viewer", "v4@test.com")
+        self.ops = staff("Azura Operations", "o4@test.com")
+
+    def _booking(self, days=60):
+        b = make_booking(status=Booking.Status.CONFIRMED)
+        b.travel_date = timezone.now().date() + timedelta(days=days)
+        b.user = User.objects.create_user(email=b.email, password="x", first_name="K", last_name="M")
+        b.save()
+        return b
+
+    def test_correction_keeps_account_and_records_history(self, mail):
+        b = self._booking()
+        url = f"/api/staff/bookings/{b.reference}/traveller/"
+        self.assertEqual(self.viewer.post(url, {"kind": "correction", "first_name": "Kwame", "last_name": "Mensa"}, format="json").status_code, 403)
+        r = self.ops.post(url, {"kind": "correction", "first_name": "Kwame", "last_name": "Mensa"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        b.refresh_from_db()
+        self.assertEqual((b.first_name, b.last_name), ("Kwame", "Mensa"))
+        self.assertIsNotNone(b.user)                                  # same person — account stays
+        change = b.traveller_changes[0]
+        self.assertEqual((change["kind"], change["from"]["last_name"], change["to"]["last_name"], change["by"]),
+                         ("correction", "Mensah", "Mensa", "o4@test.com"))
+        self.assertEqual(mail.call_count, 1)                          # only the traveller (same email)
+
+    def test_replacement_detaches_old_account_and_emails_both(self, mail):
+        b = self._booking()
+        paid_before = b.amount_paid
+        r = self.ops.post(f"/api/staff/bookings/{b.reference}/traveller/",
+                          {"kind": "replacement", "first_name": "Ama", "last_name": "Owusu", "email": "ama@test.com"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        b.refresh_from_db()
+        self.assertEqual(b.email, "ama@test.com")
+        self.assertIsNone(b.user)                                     # ownership never follows an email change
+        self.assertEqual(b.amount_paid, paid_before)                  # money stays with the booking
+        self.assertEqual(mail.call_count, 2)
+        recipients = {c[0][1] for c in mail.call_args_list}
+        self.assertEqual(recipients, {"ama@test.com", "kwame@example.com"})
+
+    def test_replacement_inside_14_days_needs_a_review_note(self, _m):
+        b = self._booking(days=10)
+        url = f"/api/staff/bookings/{b.reference}/traveller/"
+        body = {"kind": "replacement", "first_name": "Ama", "last_name": "Owusu", "email": "ama@test.com"}
+        self.assertEqual(self.ops.post(url, body, format="json").status_code, 400)
+        self.assertEqual(self.ops.post(url, {**body, "note": "Approved by manager, hotel confirmed"}, format="json").status_code, 200)
+
+    def test_no_change_is_rejected(self, _m):
+        b = self._booking()
+        r = self.ops.post(f"/api/staff/bookings/{b.reference}/traveller/",
+                          {"kind": "correction", "first_name": b.first_name, "last_name": b.last_name}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+
+# ── Add-on cancellation: 50% fee (owner decision) ───────────────────────────
+
+@patch("payments.email.deliver")
+class AddonCancellationTests(TestCase):
+    ADDON = {"code": "enzo_vip", "name": "ENZO VIP Table", "unit": "per_person", "unit_price": "100.00",
+             "quantity": 2, "line_total": "200.00", "refundable": True}
+
+    def _booking(self, paid):
+        b = make_refundable_booking([paid] if paid else [], total="1200.00", addons=[dict(self.ADDON)])
+        b.unit_price = Decimal("500.00"); b.save()          # 2 × 500 + 200 = 1200
+        return b
+
+    def test_fully_paid_removal_refunds_half(self, mail):
+        from bookings.services import remove_addon
+        b = self._booking("1200.00")
+        out = remove_addon(b, code="enzo_vip", by_email="fin@test.com")
+        b.refresh_from_db()
+        self.assertEqual((out["charge"], out["fee"], out["refund"]), (Decimal("200.00"), Decimal("100.00"), Decimal("100.00")))
+        self.assertEqual(b.total_amount, Decimal("1100.00"))
+        self.assertEqual(sum(l.amount for l in b.refunds.all()), Decimal("100.00"))
+        codes = [l["code"] for l in b.addons]
+        self.assertNotIn("enzo_vip", codes); self.assertIn("enzo_vip_cancellation_fee", codes)
+        from payments.receipts import compute_line_items
+        self.assertTrue(compute_line_items(b)["reconciles"])          # receipts still add up
+        self.assertEqual(b.addon_changes[0]["fee"], "100.00")
+        self.assertEqual(mail.call_args[0][0], "addon_removed")
+
+    def test_partly_paid_removal_just_lowers_the_balance(self, _m):
+        from bookings.services import remove_addon
+        b = self._booking("300.00")
+        remove_addon(b, code="enzo_vip", by_email="fin@test.com")
+        b.refresh_from_db()
+        self.assertEqual(b.total_amount, Decimal("1100.00"))
+        self.assertEqual(b.refunds.count(), 0)
+        self.assertEqual(b.balance, Decimal("800.00"))
+
+    def test_guard_rails(self, _m):
+        from bookings.services import IllegalTransition, remove_addon
+        b = self._booking("1200.00")
+        with self.assertRaises(IllegalTransition):
+            remove_addon(b, code="nope", by_email="x")
+        remove_addon(b, code="enzo_vip", by_email="x")
+        b.refresh_from_db()
+        with self.assertRaises(IllegalTransition):                       # can't cancel the fee itself
+            remove_addon(b, code="enzo_vip_cancellation_fee", by_email="x")
+
+    def test_endpoint_is_finance_only(self, _m):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        def staff(group, email):
+            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
+            u.groups.add(Group.objects.get(name=group)); c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+        ops, fin = staff("Azura Operations", "o5@test.com"), staff("Azura Finance", "f5@test.com")
+        b = self._booking("1200.00")
+        url = f"/api/staff/bookings/{b.reference}/remove-addon/"
+        self.assertEqual(ops.post(url, {"code": "enzo_vip"}, format="json").status_code, 403)
+        r = fin.post(url, {"code": "enzo_vip", "note": "Guest asked by phone"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["total_amount"], "1100.00")
+        self.assertEqual(r.data["addon_changes"][0]["note"], "Guest asked by phone")
+
+
+# ── Adding an experience after booking (owner: yes, until 7 days before) ────
+
+@patch("payments.email.deliver")
+class AddonAdditionTests(TestCase):
+    def setUp(self):
+        from packages.models import PackageAddon, PackageAddonGroup
+        self.owner = User.objects.create_user(email="own@test.com", password="x", first_name="O", last_name="W")
+        self.booking = make_booking(total="1756.00", status=Booking.Status.CONFIRMED)   # 2 guests
+        self.booking.user = self.owner
+        self.booking.travel_date = timezone.now().date() + timedelta(days=30)
+        self.booking.unit_price = Decimal("878.00")        # 2 × 878 = 1756: a coherent booking
+        self.booking.addons = []
+        self.booking.save()
+        # fully paid THROUGH THE LEDGER — amount_paid is always recomputed from payments
+        first = make_payment(self.booking, amount=Decimal("1756.00"))
+        apply_successful_payment(first, gateway_ok(first))
+        self.booking.refresh_from_db()
+        pkg = self.booking.package
+        hotels = PackageAddonGroup.objects.create(package=pkg, name="Hotel", selection="single")
+        experiences = PackageAddonGroup.objects.create(package=pkg, name="Experiences", selection="multi")
+        PackageAddon.objects.create(package=pkg, group=hotels, code="hotel_mid", name="Mid hotel", price=Decimal("2000"), unit="per_person")
+        PackageAddon.objects.create(package=pkg, group=experiences, code="enzo_vip", name="ENZO VIP Table", price=Decimal("133"), unit="per_person")
+        PackageAddon.objects.create(package=pkg, group=experiences, code="massage", name="Waterfall Massage", price=Decimal("107"), unit="per_person")
+        self.client_ = APIClient(); self.client_.force_authenticate(self.owner)
+
+    def test_available_lists_experiences_not_hotels(self, _m):
+        r = self.client_.get(f"/api/bookings/{self.booking.reference}/addons/available/")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data["can_add"])
+        self.assertEqual([a["code"] for a in r.data["addons"]], ["enzo_vip", "massage"])
+        self.assertEqual(r.data["addons"][0]["line_total"], "266.00")           # 133 × 2 guests
+        self.assertEqual(r.data["open_until"], self.booking.travel_date - timedelta(days=7))
+
+    def test_closed_inside_seven_days(self, _m):
+        self.booking.travel_date = timezone.now().date() + timedelta(days=6); self.booking.save()
+        r = self.client_.get(f"/api/bookings/{self.booking.reference}/addons/available/")
+        self.assertFalse(r.data["can_add"]); self.assertEqual(r.data["addons"], [])
+        p = APIClient().post("/api/payments/initialize/", {"booking_id": str(self.booking.id), "intent": "addon", "addon_code": "enzo_vip"}, format="json")
+        self.assertEqual(p.status_code, 400)
+
+    @patch("payments.views.initialize_transaction", return_value={"access_code": "a", "authorization_url": "https://p/x"})
+    def test_pay_then_it_joins_the_booking(self, _init, _m):
+        # fully paid booking → normally refused, but an add-on purchase is allowed
+        r = APIClient().post("/api/payments/initialize/", {"booking_id": str(self.booking.id), "intent": "addon", "addon_code": "enzo_vip"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["amount"], "266.00")
+        payment = Payment.objects.get(paystack_reference=r.data["reference"])
+        self.assertEqual((payment.purpose, payment.addon_code), ("addon", "enzo_vip"))
+        self.assertNotIn("enzo_vip", [l["code"] for l in Booking.objects.get(pk=self.booking.pk).addons])   # not yet
+
+        with self.captureOnCommitCallbacks(execute=True):
+            result = apply_successful_payment(payment, gateway_ok(payment))
+        self.assertTrue(result.applied); self.assertEqual(result.problems, [])
+        b = Booking.objects.get(pk=self.booking.pk)
+        self.assertEqual([l["code"] for l in b.addons], ["enzo_vip"])
+        self.assertEqual(b.total_amount, Decimal("2022.00"))                    # 1756 + 266
+        self.assertEqual(b.amount_paid, Decimal("2022.00"))
+        self.assertEqual(b.balance, Decimal("0.00"))
+        self.assertFalse(Payment.objects.get(pk=payment.pk).needs_review)         # not an "over-payment"
+        from payments.receipts import compute_line_items
+        self.assertTrue(compute_line_items(b)["reconciles"])
+        # already on the booking → can't be added twice
+        r2 = self.client_.get(f"/api/bookings/{self.booking.reference}/addons/available/")
+        self.assertEqual([a["code"] for a in r2.data["addons"]], ["massage"])
+
+    def test_unknown_or_hotel_code_refused(self, _m):
+        for code in ("hotel_mid", "nope"):
+            r = APIClient().post("/api/payments/initialize/", {"booking_id": str(self.booking.id), "intent": "addon", "addon_code": code}, format="json")
+            self.assertEqual(r.status_code, 400, code)
+
+
+class HotelCancellationTests(TestCase):
+    @patch("payments.email.deliver")
+    def test_hotel_cancellation_keeps_half_and_falls_back_to_no_hotel(self, _m):
+        from bookings.services import remove_addon
+        from packages.models import PackageAddon, PackageAddonGroup
+        hotel = {"code": "hotel_mid", "name": "Mid-Tier Accra Hotel", "unit": "per_person", "unit_price": "2000.00",
+                 "quantity": 2, "line_total": "4000.00", "refundable": True}
+        b = make_refundable_booking(["5756.00"], total="5756.00", addons=[hotel])   # 2 × 878 + 4000
+        b.unit_price = Decimal("878.00"); b.save()
+        g = PackageAddonGroup.objects.create(package=b.package, name="Accra Accommodation", selection="single")
+        PackageAddon.objects.create(package=b.package, group=g, code="no_hotel", name="No Accra Hotel", price=0, unit="per_booking", is_default=True)
+        PackageAddon.objects.create(package=b.package, group=g, code="hotel_mid", name="Mid-Tier Accra Hotel", price=2000, unit="per_person")
+
+        out = remove_addon(b, code="hotel_mid", by_email="fin@test.com")
+        b.refresh_from_db()
+        self.assertEqual((out["fee"], out["refund"]), (Decimal("2000.00"), Decimal("2000.00")))
+        self.assertEqual(b.total_amount, Decimal("3756.00"))                     # 1756 + 2000 fee
+        codes = [l["code"] for l in b.addons]
+        self.assertEqual(codes, ["no_hotel", "hotel_mid_cancellation_fee"])
+        from payments.receipts import compute_line_items
+        self.assertTrue(compute_line_items(b)["reconciles"])

@@ -160,6 +160,12 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
         ) or 0
         booking.amount_paid = quantize(ledger_total)
 
+        # ── 3b. An added experience joins the booking now it's paid ─────────
+        addon_added = False
+        if payment.purpose == Payment.Purpose.ADDON:
+            from bookings.services import apply_paid_addon
+            addon_added = apply_paid_addon(booking, payment)
+
         # ── 4. Overpayment guard ─────────────────────────────────────────────
         overpaid = booking.amount_paid - booking.total_amount
         if overpaid > FULLY_PAID_TOLERANCE:
@@ -187,7 +193,8 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
             booking.status = Booking.Status.CONFIRMED
             result.promoted = True
 
-        booking.save(update_fields=["amount_paid", "status", "updated_at"])
+        booking.save(update_fields=["amount_paid", "status", "updated_at"]
+                     + (["addons", "total_amount"] if addon_added else []))
 
         result.applied = True
         result.fully_paid = booking.is_paid
@@ -230,10 +237,14 @@ def mark_payment_unsuccessful(payment: Payment, gateway_status: str, gateway_dat
         payment = Payment.objects.select_for_update().get(pk=payment.pk)
         if payment.status == Payment.Status.SUCCESS:
             return payment  # webhook/verify race: success always wins
+        was = payment.status
         payment.status = new_status
         if gateway_data is not None:
             payment.gateway_response = gateway_data
         payment.save()
+        if new_status == Payment.Status.FAILED and was != Payment.Status.FAILED:
+            from .email import send_payment_failed
+            transaction.on_commit(lambda: send_payment_failed(payment))
     return payment
 
 

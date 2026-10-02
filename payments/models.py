@@ -24,6 +24,7 @@ class Payment(models.Model):
         FULL = "full", "Full payment"
         DEPOSIT = "deposit", "Deposit"
         INSTALLMENT = "installment", "Installment / top-up"
+        ADDON = "addon", "Added experience"
 
     class Method(models.TextChoices):
         PAYSTACK = "paystack", "Paystack"
@@ -93,6 +94,17 @@ class Payment(models.Model):
 
     # Free-text note for offline payments (who recorded it, bank ref, etc.)
     note = models.TextField(blank=True, null=True)
+
+    # Purpose=ADDON: the add-on this payment buys. The line joins the booking
+    # only when the payment succeeds (see apply_successful_payment).
+    addon_code = models.CharField(max_length=60, blank=True)
+
+    # Chargeback / dispute raised with the card issuer (Paystack
+    # charge.dispute.* webhooks). A disputed payment is never refunded by us
+    # while the dispute is open — that would pay the guest twice.
+    disputed = models.BooleanField(default=False)
+    dispute_status = models.CharField(max_length=60, blank=True)
+    dispute_data = models.JSONField(default=dict, blank=True)
 
     # Full Paystack webhook/verify response stored for auditing and disputes.
     gateway_response = models.JSONField(default=dict, blank=True)
@@ -194,6 +206,7 @@ class Refund(models.Model):
 
     class Meta:
         ordering = ["-requested_at"]
+        permissions = [("process_refund", "Can mark refunds processed / reject them")]
 
     def __str__(self):
         return f"Refund {self.amount} {self.currency} for {self.booking.reference} [{self.status}]"
@@ -255,6 +268,11 @@ class OpsConfig(models.Model):
                   "overpayments, rate-feed problems). Falls back to the "
                   "ADMIN_ALERT_EMAIL environment variable when empty.",
     )
+    checkout_fee_notice = models.CharField(
+        max_length=300, blank=True,
+        help_text="Shown at checkout before payment, e.g. 'Prices include all taxes and the "
+                  "Ghana tourism levy; no payment fees are added.' Leave empty to show nothing.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -292,3 +310,30 @@ class ScheduledTask(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class EmailLog(models.Model):
+    """One row per customer email attempt — so staff can see what a guest was
+    sent and whether the provider accepted it (Appendix C: log delivery)."""
+
+    class Status(models.TextChoices):
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.ForeignKey(
+        "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="emails",
+    )
+    kind = models.CharField(max_length=60, help_text="e.g. confirmation, receipt, reminder, overdue")
+    to_email = models.EmailField()
+    subject = models.CharField(max_length=300)
+    status = models.CharField(max_length=10, choices=Status.choices)
+    provider_id = models.CharField(max_length=100, blank=True, help_text="Resend message id")
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.kind} → {self.to_email} [{self.status}]"

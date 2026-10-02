@@ -221,6 +221,7 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
 
     has_options = serializers.BooleanField(read_only=True)
     from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    spots_left = serializers.IntegerField(read_only=True, allow_null=True)
     next_departure = serializers.SerializerMethodField()
 
     def get_next_departure(self, obj):
@@ -274,6 +275,7 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
     review_count = serializers.SerializerMethodField()
     has_options = serializers.BooleanField(read_only=True)
     from_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    spots_left = serializers.IntegerField(read_only=True, allow_null=True)
     early_bird_active = serializers.BooleanField(read_only=True)
 
     @swagger_serializer_method(serializer_or_field=TourDepartureSerializer(many=True))
@@ -301,6 +303,8 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
             "duration_days",
             "max_guests",
             "min_group_size",
+            "capacity",
+            "spots_left",
             "price_shared",
             "price_private",
             "price_vip",

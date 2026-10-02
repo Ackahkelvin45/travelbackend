@@ -5,6 +5,9 @@ from .views import (
     CurrentPoliciesView,
     CheckoutView,
     ConfigurableCheckoutView,
+    AvailableAddonsView,
+    CancellationQuoteView,
+    CancellationRequestView,
     ClaimBookingView,
     CreateBookingView,
     MyBookingsView,
@@ -30,6 +33,11 @@ urlpatterns = [
 
     # POST — attach a guest booking via emailed claim token
     path("claim/", ClaimBookingView.as_view(), name="claim"),
+
+    # Owner-only cancellation: preview the refund, then lodge the request
+    path("<str:reference>/addons/available/", AvailableAddonsView.as_view(), name="addons-available"),
+    path("<str:reference>/cancellation-quote/", CancellationQuoteView.as_view(), name="cancellation-quote"),
+    path("<str:reference>/cancellation-request/", CancellationRequestView.as_view(), name="cancellation-request"),
 
     # GET — check booking + payment status by booking reference
     path("<str:reference>/", BookingStatusView.as_view(), name="status"),

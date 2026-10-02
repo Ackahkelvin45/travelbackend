@@ -324,7 +324,10 @@ class RefundAdmin(ModelAdmin):
         }),
     )
 
-    @admin.action(description="Mark processed (money has been returned)")
+    def has_process_refund_permission(self, request):
+        return request.user.has_perm("payments.process_refund")
+
+    @admin.action(description="Mark processed (money has been returned)", permissions=["process_refund"])
     def mark_processed(self, request, queryset):
         from django.contrib import messages
 
@@ -343,7 +346,7 @@ class RefundAdmin(ModelAdmin):
                 self.message_user(request, f"{refund}: {exc}", messages.WARNING)
         self.message_user(request, f"{done} refund(s) marked processed.", messages.SUCCESS)
 
-    @admin.action(description="Reject selected pending refunds")
+    @admin.action(description="Reject selected pending refunds", permissions=["process_refund"])
     def reject_refunds(self, request, queryset):
         from django.contrib import messages
 
@@ -388,7 +391,7 @@ class FxRateAdmin(ModelAdmin):
 class OpsConfigAdmin(ModelAdmin):
     """Single-row operational settings. Secrets stay in the environment."""
 
-    fields = ["alert_email", "updated_at"]
+    fields = ["alert_email", "checkout_fee_notice", "updated_at"]
     readonly_fields = ["updated_at"]
 
     def has_add_permission(self, request):

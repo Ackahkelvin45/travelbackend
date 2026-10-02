@@ -433,6 +433,93 @@ class ClaimBookingView(APIView):
         return Response({"reference": booking.reference, "detail": "Booking attached to your account."})
 
 
+class _OwnedBooking:
+    """Owner-only lookup: a signed-in user may act only on bookings attached to
+    their account (guests attach via the emailed claim link)."""
+
+    @staticmethod
+    def get(request, reference):
+        return (
+            Booking.objects.select_related("package")
+            .filter(reference=reference, user=request.user)
+            .first()
+        )
+
+
+class CancellationQuoteView(APIView):
+    """GET /api/bookings/<reference>/cancellation-quote/ — what the guest would
+    be refunded if they requested cancellation right now (Refund Policy bands
+    applied to money actually paid). Preview only; nothing is recorded."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, reference):
+        from payments.refunds import compute_refund
+
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        eligible = booking.status in (Booking.Status.PENDING, Booking.Status.CONFIRMED)
+        computed = compute_refund(booking)
+        return Response({
+            "eligible": eligible and not booking.pending_cancellation,
+            "pending": bool(booking.pending_cancellation),
+            "refund_total": str(computed["refund_total"]),
+            "currency": booking.currency,
+            "breakdown": computed["breakdown"],
+            "arrival_rule": "No refund once you have arrived in Ghana or the experience has started.",
+        })
+
+
+class AvailableAddonsView(APIView):
+    """GET /api/bookings/<reference>/addons/available/ — experiences the owner
+    can still add (until 7 days before departure), priced at face value. Paying
+    for one (POST /payments/initialize/ intent=addon) puts it on the booking."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, reference):
+        from .services import addon_additions_open, available_addons
+
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        ok, reason, open_until = addon_additions_open(booking)
+        return Response({
+            "can_add": ok, "reason": reason, "open_until": open_until,
+            "currency": booking.currency,
+            "addons": available_addons(booking) if ok else [],
+        })
+
+
+class CancellationRequestView(APIView):
+    """POST /api/bookings/<reference>/cancellation-request/ {reason?} — record
+    the request as of now, quote the refund at this instant, acknowledge by
+    email, and freeze further payments until staff resolve it."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, reference):
+        from .services import IllegalTransition, request_cancellation
+
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        reason = str(request.data.get("reason", ""))[:2000]
+        try:
+            req = request_cancellation(booking, reason=reason)
+        except IllegalTransition as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "detail": "Your cancellation request has been received.",
+            "requested_at": req.requested_at,
+            "refund_total": req.refund_quote.get("refund_total"),
+            "currency": booking.currency,
+        }, status=status.HTTP_201_CREATED)
+
+
 class BookingStatusView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]

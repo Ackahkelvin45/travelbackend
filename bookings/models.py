@@ -3,6 +3,10 @@ from django.db import models
 import uuid
 
 
+# Refund/Installment Policy: hours a guest has to settle after the overdue notice.
+OVERDUE_CURE_HOURS = 72
+
+
 class Booking(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"        # created, awaiting payment / deposit
@@ -19,6 +23,9 @@ class Booking(models.Model):
         EXPIRED = "expired", "Pending booking expired unpaid"
         OVERDUE_FORFEIT = "overdue_forfeit", "Payment deadline missed"
         ADMIN = "admin", "Cancelled by admin"
+        # We couldn't deliver (tour called off, service withdrawn): the guest
+        # is refunded IN FULL — the date bands never apply (Terms, Part A).
+        ORGANIZER = "organizer", "Cancelled by Azura (organizer)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reference = models.CharField(max_length=20, unique=True, editable=False)
@@ -107,8 +114,19 @@ class Booking(models.Model):
     )
 
     # Live-with-override deadline: the package's final_payment_deadline applies
-    # unless support grants this booking its own date.
+    # unless support grants this booking its own date. Extensions must say why.
     payment_deadline_override = models.DateField(null=True, blank=True)
+    payment_deadline_override_reason = models.CharField(
+        max_length=300, blank=True,
+        help_text="Why the deadline was extended (policy: every extension is recorded in writing).",
+    )
+
+    # Refund Policy arrival rule: once the guest has arrived in Ghana or the
+    # experience has started, voluntary cancellation refunds nothing.
+    arrived_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Set by staff when the guest arrives / the tour starts for them.",
+    )
 
     status = models.CharField(
         max_length=20,
@@ -140,11 +158,33 @@ class Booking(models.Model):
     # Idempotency markers for scheduled reminder emails, e.g. {"7d": "<iso ts>"}
     reminders_sent = models.JSONField(default=dict, blank=True)
 
+    # Terms Part A: name corrections / traveller replacements are done by staff.
+    # Every change is recorded here — {kind, from, to, at, by, note} — so both
+    # identities, who approved and when are always on file.
+    traveller_changes = models.JSONField(default=list, blank=True)
+
+    # Owner rule (28 Sep 2026): a confirmed experience may be cancelled; 50% of
+    # its charge is kept as a fee. Each removal is logged here.
+    addon_changes = models.JSONField(default=list, blank=True)
+
+    # Installment Policy: an overdue balance gets ONE notice and a cure period.
+    # Nothing cancels automatically — staff decide after the cure period.
+    overdue_notice_sent_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
+        # Staff capabilities (see accounts/management/commands/setup_staff_groups.py):
+        # the admin AND the future staff portal both check exactly these.
+        permissions = [
+            ("view_special_requests", "Can view guests' special requests (may contain health data)"),
+            ("mark_arrived", "Can mark a guest as arrived / tour started"),
+            ("extend_deadline", "Can extend a booking's payment deadline"),
+            ("cancel_booking", "Can cancel a booking (guest bands apply)"),
+            ("cancel_as_organizer", "Can cancel as organizer (full refund)"),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.reference:
@@ -178,15 +218,17 @@ class Booking(models.Model):
     @property
     def is_expired(self):
         """
-        Lazy expiry — no cron. An option-based booking that never received a
-        payment goes stale PENDING_BOOKING_TTL_HOURS after creation: payment
-        initialization refuses it and dashboards hide it.
+        Lazy expiry — no cron. Any booking that never received a payment goes
+        stale PENDING_BOOKING_TTL_HOURS after creation: payment initialization
+        refuses it, dashboards hide it and it no longer holds a place against
+        the tour's capacity (Installment Policy: "reserve stock for a
+        configurable checkout window").
         """
         from datetime import timedelta
         from django.conf import settings
         from django.utils import timezone
 
-        if self.option_id is None or self.status != self.Status.PENDING:
+        if self.status != self.Status.PENDING:
             return False
         if self.amount_paid > 0:
             return False
@@ -206,6 +248,21 @@ class Booking(models.Model):
         )
 
     @property
+    def cure_deadline(self):
+        """End of the overdue cure period (notice + OVERDUE_CURE_HOURS), or None."""
+        from datetime import timedelta
+        if not self.overdue_notice_sent_at:
+            return None
+        return self.overdue_notice_sent_at + timedelta(hours=OVERDUE_CURE_HOURS)
+
+    @property
+    def pending_cancellation(self):
+        """The customer's open cancellation request, if any (freezes payments)."""
+        return self.cancellation_requests.filter(
+            status=CancellationRequest.Status.PENDING
+        ).first()
+
+    @property
     def balance(self):
         """Outstanding amount in the booking currency (never negative)."""
         return max(self.total_amount - self.amount_paid + self.amount_refunded, 0)
@@ -214,6 +271,43 @@ class Booking(models.Model):
     def is_paid(self):
         from payments.money import FULLY_PAID_TOLERANCE
         return self.total_amount > 0 and self.balance <= FULLY_PAID_TOLERANCE
+
+
+class CancellationRequest(models.Model):
+    """
+    A customer's request to cancel, kept separate from the cancellation itself:
+    the policy computes the refund from the moment the request is RECEIVED,
+    not when staff process it, so the received timestamp and the refund quoted
+    at that instant are recorded here as evidence. Staff approve (→ the
+    booking is cancelled and refund legs created as of `requested_at`) or
+    reject (→ payments reopen). While pending, payment collection is frozen.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending review"
+        APPROVED = "approved", "Approved — booking cancelled"
+        REJECTED = "rejected", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="cancellation_requests")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reason = models.TextField(blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    # compute_refund() breakdown at requested_at — what the guest was shown.
+    refund_quote = models.JSONField(default=dict, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    staff_note = models.TextField(blank=True, help_text="Sent to the guest with the outcome.")
+
+    class Meta:
+        ordering = ["-requested_at"]
+        permissions = [("resolve_cancellation", "Can approve or reject cancellation requests")]
+
+    def __str__(self):
+        return f"{self.booking.reference} — cancellation {self.status}"
 
 
 class PolicyDocument(models.Model):

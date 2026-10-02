@@ -42,6 +42,9 @@ urlpatterns = [
     # Payments (initialize, verify, webhook)
     path("api/payments/", include("payments.urls")),
 
+    # Staff portal (Azura operations team — permission-gated, not for developers)
+    path("api/staff/", include("bookings.staff_urls")),
+
     # Blog
     path("api/blog/", include("blog.urls")),
 

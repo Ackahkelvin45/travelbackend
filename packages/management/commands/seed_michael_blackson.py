@@ -92,8 +92,21 @@ class Command(BaseCommand):
                             "(Jan 4–11, 2027) plus optional Accra accommodation and VIP experiences.",
                 highlights=["Michael Blackson Academy", "Cape Coast Castle", "Crown Forest safari",
                             "ENZO VIP Table with Michael Blackson", "Farewell Dinner with the team"],
-                whats_included=["Core Tour (all listed daytime experiences)",
-                                "Crown Forest Standard Room + Safari & Activities (Jan 6)"],
+                whats_included=[
+                    "Crown Forest Standard Room (Jan 6 overnight) + Safari & Activities",
+                    "National Museum of Ghana", "Kwame Nkrumah Mausoleum", "Independence Square",
+                    "Accra International Arts Centre", "Accra Art District", "Lunch at Buka / Baobab",
+                    "Cape Coast Castle", "Michael Blackson Academy", "Lunch at Lemon Beach Resort",
+                    "Group transportation and logistics", "Tour staff and support",
+                    "Scheduled cultural, shopping and beach experiences",
+                    "Official Farewell Dinner with Michael Blackson and the team (Jan 10)",
+                ],
+                whats_excluded=[
+                    "International flights", "Visas and entry requirements (no Visa on Arrival service)",
+                    "Accra accommodation (optional add-on)", "Meals not listed above, drinks and gratuities",
+                    "Travel insurance (strongly recommended)", "Personal expenses",
+                    "Optional experiences unless selected: Kozo / Vine Dinner, ENZO VIP Table, Waterfall Massage",
+                ],
                 duration_days=8,
                 min_group_size=30,
                 # Policies guide Appendix E proposed defaults (owner-approvable in admin):
@@ -126,23 +139,28 @@ class Command(BaseCommand):
 
         # ── Add-ons ───────────────────────────────────────────────────────────
         def addon(code, name, price, unit, group, default=False, order=0, description=None):
+            # Name and description are the admin's to edit (hotel names, whether
+            # the room is kept during the Crown Forest night, luggage, meals…):
+            # set them when the add-on is first created, never overwrite after.
             obj, _ = PackageAddon.objects.update_or_create(
                 package=pkg, code=code,
-                defaults=dict(name=name, price=Decimal(price), unit=unit, group=group,
-                              is_default=default, order=order, is_active=True,
-                              description=description),
+                defaults=dict(price=Decimal(price), unit=unit, group=group,
+                              is_default=default, order=order, is_active=True),
+                create_defaults=dict(name=name, description=description, price=Decimal(price), unit=unit,
+                                     group=group, is_default=default, order=order, is_active=True),
             )
             return obj
 
         PP = PackageAddon.Unit.PER_PERSON
         FLAT = PackageAddon.Unit.PER_BOOKING
-        # Hotels are flat per booking here; switch 'unit' in admin if the client
-        # wants them charged per guest instead.
-        HOTEL_NOTE = "6 nights in Accra (Jan 6 is the included Crown Forest overnight). Breakfast/buffet included."
-        no_hotel = addon("no_hotel", "No Hotel", "0.00", FLAT, hotels, default=True, order=0)
-        mid = addon("hotel_mid", "Mid-Tier Accra Hotel (6 nights)", "2000.00", FLAT, hotels, order=1,
+        # Owner decision (28 Sep 2026): hotels are priced PER PERSON — each
+        # traveller pays the hotel price and gets their own room.
+        HOTEL_NOTE = "Per person, own room. 6 nights in Accra (Jan 6 is the included Crown Forest overnight). Breakfast/buffet included."
+        no_hotel = addon("no_hotel", "No Accra Hotel", "0.00", FLAT, hotels, default=True, order=0,
+                         description="You arrange your own Accra accommodation and reach the published meeting points at your expense. Crown Forest (Jan 6) is still included.")
+        mid = addon("hotel_mid", "Mid-Tier Accra Hotel (6 nights)", "2000.00", PP, hotels, order=1,
                     description=HOTEL_NOTE)
-        prem = addon("hotel_premium", "Premium Accra Hotel (6 nights)", "3200.00", FLAT, hotels, order=2,
+        prem = addon("hotel_premium", "Premium Accra Hotel (6 nights)", "3200.00", PP, hotels, order=2,
                      description=HOTEL_NOTE)
         kozo = addon("kozo_vine", "Kozo / Vine Dinner", "100.00", PP, experiences, order=1)
         enzo = addon("enzo_vip", "ENZO VIP Table with Michael Blackson", "133.00", PP, experiences, order=2)

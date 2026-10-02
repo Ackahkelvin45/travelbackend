@@ -42,11 +42,21 @@ def _run_send_payment_reminders():
     return out.getvalue().strip()
 
 
+def _run_send_overdue_notices():
+    from io import StringIO
+
+    from django.core.management import call_command
+    out = StringIO()
+    call_command("send_overdue_notices", stdout=out)
+    return out.getvalue().strip()
+
+
 # name → (interval, runner). Intervals: FX hourly (matches the cache window),
-# reminders daily (the command itself is idempotent per marker).
+# reminders + overdue notices daily (both idempotent per booking).
 TASKS = {
     "refresh_fx_rates": (lambda: timedelta(seconds=getattr(settings, "FX_CACHE_SECONDS", 3600)), _run_refresh_fx_rates),
     "send_payment_reminders": (lambda: timedelta(hours=24), _run_send_payment_reminders),
+    "send_overdue_notices": (lambda: timedelta(hours=24), _run_send_overdue_notices),
 }
 
 

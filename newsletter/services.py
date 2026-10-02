@@ -47,6 +47,7 @@ def _build_announcement_html(package: TravelPackage) -> str:
           <tr>
             <td style="padding:16px 32px;background:#faf8f5;color:#7a7a88;font-size:12px;">
               You are receiving this because you subscribed to travel updates.
+              <a href="{{UNSUBSCRIBE_URL}}" style="color:#7a7a88;text-decoration:underline;margin-left:6px;">Unsubscribe</a>
             </td>
           </tr>
         </table>
@@ -55,6 +56,17 @@ def _build_announcement_html(package: TravelPackage) -> str:
   </table>
 </body>
 </html>"""
+
+
+UNSUBSCRIBE_SALT = "newsletter-unsubscribe"
+
+
+def unsubscribe_url(email: str) -> str:
+    from django.core import signing
+    from django.urls import reverse
+    token = signing.dumps({"e": email}, salt=UNSUBSCRIBE_SALT)
+    base = getattr(settings, "BACKEND_URL", "") or settings.FRONTEND_URL.rstrip("/").replace("azuratravels.live", "azuratravelsbackend.cc")
+    return f"{base}{reverse('newsletter-unsubscribe')}?token={token}"
 
 
 def send_new_package_announcement(package_id) -> None:
@@ -95,7 +107,9 @@ def send_new_package_announcement(package_id) -> None:
                 "from": settings.RESEND_FROM_EMAIL,
                 "to": [recipient],
                 "subject": subject,
-                "html": html,
+                # Privacy Policy: every marketing email carries a one-click,
+                # per-recipient unsubscribe link (signed, so it can't be forged).
+                "html": html.replace("{{UNSUBSCRIBE_URL}}", unsubscribe_url(recipient)),
             }
             for recipient in chunk
         ]

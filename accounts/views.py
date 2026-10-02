@@ -114,3 +114,24 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+
+class DeleteAccountRequestView(APIView):
+    """POST /api/auth/delete-request/ — Privacy Policy: a guest may ask for their
+    data to be deleted. Bookings/payments are financial records we must keep
+    for the retention period, so this raises a ticket for the team rather than
+    deleting anything on the spot."""
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request):
+        from payments.alerts import alert_admin
+        u = request.user
+        alert_admin(
+            f"delete-request-{u.pk}", f"Account deletion request: {u.email}",
+            f"{u.first_name} {u.last_name} <{u.email}> asked for their account and personal data to be deleted "
+            f"(user id {u.pk}). Review their bookings' retention obligations, then delete or anonymise.",
+        )
+        return Response({"detail": "We've received your request and will confirm by email once it has been reviewed."})
