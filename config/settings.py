@@ -226,6 +226,8 @@ REST_FRAMEWORK = {
         'quote': '120/min',
         'holds': '20/min',
         'leads': '10/min',
+        # Each assistant message is a paid model call.
+        'assistant': '20/min',
         # Email verification / resend — cheap to abuse (email spam), so cap it.
         'auth': '10/min',
         # Live password-rule check from the signup form — generous for typing,
@@ -399,6 +401,15 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 # ── Resend ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
+
+# ── Guest assistant (site chat + WhatsApp) ───────────────────────────────────
+# The Anthropic SDK reads ANTHROPIC_API_KEY from the environment itself.
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "claude-opus-5-5")
+# WhatsApp Cloud API (Meta app → WhatsApp → API setup). Unset = webhook rejects everything.
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
+WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
 
 # Framework emails (admin password reset) go through Resend like every other email.
 EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"

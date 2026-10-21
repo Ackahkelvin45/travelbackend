@@ -196,10 +196,10 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
         booking.save(update_fields=["amount_paid", "status", "updated_at"]
                      + (["addons", "total_amount"] if addon_added else []))
 
-        # ── 5b. Component bookings: money in → held rooms become sold ────────
-        # A room whose unpaid window lapsed may have been resold; flag it.
+        # ── 5b. Component bookings: required payment in → held rooms become sold
+        # A room whose checkout window lapsed may have been resold; flag it.
         rooms_expected = len((booking.quote_snapshot or {}).get("rooms", []))
-        if rooms_expected:
+        if rooms_expected and booking.status == Booking.Status.CONFIRMED:
             from packages.models import RoomUnit
             rooms_kept = RoomUnit.objects.filter(booking=booking).update(held_until=None)
             if rooms_kept < rooms_expected:

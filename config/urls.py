@@ -5,7 +5,8 @@ from django.contrib.auth import views as auth_views
 from django.urls import path, include
 
 from bookings.reports import reports_view
-from bookings.views import LeadCreateView, SiteSettingsView
+from bookings import whatsapp
+from bookings.views import AssistantView, LeadCreateView, SiteSettingsView
 from django.http import JsonResponse
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
@@ -50,6 +51,8 @@ urlpatterns = [
     path("api/bookings/", include("bookings.urls")),
     path("api/leads/", LeadCreateView.as_view(), name="lead-create"),
     path("api/site-settings/", SiteSettingsView.as_view(), name="site-settings"),
+    path("api/assistant/", AssistantView.as_view(), name="assistant"),
+    path("api/whatsapp/webhook/", whatsapp.webhook, name="whatsapp-webhook"),
 
     # Payments (initialize, verify, webhook)
     path("api/payments/", include("payments.urls")),

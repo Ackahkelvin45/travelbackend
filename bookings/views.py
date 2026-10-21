@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 from .models import Booking, Lead
 from .pricing import QuoteError, compute_component_quote, compute_configurable_quote, compute_quote
 from .serializers import (
+    AssistantSerializer,
     BookingDetailSerializer,
     CheckoutSerializer,
     ComponentCheckoutSerializer,
@@ -807,6 +808,24 @@ class LeadCreateView(APIView):
             send_saved_quote(lead)  # never raises; the attempt is logged against the lead
         return Response({"id": str(lead.id), "detail": "Thanks — our team will be in touch."},
                         status=status.HTTP_201_CREATED)
+
+
+class AssistantView(APIView):
+    """POST /api/assistant/ — site chat. Stateless: the page sends the
+    conversation so far and gets the next reply. ``handoff`` set means the
+    page should offer the "send to the team" form (which creates the Lead)."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def post(self, request):
+        from .assistant import reply
+
+        serializer = AssistantSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        text, handoff = reply([dict(m) for m in serializer.validated_data["messages"]])
+        return Response({"reply": text, "handoff": handoff})
 
 
 class SiteSettingsView(APIView):

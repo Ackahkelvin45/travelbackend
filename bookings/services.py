@@ -221,6 +221,29 @@ def create_hold(package, stay_codes: list, *, replace_token: str = ""):
     return token, held_until, claimed
 
 
+def renew_room_hold(booking) -> None:
+    """Before each payment attempt on an unconfirmed booking, hold its rooms
+    for another checkout window. Rooms resold after a lapsed window cannot be
+    renewed: the guest chooses again (QuoteError)."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from packages.models import RoomUnit
+    from payments.models import OpsConfig
+
+    expected = len((booking.quote_snapshot or {}).get("rooms", []))
+    if not expected or booking.status != Booking.Status.PENDING:
+        return
+    with transaction.atomic():
+        units = list(RoomUnit.objects.select_for_update().filter(booking=booking, blocked=False))
+        if len(units) < expected:
+            raise QuoteError("Your room is no longer available — please start a new booking to choose again.")
+        RoomUnit.objects.filter(pk__in=[u.pk for u in units]).update(
+            held_until=timezone.now() + timedelta(minutes=OpsConfig.get().hold_minutes),
+        )
+
+
 def release_hold(token: str) -> int:
     """Give back a checkout hold that has not become a booking."""
     from packages.models import RoomUnit
@@ -235,14 +258,15 @@ def create_component_booking(
     user=None, ip_address: str | None = None,
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
-    BookingTraveller (= one Core ticket) per guest. The units stay held for
-    the unpaid-booking window and become sold on the first payment."""
+    BookingTraveller (= one Core ticket) per guest. The units stay held only
+    for the checkout window (no unpaid room holds, Change Request v4 §6) and
+    become sold once the required payment is verified."""
     from datetime import timedelta
 
-    from django.conf import settings
     from django.utils import timezone
 
     from packages.models import RoomUnit
+    from payments.models import OpsConfig
 
     quote = compute_component_quote(
         package, mode=mode, travellers=travellers, rooms=rooms,
@@ -294,11 +318,11 @@ def create_component_booking(
             refund_tiers_snapshot=package.refund_tiers,
             deposit_required=quote.deposit_required,
         )
-        ttl = timedelta(hours=getattr(settings, "PENDING_BOOKING_TTL_HOURS", 24))
+        held_until = now + timedelta(minutes=OpsConfig.get().hold_minutes)
         unit_of = {}
         for room in quote.rooms:
             unit = by_code[room["stay_type"]].pop()
-            unit.booking, unit.hold_token, unit.held_until = booking, "", booking.created_at + ttl
+            unit.booking, unit.hold_token, unit.held_until = booking, "", held_until
             unit.save(update_fields=["booking", "hold_token", "held_until"])
             room["unit"] = unit.label
             for i in room["occupants"]:
@@ -310,7 +334,8 @@ def create_component_booking(
             BookingTraveller(
                 booking=booking, is_lead=(i == 0), unit=unit_of.get(i),
                 full_name=(t.get("name") or "").strip() or (lead_name if i == 0 else f"Guest {i + 1}"),
-                experiences=[e["code"] for e in quote.travellers[i]["experiences"]],
+                experiences=[e["code"] for e in quote.travellers[i]["experiences"]]
+                + ([quote.travellers[i]["transfer"]] if quote.travellers[i]["transfer"] else []),
             )
             for i, t in enumerate(travellers)
         ])
@@ -540,7 +565,7 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     if line is None:
         raise IllegalTransition("That add-on is not on this booking.")
     charge = quantize(Decimal(str(line.get("line_total", "0"))))
-    if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") == "per_unit":
+    if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") in ("per_unit", "per_vehicle"):
         raise IllegalTransition("That item cannot be cancelled.")
 
     fee = quantize(charge * ADDON_CANCELLATION_FEE_PERCENT / Decimal("100"))

@@ -366,11 +366,12 @@ class ConfigurableCheckoutSerializer(serializers.Serializer):
     )
 
 
-# ── Component pricing (Change Request v2) ─────────────────────────────────────
+# ── Component pricing (Change Request v4) ─────────────────────────────────────
 
 class _TravellerInput(serializers.Serializer):
     name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     experiences = serializers.ListField(child=serializers.CharField(max_length=60), default=list, max_length=20)
+    adult = serializers.BooleanField(default=False, help_text="Guest confirms they are 18 or over (adults-only items).")
 
 
 class _RoomInput(serializers.Serializer):
@@ -431,8 +432,24 @@ class LeadSerializer(serializers.ModelSerializer):
         model = Lead
         fields = ["name", "email", "phone", "source", "message", "marketing_consent", "package",
                   "referral_code", "selection"]
+        # Optional on the model (WhatsApp leads), still required from the site.
+        extra_kwargs = {"email": {"required": True, "allow_blank": False}}
 
     def validate_source(self, value):
         if value not in (Lead.Source.CHAT, Lead.Source.SAVED_QUOTE, Lead.Source.CONTACT):
             raise serializers.ValidationError("Unsupported source.")
+        return value
+
+
+class AssistantTurnSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=["user", "assistant"])
+    content = serializers.CharField(max_length=2000)
+
+
+class AssistantSerializer(serializers.Serializer):
+    messages = AssistantTurnSerializer(many=True, min_length=1, max_length=30)
+
+    def validate_messages(self, value):
+        if value[0]["role"] != "user" or value[-1]["role"] != "user":
+            raise serializers.ValidationError("The conversation must start and end with the guest.")
         return value

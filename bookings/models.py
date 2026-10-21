@@ -492,7 +492,7 @@ class Lead(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
-    email = models.EmailField()
+    email = models.EmailField(blank=True, help_text="Blank for WhatsApp leads, which come with a phone number instead.")
     phone = models.CharField(max_length=30, blank=True)
     source = models.CharField(max_length=20, choices=Source.choices, default=Source.OTHER)
     message = models.TextField(blank=True)
@@ -519,3 +519,26 @@ class Lead(models.Model):
 
     def __str__(self):
         return f"{self.name} <{self.email}> [{self.stage}]"
+
+
+class ChatThread(models.Model):
+    """A WhatsApp conversation with the assistant. ``messages`` is the
+    text-only transcript the bot replays; ``bot_paused`` means staff own it."""
+
+    wa_id = models.CharField(max_length=30, unique=True, help_text="Guest's WhatsApp number, digits only.")
+    name = models.CharField(max_length=200, blank=True, help_text="WhatsApp profile name.")
+    messages = models.JSONField(default=list, blank=True)
+    seen_ids = models.JSONField(default=list, blank=True, help_text="Recent Meta message ids, so retries aren't answered twice.")
+    bot_paused = models.BooleanField(
+        default=False, help_text="On after a hand-off: the bot stays quiet and staff reply. Untick to hand back to the bot.",
+    )
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="chat_threads")
+    last_inbound_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_inbound_at"]
+
+    def __str__(self):
+        return f"{self.name or 'WhatsApp'} +{self.wa_id}"

@@ -165,6 +165,15 @@ class InitializePaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # No unpaid room holds: an unconfirmed booking's rooms are held only
+        # for each payment attempt's checkout window.
+        from bookings.pricing import QuoteError
+        from bookings.services import renew_room_hold
+        try:
+            renew_room_hold(booking)
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
         # ── Server-computed amount, whatever the intent ──────────────────────
         balance = booking.balance
         if intent == "deposit":

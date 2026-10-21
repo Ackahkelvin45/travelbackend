@@ -8,7 +8,9 @@ from unfold.widgets import UnfoldAdminTextareaWidget
 from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_STAGE_BADGE, PAYMENT_STATE_BADGE
 from payments.models import Payment
 from payments.services import record_offline_payment
-from .models import Booking, BookingTraveller, CancellationRequest, Lead, PolicyAcceptance, PolicyDocument
+from .models import (
+    Booking, BookingTraveller, CancellationRequest, ChatThread, Lead, PolicyAcceptance, PolicyDocument,
+)
 
 
 class OfflinePaymentInlineForm(forms.ModelForm):
@@ -894,3 +896,61 @@ class LeadAdmin(ModelAdmin):
             send_saved_quote(lead)
             self.message_user(request, f"Quote reminder sent to {lead.email}.", messages.SUCCESS)
         return self._back(object_id)
+
+
+class ChatThreadForm(forms.ModelForm):
+    reply = forms.CharField(
+        required=False, widget=UnfoldAdminTextareaWidget(attrs={"rows": 3}),
+        help_text="Sent to the guest on WhatsApp when you save. WhatsApp only delivers it within "
+                  "24 hours of the guest's last message.",
+    )
+
+    class Meta:
+        model = ChatThread
+        fields = ["bot_paused"]
+
+
+@admin.register(ChatThread)
+class ChatThreadAdmin(ModelAdmin):
+    """WhatsApp conversations. After a hand-off the bot is paused and staff
+    reply from here; untick "Bot paused" to give the thread back to the bot."""
+    form = ChatThreadForm
+    list_display = ["__str__", "bot_paused", "lead", "last_inbound_at"]
+    list_filter = ["bot_paused"]
+    search_fields = ["wa_id", "name"]
+    readonly_fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript"]
+    fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript", "reply", "bot_paused"]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description="Conversation")
+    def transcript(self, obj):
+        from django.utils.html import format_html, format_html_join
+        return format_html('<div style="white-space:pre-wrap">{}</div>', format_html_join(
+            "", "<p><strong>{}:</strong> {}</p>",
+            (("Guest" if m["role"] == "user" else "Staff" if m.get("staff") else "Bot", m["content"])
+             for m in obj.messages)))
+
+    def save_model(self, request, obj, form, change):
+        import requests
+        from django.contrib import messages
+        from django.db import transaction
+        from .whatsapp import send_text
+
+        text = form.cleaned_data.get("reply", "").strip()
+        if text:
+            try:
+                send_text(obj.wa_id, text)
+            except requests.RequestException as exc:
+                self.message_user(request, f"WhatsApp didn't accept the reply: {exc}", messages.ERROR)
+                text = ""
+        with transaction.atomic():
+            # Re-read so guest messages that arrived while the page was open aren't overwritten.
+            fresh = ChatThread.objects.select_for_update().get(pk=obj.pk)
+            obj.seen_ids, obj.messages = fresh.seen_ids, fresh.messages
+            if text:
+                obj.messages = obj.messages + [{"role": "assistant", "content": text, "staff": True}]
+                if "bot_paused" not in form.changed_data:
+                    obj.bot_paused = True  # a staff reply takes the thread over
+            super().save_model(request, obj, form, change)
