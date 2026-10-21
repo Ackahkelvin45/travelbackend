@@ -922,6 +922,26 @@ class ComponentPricingTests(TestCase):
 
     # ── API ───────────────────────────────────────────────────────────────────
 
+    def test_owner_can_change_message_preferences(self):
+        from django.contrib.auth import get_user_model
+        from .services import create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        booking = self.checkout(token, marketing_consent=True)
+        url = f"/api/bookings/{booking.reference}/preferences/"
+        self.assertEqual(self.client.patch(url, {"marketing_consent": False}, content_type="application/json").status_code, 401)
+
+        owner = get_user_model().objects.create_user(email="ama@example.com", password="x-Strong-pass-1", first_name="Ama", last_name="O")
+        Booking.objects.filter(pk=booking.pk).update(user=owner)
+        from rest_framework.test import APIClient
+        api = APIClient()
+        api.force_authenticate(owner)
+        res = api.patch(url, {"marketing_consent": False, "photo_consent": True}, format="json")
+        self.assertEqual(res.json(), {"marketing_consent": False, "photo_consent": True})
+        units = {t["unit"] for t in api.get(f"/api/bookings/{booking.reference}/").json()["travellers"]}
+        self.assertEqual(len(units), 1)  # both guests share the one held unit
+        self.assertIsNotNone(units.pop())
+
     def test_quote_endpoint_and_saved_quote_lead(self):
         from .models import Lead
 

@@ -282,6 +282,7 @@ def create_component_booking(
             phone=contact.get("phone"), country=contact.get("country"),
             special_requests=contact.get("special_requests"),
             package=package, option=None, mode=mode, marketing_consent=marketing_consent,
+            photo_consent=any(d.type == PolicyDocument.Type.MEDIA for d in optional),
             payment_plan=quote.payment_plan, num_guests=quote.num_guests,
             travel_date=package.available_from,
             unit_price=quote.core_price, total_amount=quote.total, currency=package.currency,

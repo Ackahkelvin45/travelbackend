@@ -167,6 +167,9 @@ class Booking(models.Model):
         help_text="Full component quote at booking time: per-traveller Core, rooms, experiences, discounts.",
     )
     marketing_consent = models.BooleanField(default=False)
+    # Current photo/media consent. The PolicyAcceptance row is the evidence it
+    # was given; the guest can withdraw (or re-give) it later from My Booking.
+    photo_consent = models.BooleanField(default=False)
 
     # ── Coordinator workflow ──────────────────────────────────────────────────
     coordinator = models.ForeignKey(

@@ -169,6 +169,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     cure_deadline = serializers.DateTimeField(read_only=True)
     cancellation_request = serializers.SerializerMethodField()
     coordinator_name = serializers.SerializerMethodField()
+    travellers = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -177,6 +178,10 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "reference",
             "mode",
             "coordinator_name",
+            "lead_contacted_at",
+            "travellers",
+            "marketing_consent",
+            "photo_consent",
             "first_name",
             "last_name",
             "email",
@@ -227,6 +232,21 @@ class BookingDetailSerializer(serializers.ModelSerializer):
 
     def get_balance(self, obj):
         return str(obj.balance)
+
+    def get_travellers(self, obj):
+        """Guests, rooms and experiences (component bookings). Names only —
+        travel-form answers stay behind the owner-only travel endpoint."""
+        names = {a.code: a.name for a in obj.package.addons.all()}
+        return [
+            {
+                "full_name": t.full_name,
+                "is_lead": t.is_lead,
+                "unit": t.unit.label if t.unit else None,
+                "experiences": [names.get(c, c) for c in t.experiences],
+                "travel_info_submitted": t.travel_info_submitted_at is not None,
+            }
+            for t in obj.travellers.select_related("unit")
+        ]
 
     def get_coordinator_name(self, obj):
         """First name only — this serializer also backs the public status view."""

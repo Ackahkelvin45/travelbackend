@@ -13,6 +13,7 @@ from .views import (
     ComponentQuoteView,
     HoldView,
     TravelInfoView,
+    BookingPreferencesView,
     CreateBookingView,
     MyBookingsView,
 )
@@ -47,6 +48,7 @@ urlpatterns = [
     # Owner-only cancellation: preview the refund, then lodge the request
     path("<str:reference>/addons/available/", AvailableAddonsView.as_view(), name="addons-available"),
     path("<str:reference>/travel/", TravelInfoView.as_view(), name="travel-info"),
+    path("<str:reference>/preferences/", BookingPreferencesView.as_view(), name="preferences"),
     path("<str:reference>/cancellation-quote/", CancellationQuoteView.as_view(), name="cancellation-quote"),
     path("<str:reference>/cancellation-request/", CancellationRequestView.as_view(), name="cancellation-request"),
 

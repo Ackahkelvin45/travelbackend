@@ -749,6 +749,24 @@ class TravelInfoView(APIView):
         return Response({"travellers": TravelInfoSerializer(booking.travellers.all(), many=True).data})
 
 
+class BookingPreferencesView(APIView):
+    """PATCH /api/bookings/<reference>/preferences/ {marketing_consent?, photo_consent?}
+    — owner-only; consent can be withdrawn or given at any time."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, reference):
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        fields = [f for f in ("marketing_consent", "photo_consent") if isinstance(request.data.get(f), bool)]
+        for f in fields:
+            setattr(booking, f, request.data[f])
+        if fields:
+            booking.save(update_fields=[*fields, "updated_at"])
+        return Response({"marketing_consent": booking.marketing_consent, "photo_consent": booking.photo_consent})
+
+
 class LeadCreateView(APIView):
     """POST /api/leads/ — chat hand-off, contact form or saved quote."""
 
