@@ -676,6 +676,7 @@ class PackageFAQ(models.Model):
         on_delete=models.CASCADE,
         related_name="faqs",
     )
+    topic = models.CharField(max_length=40, blank=True, help_text="Groups the FAQ page, e.g. 'Trip', 'Stays', 'Payments'.")
     question = models.CharField(max_length=300)
     answer = models.TextField()
     order = models.PositiveIntegerField(default=0, help_text="Display order (lower = first)")

@@ -9,8 +9,11 @@ Points couple room and the extras bundle. Old hotel add-ons, Kozo and the
 whole-cart discount ladder are deactivated (kept for existing bookings).
 
 Idempotent. Room inventory is created only when a stay type has no units yet.
+--content also replaces the marketing copy (overview, inclusions, the six-day
+programme and FAQs) with the change request's text — it overwrites admin edits,
+so run it once when switching over.
 
-    python manage.py seed_ghana_2027
+    python manage.py seed_ghana_2027 [--content]
 """
 from datetime import date
 from decimal import Decimal
@@ -18,7 +21,9 @@ from decimal import Decimal
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
-from packages.models import PackageAddon, PackageAddonGroup, PackageDiscountRule, RoomUnit, StayType, TravelPackage
+from packages.models import (
+    Itinerary, PackageAddon, PackageAddonGroup, PackageDiscountRule, PackageFAQ, RoomUnit, StayType, TravelPackage,
+)
 
 SLUG = "michael-blackson-ghana-experience"
 
@@ -39,8 +44,48 @@ EXPERIENCES = [
 ]
 
 
+DESCRIPTION = (
+    "Five nights in Ghana: four in Accra and one at Crown Forest, which is included. "
+    "Arrive on Wednesday to join the press event and Jubilee House visit."
+)
+HIGHLIGHTS = ["Press and Jubilee House", "Cape Coast Castle and the Academy", "Crown Forest night and activities",
+              "Aburi, Peduase and Oboadaka Waterfalls", "Bella Afrik access"]
+INCLUDED = ["Crown Forest night, activities and breakfast", "Press, Jubilee House and Cape Coast programme",
+            "Aburi, Peduase and Oboadaka Waterfalls", "Bella Afrik access (drinks are self-pay)"]
+EXCLUDED = ["Accra accommodation, unless added", "ENZO VIP, Waterfall Massage and farewell dinner, unless added",
+            "Airbnb meals", "Flights, visas, transfers, gratuities and taxes [TO CONFIRM]"]
+# (date label, programme, overnight)
+PROGRAMME = [
+    ("Wed 6 Jan", "Press and Jubilee House. Arrival briefing and welcome.", "Accra"),
+    ("Thu 7 Jan", "Cape Coast Castle, Academy, Lemon Beach and Crown Forest.", "Crown Forest (included)"),
+    ("Fri 8 Jan", "Crown Forest activities and breakfast. Return to Accra. ENZO VIP evening.", "Accra"),
+    ("Sat 9 Jan", "Oboadaka Waterfalls, Aburi and Peduase. Optional massage.", "Accra"),
+    ("Sun 10 Jan", "Leisure day. Optional Le Tandem farewell dinner. Bella Afrik access.", "Accra"),
+    ("Mon 11 Jan", "Final checkout and departure.", "None"),
+]
+FAQS = [
+    ("Trip", "What are the trip dates?", "Wednesday 6 to Monday 11 January 2027. That is five nights: four in Accra and one at Crown Forest. Monday is checkout and departure."),
+    ("Trip", "What does the $899 Core ticket include?", "Crown Forest accommodation, activities and breakfast, plus the core programme: press and Jubilee House, Cape Coast, Aburi, Peduase, Oboadaka Waterfalls and Bella Afrik access. Drinks at Bella Afrik are self-pay. The farewell dinner is optional."),
+    ("Trip", "When should I arrive?", "Arrive by [ARRIVAL TIME] on Wednesday 6 January to attend the press event and Jubilee House. Tuesday arrivals need an extra night, booked separately."),
+    ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add Airbnb or Four Points, every guest in the room needs a Core ticket."),
+    ("Stays", "How is accommodation priced?", "Per unit or room, per night, for four Accra nights. A one bedroom Airbnb sleeps up to 2 and a two bedroom up to 4. The unit is charged once, however many guests share it."),
+    ("Stays", "Are meals included at the Airbnb?", "No. Airbnb meals are not included. Breakfast at Crown Forest is included in Core. Four Points breakfast is [TO BE CONFIRMED]."),
+    ("Prices", "What discounts are available?", "3% on Core plus Airbnb, 5% on Core plus Four Points, and 5% on a guest's full set of experiences. Each discount applies once per item, and there are no coupon codes."),
+    ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. A couple can add one for both or pick separately."),
+    ("Payments", "How do deposits and payments work?", "[DEPOSIT AND INSTALMENT RULES TO BE CONFIRMED]. You always see the amount due today and the remaining balance before you pay, and we remind you before the balance is due."),
+    ("Payments", "What if my payment fails?", "Nothing is booked until payment is verified, and you won't be charged twice. You can retry straight away from the payment page or your booking link."),
+    ("Payments", "What is the cancellation policy?", "See our refund policy. [APPROVED CANCELLATION AND REFUND TERMS]"),
+    ("Travel", "Do you need my passport?", "Only if a confirmed supplier or activity requires it. We'll ask through a secure upload, never by email or chat."),
+    ("Travel", "Are flights, visas or airport transfers included?", "Not unless stated. Flights, visas, transfers, gratuities and taxes are [TO BE CONFIRMED]."),
+]
+
+
 class Command(BaseCommand):
     help = "Apply the Change Request v2 catalogue to the flagship package (component pricing)."
+
+    def add_arguments(self, parser):
+        parser.add_argument("--content", action="store_true",
+                            help="Also replace overview, inclusions, programme and FAQs (overwrites admin edits).")
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -93,8 +138,33 @@ class Command(BaseCommand):
         if created:
             rule.required_addons.set(bundle)
 
+        if options["content"]:
+            self._content(pkg)
+
         self.stdout.write(self.style.SUCCESS(
             f"{pkg.title}: component pricing, Core ${pkg.base_price_per_person}, "
             f"{pkg.stay_types.count()} stay types, {len(bundle)} experiences, {retired} old add-ons retired. "
             "Couple room and extras bundle are OFF until the client confirms."
         ))
+
+    def _content(self, pkg):
+        pkg.description = DESCRIPTION
+        pkg.highlights = HIGHLIGHTS
+        pkg.whats_included = INCLUDED
+        pkg.whats_excluded = EXCLUDED
+        pkg.save(update_fields=["description", "highlights", "whats_included", "whats_excluded", "updated_at"])
+        pkg.itineraries.filter(day__gt=len(PROGRAMME)).delete()
+        for day, (date_label, text, night) in enumerate(PROGRAMME, start=1):
+            Itinerary.objects.update_or_create(
+                package=pkg, day=day,
+                defaults=dict(title=date_label, description=text, activities=[], notes=f"Overnight: {night}"),
+            )
+        for code, name, *_ in EXPERIENCES:
+            pkg.addons.filter(code=code).update(name=name)
+        for code, name, *_ in STAYS:
+            pkg.stay_types.filter(code=code).update(name=name)
+        pkg.faqs.all().delete()
+        PackageFAQ.objects.bulk_create(
+            PackageFAQ(package=pkg, topic=topic, question=q, answer=a, order=i) for i, (topic, q, a) in enumerate(FAQS)
+        )
+        self.stdout.write(f"Content replaced: {len(PROGRAMME)} programme days, {len(FAQS)} FAQs.")
