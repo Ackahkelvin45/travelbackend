@@ -203,6 +203,17 @@ class InitializePaymentView(APIView):
             except IllegalTransition as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             amount = quantize(addon_line["line_total"])
+        elif intent == "traveller":
+            row = next((r for r in booking.traveller_balances()
+                        if r[0].pk == serializer.validated_data["traveller_id"]), None)
+            if row is None:
+                return Response({"detail": "That guest is not on this booking."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            traveller, outstanding = row[0], row[3]
+            if outstanding <= 0:
+                return Response({"detail": f"{traveller.full_name}'s share is already paid."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            amount = min(outstanding, balance)
         else:
             amount = balance
 
@@ -264,6 +275,7 @@ class InitializePaymentView(APIView):
             exchange_rate=exchange_rate,
             purpose=purpose,
             addon_code=serializer.validated_data.get("addon_code", "") if intent == "addon" else "",
+            traveller=traveller if intent == "traveller" else None,
         )
 
         gateway_amount = to_subunits(charged_amount if charged_amount is not None else amount)
@@ -274,6 +286,7 @@ class InitializePaymentView(APIView):
             "package": booking.package.title,
         }
         payment_prompt = None
+        payer_email = (serializer.validated_data.get("payer_email") if intent == "traveller" else None) or booking.email
 
         try:
             if channel == "momo" and momo_provider in DIRECT_MOMO_PROVIDERS:
@@ -281,7 +294,7 @@ class InitializePaymentView(APIView):
                 # buyer's phone. No redirect, no popup — the frontend shows the
                 # prompt copy and polls /payments/status/.
                 paystack_data = charge_mobile_money(
-                    email=booking.email,
+                    email=payer_email,
                     amount_kobo=gateway_amount,
                     reference=payment.paystack_reference,
                     currency=gateway_currency,
@@ -307,7 +320,7 @@ class InitializePaymentView(APIView):
                     "card": ["card"],
                 }[channel]
                 paystack_data = initialize_transaction(
-                    email=booking.email,
+                    email=payer_email,
                     amount_kobo=gateway_amount,
                     reference=payment.paystack_reference,
                     currency=gateway_currency,

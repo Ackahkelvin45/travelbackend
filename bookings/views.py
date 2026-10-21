@@ -691,7 +691,7 @@ class ComponentCheckoutView(APIView):
                     "special_requests": data.get("special_requests") or None,
                 },
                 accepted_policy_types=data["accepted_policies"],
-                marketing_consent=data["marketing_consent"],
+                marketing_consent=data["marketing_consent"], pay_separately=data["pay_separately"],
                 user=request.user if request.user.is_authenticated else None,
                 ip_address=request.META.get("REMOTE_ADDR"),
             )
@@ -843,4 +843,31 @@ class SiteSettingsView(APIView):
             "whatsapp_number": c.whatsapp_number, "emergency_phone": c.emergency_phone,
             "staffed_hours": c.staffed_hours, "legal_name": c.legal_name,
             "legal_address": c.legal_address, "hold_minutes": c.hold_minutes,
+        })
+
+
+class TravellerShareView(APIView):
+    """GET /api/bookings/share/<traveller id>/ — what one group member owes,
+    for the "pay your share" link the organiser forwards. The traveller id
+    (a UUID) is the capability; pay with intent=traveller."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
+
+    def get(self, request, traveller_id):
+        from .models import BookingTraveller
+
+        t = BookingTraveller.objects.select_related("booking__package").filter(pk=traveller_id).first()
+        if t is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        b = t.booking
+        _, share, paid, outstanding = next(row for row in b.traveller_balances() if row[0].pk == t.pk)
+        return Response({
+            "booking_id": str(b.id), "reference": b.reference, "package_title": b.package.title,
+            "organiser": b.first_name, "status": b.status, "currency": b.currency,
+            "traveller_id": str(t.id), "full_name": t.full_name,
+            "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
+            "payable": outstanding > 0 and b.status in (Booking.Status.PENDING, Booking.Status.CONFIRMED)
+                       and not b.pending_cancellation,
         })

@@ -196,8 +196,8 @@ class TravellerInline(TabularInline):
     tab = True
     verbose_name = "Guest"
     verbose_name_plural = "Guests & rooms"
-    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "travel_info"]
-    readonly_fields = ["is_lead", "ticket", "experiences_display", "travel_info"]
+    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "paid_share", "travel_info"]
+    readonly_fields = ["is_lead", "ticket", "experiences_display", "paid_share", "travel_info"]
     can_delete = False
 
     def has_add_permission(self, request, obj=None):
@@ -209,6 +209,12 @@ class TravellerInline(TabularInline):
             object_id = request.resolver_match.kwargs.get("object_id")
             kwargs["queryset"] = RoomUnit.objects.filter(booking_id=object_id).select_related("stay_type")
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @admin.display(description="Paid / share")
+    def paid_share(self, obj):
+        _, share, paid, outstanding = next(r for r in obj.booking.traveller_balances() if r[0].pk == obj.pk)
+        state = "paid" if outstanding <= 0 else f"{outstanding:,.2f} due"
+        return f"{paid:,.2f} / {share:,.2f} · {state}"
 
     @admin.display(description="Core ticket")
     def ticket(self, obj):

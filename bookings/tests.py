@@ -944,6 +944,54 @@ class ComponentPricingTests(TestCase):
         with self.assertRaises(QuoteError):
             renew_room_hold(booking)
 
+    def test_group_members_pay_separately(self):
+        from unittest import mock
+        from payments.models import Payment
+        from payments.services import apply_successful_payment
+        from .services import create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_2bed"])
+        booking = self.checkout(token, mode="group", n=3, pay_separately=True,
+                                rooms=[{"stay_type": "airbnb_2bed", "occupants": [0, 1, 2]}])
+        self.assertEqual(booking.total_amount, Decimal("4397.00"))  # 3 × 899 + 1,700
+        # Checkout covers the organiser's whole share plus the others' room shares.
+        self.assertEqual(booking.deposit_required, Decimal("2599.00"))  # 1,465.67 + 566.67 + 566.66
+
+        def pay(amount, traveller=None):
+            p = Payment.objects.create(booking=booking, paystack_reference=f"T-{Payment.objects.count()}",
+                                       amount=Decimal(amount), currency="USD", traveller=traveller)
+            apply_successful_payment(p, None)
+            booking.refresh_from_db()
+
+        pay("2599.00")
+        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
+        self.assertEqual([str(o) for *_, o in booking.traveller_balances()], ["0.00", "899.00", "899.00"])
+
+        member = booking.travellers.get(position=1)
+        share = self.client.get(f"/api/bookings/share/{member.id}/").json()
+        self.assertEqual((share["outstanding"], share["payable"]), ("899.00", True))
+        with mock.patch("payments.views.initialize_transaction",
+                        return_value={"access_code": "a", "authorization_url": "u"}) as init:
+            res = self.client.post("/api/payments/initialize/", {
+                "booking_id": str(booking.id), "intent": "traveller", "traveller_id": str(member.id),
+                "payer_email": "kojo@example.com",
+            }, content_type="application/json")
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.json()["amount"], "899.00")
+        self.assertEqual(init.call_args.kwargs["email"], "kojo@example.com")
+        self.assertEqual(Payment.objects.get(paystack_reference=res.json()["reference"]).traveller, member)
+
+        pay("899.00", traveller=member)
+        self.assertEqual([str(o) for *_, o in booking.traveller_balances()], ["0.00", "0.00", "899.00"])
+        self.assertEqual(booking.balance, Decimal("899.00"))
+
+    def test_only_groups_pay_separately(self):
+        from .pricing import QuoteError
+        from .services import create_hold
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        with self.assertRaises(QuoteError):
+            self.checkout(token, pay_separately=True)
+
     def test_payment_after_lapsed_hold_is_flagged(self):
         from payments.models import Payment
         from payments.services import apply_successful_payment, generate_payment_reference

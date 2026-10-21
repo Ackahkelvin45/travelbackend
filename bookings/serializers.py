@@ -177,6 +177,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "id",
             "reference",
             "mode",
+            "pay_separately",
             "coordinator_name",
             "lead_contacted_at",
             "travellers",
@@ -239,13 +240,15 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         names = {a.code: a.name for a in obj.package.addons.all()}
         return [
             {
+                "id": str(t.id),
                 "full_name": t.full_name,
                 "is_lead": t.is_lead,
                 "unit": t.unit.label if t.unit else None,
                 "experiences": [names.get(c, c) for c in t.experiences],
                 "travel_info_submitted": t.travel_info_submitted_at is not None,
+                "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
             }
-            for t in obj.travellers.select_related("unit")
+            for t, share, paid, outstanding in obj.traveller_balances()
         ]
 
     def get_coordinator_name(self, obj):
@@ -409,6 +412,7 @@ class ComponentCheckoutSerializer(ComponentQuoteSerializer):
     special_requests = serializers.CharField(required=False, allow_blank=True, max_length=2000)
     accepted_policies = serializers.ListField(child=serializers.CharField(), default=list)
     marketing_consent = serializers.BooleanField(default=False)
+    pay_separately = serializers.BooleanField(default=False, help_text="Group: each member pays their own share.")
     expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
 
 

@@ -255,7 +255,7 @@ def release_hold(token: str) -> int:
 def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
-    user=None, ip_address: str | None = None,
+    pay_separately: bool = False, user=None, ip_address: str | None = None,
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
     BookingTraveller (= one Core ticket) per guest. The units stay held only
@@ -275,6 +275,17 @@ def create_component_booking(
     assert_capacity(package, quote.num_guests)
     if mode == Booking.Mode.COUPLE and not all((t.get("name") or "").strip() for t in travellers):
         raise QuoteError("Please give both guests' names.")
+    if pay_separately and mode != Booking.Mode.GROUP:
+        raise QuoteError("Paying separately is for group bookings.")
+
+    # What the checkout payment covers: everything due now, or — when members
+    # pay separately — the organiser's own part plus every room deposit, so
+    # rooms are secured by the first payment (Change Request v4 §4, §6).
+    portions = [
+        Decimal(t["due_now"]) if (i == 0 or not pay_separately) else Decimal(t["room_deposit"])
+        for i, t in enumerate(quote.travellers)
+    ]
+    deposit_required = sum(portions, Decimal("0")) if (pay_separately or quote.deposit_required) else None
 
     documents = required_policy_documents()
     accepted = set(accepted_policy_types)
@@ -316,7 +327,7 @@ def create_component_booking(
             quote_snapshot=quote.as_dict(),
             price_list_version=quote.price_list_version,
             refund_tiers_snapshot=package.refund_tiers,
-            deposit_required=quote.deposit_required,
+            deposit_required=deposit_required, pay_separately=pay_separately,
         )
         held_until = now + timedelta(minutes=OpsConfig.get().hold_minutes)
         unit_of = {}
@@ -332,7 +343,8 @@ def create_component_booking(
 
         BookingTraveller.objects.bulk_create([
             BookingTraveller(
-                booking=booking, is_lead=(i == 0), unit=unit_of.get(i),
+                booking=booking, is_lead=(i == 0), unit=unit_of.get(i), position=i,
+                share=Decimal(quote.travellers[i]["share"]), checkout_portion=portions[i],
                 full_name=(t.get("name") or "").strip() or (lead_name if i == 0 else f"Guest {i + 1}"),
                 experiences=[e["code"] for e in quote.travellers[i]["experiences"]]
                 + ([quote.travellers[i]["transfer"]] if quote.travellers[i]["transfer"] else []),

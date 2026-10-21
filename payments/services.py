@@ -52,7 +52,7 @@ def _confirmation_threshold(booking):
     """
     deposit_required = getattr(booking, "deposit_required", None)
     payment_plan = getattr(booking, "payment_plan", None)
-    if payment_plan == "installment" and deposit_required:
+    if deposit_required and (payment_plan == "installment" or getattr(booking, "pay_separately", False)):
         return min(deposit_required, booking.total_amount)
     return booking.total_amount
 

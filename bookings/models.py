@@ -162,6 +162,9 @@ class Booking(models.Model):
 
     # ── Component pricing (Change Request v2) ────────────────────────────────
     mode = models.CharField(max_length=10, choices=Mode.choices, blank=True)
+    pay_separately = models.BooleanField(
+        default=False, help_text="Group booking: each member pays their own share under this reference.",
+    )
     price_list_version = models.ForeignKey(
         "packages.PriceListVersion", on_delete=models.PROTECT, null=True, blank=True, related_name="bookings",
         help_text="Published price list this booking was priced from (component pricing).",
@@ -295,6 +298,29 @@ class Booking(models.Model):
     def balance(self):
         """Outstanding amount in the booking currency (never negative)."""
         return max(self.total_amount - self.amount_paid + self.amount_refunded, 0)
+
+    def traveller_balances(self) -> list:
+        """Per-person payment status (component bookings): [(traveller,
+        share, paid, outstanding)]. Payments tagged to a traveller are theirs;
+        untagged money (the organiser's) first covers each traveller's
+        checkout portion, then remaining shares in booking order.
+        ponytail: refunds are not attributed per person; staff handle those."""
+        from decimal import Decimal
+        from django.db.models import Sum
+
+        travellers = list(self.travellers.all())
+        tagged = dict(
+            self.payments.filter(status="success", traveller__isnull=False)
+            .values_list("traveller").annotate(total=Sum("amount"))
+        )
+        paid = {t.pk: tagged.get(t.pk) or Decimal("0") for t in travellers}
+        untagged = max(self.amount_paid - sum(paid.values(), Decimal("0")), Decimal("0"))
+        for limit in (lambda t: t.checkout_portion, lambda t: t.share):
+            for t in travellers:
+                take = min(max(limit(t) - paid[t.pk], Decimal("0")), untagged)
+                paid[t.pk] += take
+                untagged -= take
+        return [(t, t.share, paid[t.pk], max(t.share - paid[t.pk], Decimal("0"))) for t in travellers]
 
     @property
     def is_paid(self):
@@ -449,6 +475,13 @@ class BookingTraveller(models.Model):
         "packages.RoomUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="occupants",
     )
     experiences = models.JSONField(default=list, blank=True, help_text="Add-on codes chosen for this guest.")
+    position = models.PositiveSmallIntegerField(default=0, help_text="Order in the booking; 0 is the lead guest.")
+    share = models.DecimalField(max_digits=12, decimal_places=2, default=0,
+                                help_text="This guest's part of the booking total.")
+    checkout_portion = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        help_text="Part of this guest's share covered by the payment made at checkout.",
+    )
 
     # ── Travel information (post-booking form) ────────────────────────────────
     arrival_at = models.DateTimeField(null=True, blank=True)
@@ -465,7 +498,7 @@ class BookingTraveller(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-is_lead", "created_at"]
+        ordering = ["position", "created_at"]
 
     def __str__(self):
         return f"{self.full_name} ({self.booking.reference})"
