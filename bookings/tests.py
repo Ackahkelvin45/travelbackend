@@ -832,6 +832,9 @@ class ComponentPricingTests(TestCase):
         self.assertEqual(set(booking.travellers.values_list("unit", flat=True)), {unit.pk})
         self.assertIsNotNone(unit.held_until)  # unpaid window, not yet sold
 
+        from payments.receipts import compute_line_items
+        self.assertTrue(compute_line_items(booking)["reconciles"])  # room line is on the receipt
+
     def test_checkout_with_expired_hold_is_refused(self):
         from .pricing import QuoteError
         from .services import create_hold

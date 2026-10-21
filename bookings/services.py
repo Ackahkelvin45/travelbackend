@@ -485,7 +485,7 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     if line is None:
         raise IllegalTransition("That add-on is not on this booking.")
     charge = quantize(Decimal(str(line.get("line_total", "0"))))
-    if charge <= 0 or code.endswith("_cancellation_fee"):
+    if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") == "per_unit":
         raise IllegalTransition("That item cannot be cancelled.")
 
     fee = quantize(charge * ADDON_CANCELLATION_FEE_PERCENT / Decimal("100"))

@@ -482,10 +482,19 @@ class ComponentQuote:
         return "; ".join(notes)[:200]
 
     def booking_addons(self) -> list:
-        """Experience lines aggregated per code, in the shape Booking.addons
-        (receipts, refunds) already reads. Gross of the bundle discount, which
-        is in discount_amount like every other bundle discount."""
+        """Room and experience lines aggregated per code, in the shape
+        Booking.addons (receipts, refunds) already reads, so Core × guests +
+        these lines − discount_amount reconciles to the total. Gross of
+        discounts, which sit in discount_amount like every bundle discount."""
         lines = {}
+        for r in self.rooms:
+            line = lines.setdefault(f"stay_{r['stay_type']}", {
+                "code": f"stay_{r['stay_type']}", "name": f"{r['name']} · {r['nights']} nights",
+                "unit": "per_unit", "unit_price": r["charge"], "quantity": 0, "line_total": "0.00",
+                "refundable": True,
+            })
+            line["quantity"] += 1
+            line["line_total"] = str(quantize(Decimal(line["line_total"]) + Decimal(r["charge"])))
         for t in self.travellers:
             for e in t["experiences"]:
                 line = lines.setdefault(e["code"], {
