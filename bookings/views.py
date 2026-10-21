@@ -622,6 +622,8 @@ class HoldView(APIView):
     throttle_scope = "holds"
 
     def post(self, request):
+        from django.utils import timezone
+
         from .services import create_hold
 
         serializer = HoldSerializer(data=request.data)
@@ -637,7 +639,7 @@ class HoldView(APIView):
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
         return Response({
-            "token": token, "held_until": held_until,
+            "token": token, "held_until": held_until, "server_now": timezone.now(),
             "units": [{"stay_type": u.stay_type.code, "label": u.label} for u in units],
         }, status=status.HTTP_201_CREATED)
 
