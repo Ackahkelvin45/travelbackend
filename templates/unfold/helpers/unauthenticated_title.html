@@ -1,13 +1,21 @@
 {% load i18n static %}
-{# Overrides unfold's login/password-reset header: brand logo + Aurora title. #}
+{% comment %}Overrides unfold's login/password-reset header: brand logo + Aurora title.
+The sign-in page (canvas: DjLogin) adds the team greeting and points customers to the website.{% endcomment %}
 <div class="border-b border-base-200 mb-8 pb-6 dark:border-base-800">
     <img src="{% static 'admin/img/logo.png' %}" alt="Azura Travels" class="h-14 mb-4 dark:hidden" />
     <img src="{% static 'admin/img/logodark.png' %}" alt="Azura Travels" class="h-14 mb-4 hidden dark:block" />
 
-    <h1 class="font-semibold">
-        {% if subtitle %}
-            <span class="block text-sm text-font-subtle-light dark:text-font-subtle-dark">{{ subtitle }} </span>
-        {% endif %}
-        <span class="block font-bold text-primary-600 tracking-tight text-2xl dark:text-primary-500">{{ title }}</span>
-    </h1>
+    {% if request.resolver_match.url_name == "login" %}
+        <p class="font-semibold text-xs tracking-widest uppercase text-primary-600 dark:text-primary-500 mb-2">Akwaaba, team</p>
+        <h1 class="font-bold text-2xl tracking-tight text-important">Welcome back</h1>
+        <p class="mt-1 text-sm text-font-subtle-light dark:text-font-subtle-dark">Sign in with your staff account.</p>
+        <p class="mt-3 text-xs text-font-subtle-light dark:text-font-subtle-dark">Booked a trip? <a class="text-primary-600 dark:text-primary-500 font-semibold" href="{{ site_url|default:'/' }}">Manage it on the website</a>.</p>
+    {% else %}
+        <h1 class="font-semibold">
+            {% if subtitle %}
+                <span class="block text-sm text-font-subtle-light dark:text-font-subtle-dark">{{ subtitle }} </span>
+            {% endif %}
+            <span class="block font-bold text-primary-600 tracking-tight text-2xl dark:text-primary-500">{{ title }}</span>
+        </h1>
+    {% endif %}
 </div>

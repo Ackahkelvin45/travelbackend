@@ -471,7 +471,7 @@ def room_state(unit):
 class RoomUnitAdmin(ModelAdmin):
     """Room allocation (canvas: DjRooms). Units are allocated for the whole
     Accra stay (6–7 and 8–11 Jan); the included Crown Forest night is not a unit."""
-    list_display = ["label", "stay_type", "capacity", "state_badge", "booking_link", "occupants", "hold_expires"]
+    list_display = ["label", "stay_name", "capacity", "state_badge", "booking_link", "occupants", "hold_expires"]
     list_filter = [("stay_type", RelatedDropdownFilter), RoomStateFilter]
     list_filter_submit = True
     search_fields = ["label", "booking__reference", "occupants__full_name"]
@@ -489,6 +489,10 @@ class RoomUnitAdmin(ModelAdmin):
             states = [room_state(u)[0] for u in st.units.all()]
             rows.append({"stay": st, "total": len(states), **{k: states.count(k) for k in ("sold", "held", "free", "blocked")}})
         return super().changelist_view(request, {**(extra_context or {}), "room_rows": rows, "now": timezone.now()})
+
+    @admin.display(description="Stay type", ordering="stay_type__order")
+    def stay_name(self, obj):
+        return obj.stay_type.name
 
     @admin.display(description="Capacity")
     def capacity(self, obj):

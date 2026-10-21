@@ -5,7 +5,7 @@ from unfold.contrib.filters.admin import ChoicesDropdownFilter, RangeDateFilter,
 from unfold.decorators import action, display
 from unfold.widgets import UnfoldAdminTextareaWidget
 
-from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, PAYMENT_STATE_BADGE
+from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_STAGE_BADGE, PAYMENT_STATE_BADGE
 from payments.models import Payment
 from payments.services import record_offline_payment
 from .models import Booking, BookingTraveller, CancellationRequest, Lead, PolicyAcceptance, PolicyDocument
@@ -115,7 +115,8 @@ class QueueFilter(admin.SimpleListFilter):
     parameter_name = "queue"
 
     def lookups(self, request, model_admin):
-        return [("needs_coordinator", "Needs coordinator"), ("balance_due", "Balance due"),
+        return [("needs_coordinator", "Needs coordinator"), ("contact_overdue", "Contact overdue (24 h)"),
+                ("balance_due", "Balance due"),
                 ("paid", "Paid in full"), ("pending", "Pending payment"), ("cancelled", "Cancelled")]
 
     def queryset(self, request, queryset):
@@ -125,6 +126,9 @@ class QueueFilter(admin.SimpleListFilter):
         v = self.value()
         if v == "needs_coordinator":
             return queryset.filter(status=Booking.Status.CONFIRMED, coordinator__isnull=True)
+        if v == "contact_overdue":
+            from config.dashboard import contact_overdue_ids
+            return queryset.filter(pk__in=contact_overdue_ids())
         if v == "balance_due":
             return queryset.filter(status=Booking.Status.CONFIRMED, total_amount__gt=owed)
         if v == "paid":
@@ -724,3 +728,169 @@ class CancellationRequestAdmin(ModelAdmin):
     def reject(self, request, queryset):
         from .services import reject_cancellation
         self._resolve(request, queryset, reject_cancellation, "rejected")
+
+
+class ReplyFilter(admin.SimpleListFilter):
+    title = "reply"
+    parameter_name = "reply"
+
+    def lookups(self, request, model_admin):
+        return [("overdue", "Reply overdue"), ("waiting", "Waiting for reply"), ("replied", "Replied")]
+
+    def queryset(self, request, queryset):
+        from django.utils import timezone
+        if self.value() == "overdue":
+            return queryset.filter(replied_at__isnull=True, reply_due_at__lt=timezone.now()).exclude(stage__in=["won", "lost"])
+        if self.value() == "waiting":
+            return queryset.filter(replied_at__isnull=True).exclude(stage__in=["won", "lost"])
+        if self.value() == "replied":
+            return queryset.filter(replied_at__isnull=False)
+        return queryset
+
+
+def lead_reply_state(lead):
+    """(state, text) for the reply column: replied / overdue / due / closed."""
+    from django.utils import timezone
+    if lead.replied_at:
+        return "replied", "Replied"
+    if lead.stage in (Lead.Stage.WON, Lead.Stage.LOST):
+        return "closed", "—"
+    if not lead.reply_due_at:
+        return "due", "Waiting"
+    left = lead.reply_due_at - timezone.now()
+    mins = int(abs(left.total_seconds()) // 60)
+    span = f"{mins // 60} h {mins % 60} min" if mins >= 60 else f"{mins} min"
+    return ("overdue", f"Overdue {span}") if left.total_seconds() < 0 else ("due", f"Due in {span}")
+
+
+@admin.register(Lead)
+class LeadAdmin(ModelAdmin):
+    """Leads & quotes (canvas: DjLeads). Reminders only go to people who
+    consented, and never after they booked or opted out."""
+    list_display = ["lead_cell", "source", "quote_cell", "consent_cell", "reply_cell", "stage_badge", "assigned_to"]
+    list_filter = [("stage", ChoicesDropdownFilter), ("source", ChoicesDropdownFilter), ReplyFilter,
+                   "marketing_consent", ("assigned_to", RelatedDropdownFilter)]
+    list_filter_submit = True
+    search_fields = ["name", "email", "phone", "referral_code", "message"]
+    list_select_related = ["assigned_to", "booking", "package"]
+    actions = ["mark_replied", "assign_to_me", "mark_lost", "export_csv"]
+    actions_detail = ["detail_mark_replied", "detail_send_reminder"]
+    readonly_fields = ["timeline", "quote_summary", "booking", "created_at", "updated_at"]
+    fieldsets = (
+        ("Lead", {"classes": ["tab"], "fields": (("name", "email"), "phone", "source", "message", "referral_code",
+                                                  "package", "booking")}),
+        ("Follow-up", {"classes": ["tab"], "fields": ("stage", "assigned_to", "reply_due_at", "replied_at", "notes", "timeline")}),
+        ("Quote & consent", {"classes": ["tab"], "fields": ("quote_summary", "marketing_consent")}),
+    )
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "assigned_to":
+            from django.contrib.auth import get_user_model
+            kwargs["queryset"] = get_user_model().objects.filter(is_staff=True, is_active=True)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @display(description="Lead", header=True, ordering="created_at")
+    def lead_cell(self, obj):
+        return obj.name, obj.email or obj.phone
+
+    @admin.display(description="Quote")
+    def quote_cell(self, obj):
+        q = obj.quote or {}
+        return f"{q.get('currency', 'USD')} {float(q['total']):,.2f}" if q.get("total") else "—"
+
+    @admin.display(description="Consent")
+    def consent_cell(self, obj):
+        return "Marketing" if obj.marketing_consent else "Reply only"
+
+    @display(description="Reply", label={"overdue": "danger", "due": "warning", "replied": "success", "closed": "info"})
+    def reply_cell(self, obj):
+        return lead_reply_state(obj)
+
+    @display(description="Stage", label=LEAD_STAGE_BADGE)
+    def stage_badge(self, obj):
+        return obj.stage, obj.get_stage_display()
+
+    @admin.display(description="Saved quote")
+    def quote_summary(self, obj):
+        from django.utils.html import format_html, format_html_join
+        q = obj.quote or {}
+        if not q:
+            return "No saved quote."
+        rows = [("Mode", str(q.get("mode", "")).title()), ("Travellers", q.get("num_guests")),
+                ("Rooms", ", ".join(r["name"] for r in q.get("rooms", [])) or "Own stay"),
+                ("Savings", f"{q.get('currency')} {q.get('discount_total')}"),
+                ("Total", f"{q.get('currency')} {q.get('total')}"), ("Price list", q.get("price_list_version") or "draft")]
+        return format_html('<table class="az-kv">{}</table>',
+                           format_html_join("", "<tr><th>{}</th><td>{}</td></tr>", rows))
+
+    @admin.display(description="Timeline")
+    def timeline(self, obj):
+        from django.utils.html import format_html, format_html_join
+        events = [(obj.created_at, f"{obj.get_source_display()} enquiry received")]
+        events += [(e.created_at, f"Email '{e.kind}' {e.status}") for e in obj.emails.all()]
+        if obj.replied_at:
+            events.append((obj.replied_at, "Marked replied"))
+        if obj.booking_id:
+            events.append((obj.booking.created_at, f"Booked {obj.booking.reference} — sales reminders stopped"))
+        return format_html('<ul class="az-timeline">{}</ul>', format_html_join(
+            "", "<li><span>{}</span>{}</li>", ((t.strftime("%d %b %Y %H:%M"), text) for t, text in sorted(events))))
+
+    @admin.action(description="Mark replied")
+    def mark_replied(self, request, queryset):
+        from django.utils import timezone
+        n = queryset.filter(replied_at__isnull=True).update(replied_at=timezone.now())
+        queryset.filter(stage=Lead.Stage.NEW).update(stage=Lead.Stage.CONTACTED)
+        self.message_user(request, f"{n} lead(s) marked replied.")
+
+    @admin.action(description="Assign to me")
+    def assign_to_me(self, request, queryset):
+        self.message_user(request, f"{queryset.update(assigned_to=request.user)} lead(s) assigned to you.")
+
+    @admin.action(description="Mark lost")
+    def mark_lost(self, request, queryset):
+        self.message_user(request, f"{queryset.exclude(stage=Lead.Stage.WON).update(stage=Lead.Stage.LOST)} lead(s) closed as lost.")
+
+    @admin.action(description="Export selected to CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="leads.csv"'
+        w = csv.writer(response)
+        w.writerow(["Created", "Name", "Email", "Phone", "Source", "Stage", "Quote total", "Marketing consent",
+                    "Referral code", "Reply due", "Replied", "Booking"])
+        for l in queryset.select_related("booking"):
+            w.writerow([l.created_at.date(), l.name, l.email, l.phone, l.get_source_display(), l.get_stage_display(),
+                        (l.quote or {}).get("total", ""), l.marketing_consent, l.referral_code,
+                        l.reply_due_at or "", l.replied_at or "", l.booking.reference if l.booking_id else ""])
+        return response
+
+    def _back(self, object_id):
+        from django.shortcuts import redirect
+        return redirect("admin:bookings_lead_change", object_id)
+
+    @action(description="Mark replied", url_path="mark-replied")
+    def detail_mark_replied(self, request, object_id):
+        from django.utils import timezone
+        lead = Lead.objects.get(pk=object_id)
+        lead.replied_at = lead.replied_at or timezone.now()
+        lead.stage = Lead.Stage.CONTACTED if lead.stage == Lead.Stage.NEW else lead.stage
+        lead.save(update_fields=["replied_at", "stage", "updated_at"])
+        self.message_user(request, "Marked replied.")
+        return self._back(object_id)
+
+    @action(description="Send quote reminder", url_path="send-reminder")
+    def detail_send_reminder(self, request, object_id):
+        from django.contrib import messages
+        from payments.email import send_saved_quote
+        lead = Lead.objects.get(pk=object_id)
+        if lead.stage in (Lead.Stage.WON, Lead.Stage.LOST) or lead.booking_id:
+            self.message_user(request, "Not sent: this lead has booked or is closed, so sales reminders are stopped.", messages.WARNING)
+        elif not lead.marketing_consent:
+            self.message_user(request, "Not sent: no marketing consent. Reply only to their direct enquiry.", messages.WARNING)
+        elif not lead.quote:
+            self.message_user(request, "Not sent: this lead has no saved quote.", messages.WARNING)
+        else:
+            send_saved_quote(lead)
+            self.message_user(request, f"Quote reminder sent to {lead.email}.", messages.SUCCESS)
+        return self._back(object_id)

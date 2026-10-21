@@ -45,6 +45,8 @@ class PaymentAdmin(ModelAdmin):
         "currency",
     ]
     search_fields = ["paystack_reference", "booking__reference", "booking__email"]
+    actions = ["mark_reviewed", "export_csv"]
+    list_before_template = "admin/payments/ledger_summary.html"
     readonly_fields = [
         "payment_overview", "breakdown_table", "receipt_link",
         "gateway_summary", "gateway_response_pretty",
@@ -275,6 +277,40 @@ class PaymentAdmin(ModelAdmin):
         ]
         return custom + urls
 
+    def changelist_view(self, request, extra_context=None):
+        from django.db.models import Sum
+        collected = Payment.objects.filter(status=Payment.Status.SUCCESS).values("currency").annotate(t=Sum("amount"))
+        refunded = Refund.objects.filter(status=Refund.Status.PROCESSED).values("currency").annotate(t=Sum("amount"))
+        return super().changelist_view(request, {**(extra_context or {}),
+            "ledger": {"collected": collected, "refunded": refunded,
+                       "review": Payment.objects.filter(needs_review=True).count()}})
+
+    @admin.action(description="Mark reviewed (no money moves)")
+    def mark_reviewed(self, request, queryset):
+        """Clears the review flag after a person has checked the entry. Ledger
+        rows are never edited; corrections are new entries or refunds."""
+        from django.db.models import F, Value
+        from django.db.models.functions import Coalesce, Concat
+        n = queryset.filter(needs_review=True).update(
+            needs_review=False,
+            review_note=Concat(Coalesce(F("review_note"), Value("")), Value(f" [reviewed by {request.user.email}]")),
+        )
+        self.message_user(request, f"{n} payment(s) marked reviewed.")
+
+    @admin.action(description="Export selected to CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="payments.csv"'
+        w = csv.writer(response)
+        w.writerow(["Reference", "Booking", "Status", "Purpose", "Method", "Amount", "Currency",
+                    "Charged", "Charged currency", "Rate", "Paid at", "Needs review"])
+        for p in queryset.select_related("booking"):
+            w.writerow([p.paystack_reference, p.booking.reference, p.status, p.purpose, p.method, p.amount, p.currency,
+                        p.charged_amount or "", p.charged_currency or "", p.exchange_rate or "", p.paid_at or "", p.needs_review])
+        return response
+
     def receipt_view(self, request, pk):
         # Staff + model view permission required (admin_view already enforces
         # login/staff); object lookup is by UUID pk, not enumerable.
@@ -389,10 +425,33 @@ class FxRateAdmin(ModelAdmin):
 
 @admin.register(OpsConfig)
 class OpsConfigAdmin(ModelAdmin):
-    """Single-row operational settings. Secrets stay in the environment."""
+    """Single-row operational settings (canvas: DjSettings). Secrets stay in
+    the environment. Blank contact fields keep the site's bracketed fallback."""
 
-    fields = ["alert_email", "checkout_fee_notice", "updated_at"]
     readonly_fields = ["updated_at"]
+    fieldsets = (
+        ("Contact & hours", {
+            "classes": ["tab"],
+            "description": "Shown on the website. Leave a field blank until it is confirmed; the site never shows placeholders as real details.",
+            "fields": ("contact_email", "contact_phone", "whatsapp_number", "emergency_phone", "staffed_hours",
+                       "legal_name", "legal_address"),
+        }),
+        ("Checkout & CRM", {
+            "classes": ["tab"],
+            "fields": ("hold_minutes", "lead_reply_hours", "coordinator_contact_hours", "reminder_schedule_hours",
+                       "checkout_fee_notice"),
+        }),
+        ("Alerts", {
+            "classes": ["tab"],
+            "description": "Payment mismatches, FX outages and other critical events.",
+            "fields": ("alert_email", "updated_at"),
+        }),
+    )
+
+    def changelist_view(self, request, extra_context=None):
+        """A singleton: the list page goes straight to the one settings form."""
+        from django.shortcuts import redirect
+        return redirect("admin:payments_opsconfig_change", OpsConfig.get().pk)
 
     def has_add_permission(self, request):
         return not OpsConfig.objects.exists()
@@ -405,6 +464,17 @@ class OpsConfigAdmin(ModelAdmin):
 class ScheduledTaskAdmin(ModelAdmin):
     list_display = ["name", "is_enabled", "last_run_at", "last_result_short"]
     list_editable = ["is_enabled"]
+    actions = ["run_now"]
+
+    @admin.action(description="Run now")
+    def run_now(self, request, queryset):
+        from django.utils import timezone
+        from .autotasks import TASKS, _execute
+        for task in queryset:
+            if task.name in TASKS:
+                ScheduledTask.objects.filter(pk=task.pk).update(last_run_at=timezone.now())
+                _execute(task.name)
+        self.message_user(request, f"Ran {queryset.count()} task(s). See 'Last result'.")
     readonly_fields = ["name", "last_run_at", "last_result"]
     fields = ["name", "is_enabled", "last_run_at", "last_result"]
 

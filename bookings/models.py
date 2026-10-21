@@ -480,6 +480,7 @@ class Lead(models.Model):
         CONTACT = "contact", "Contact form"
         WHATSAPP = "whatsapp", "WhatsApp"
         REFERRAL = "referral", "Referral"
+        CHECKOUT = "checkout", "Unfinished checkout"
         OTHER = "other", "Other"
 
     class Stage(models.TextChoices):

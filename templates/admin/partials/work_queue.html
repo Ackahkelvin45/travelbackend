@@ -1,0 +1,45 @@
+{# Change Request v2 dashboard: today's work first, then owner figures, rooms, uptake and health. #}
+<section class="az-section" aria-label="Today's work">
+  <div class="az-section__head">
+    <h2>Today's work</h2>
+    <span>{% if queue_total %}{{ queue_total }} item{{ queue_total|pluralize }} need{{ queue_total|pluralize:"s," }} attention{% else %}All clear{% endif %}</span>
+  </div>
+  <div class="az-queue">
+    {% for q in work_queue %}
+      <a class="az-queue__item az-queue__item--{% if q.count %}{{ q.tone }}{% else %}clear{% endif %}" href="{{ q.href }}">
+        <strong>{{ q.count }}</strong>
+        <span class="az-queue__title">{{ q.title }}</span>
+        <span class="az-queue__note">{{ q.note }}</span>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+
+<div class="az-summary">
+  {% for k in owner_kpis %}<div class="az-kpi"><span>{{ k.label }}</span><strong>{{ k.value }}</strong></div>{% endfor %}
+</div>
+
+<div class="az-grid3">
+  <section class="az-card">
+    <div class="az-section__head"><h2>Room inventory · 4 Accra nights</h2><a href="{% url 'admin:packages_roomunit_changelist' %}">Open allocation</a></div>
+    {% for r in room_inventory %}
+      <div class="az-roomrow">
+        <div><strong>{{ r.name }}</strong><span>{{ r.sold }} sold · {{ r.held }} held · {{ r.total }} total</span></div>
+        <span class="az-stack" role="img" aria-label="{{ r.sold }} sold, {{ r.held }} held of {{ r.total }}"><i class="sold" style="width:{{ r.sold_pct }}%"></i><i class="held" style="width:{{ r.held_pct }}%"></i></span>
+      </div>
+    {% empty %}<p class="az-note">No room inventory yet.</p>{% endfor %}
+  </section>
+  <section class="az-card">
+    <div class="az-section__head"><h2>Experience uptake</h2><span>of confirmed travellers</span></div>
+    {% for u in uptake %}
+      <div class="az-roomrow"><div><strong>{{ u.name }}</strong><span>{{ u.n }} traveller{{ u.n|pluralize }}</span></div>
+        <span class="az-stack"><i class="sold" style="width:{{ u.pct }}%"></i></span><b>{{ u.pct }}%</b></div>
+    {% empty %}<p class="az-note">No experiences on sale.</p>{% endfor %}
+  </section>
+  <section class="az-card">
+    <div class="az-section__head"><h2>System health</h2><a href="{% url 'admin:payments_scheduledtask_changelist' %}">Scheduled tasks</a></div>
+    {% for h in health %}
+      <div class="az-health"><i class="{% if h.ok %}ok{% else %}bad{% endif %}" aria-hidden="true"></i><div><strong>{{ h.name }}</strong><span>{{ h.value }}</span></div></div>
+    {% endfor %}
+  </section>
+</div>

@@ -1003,3 +1003,72 @@ class ComponentPricingTests(TestCase):
         }, content_type="application/json")
         self.assertEqual(res.status_code, 201, res.content)
         self.assertEqual(res.json()["total_amount"], "3152.10")
+
+
+class AdminScreensTests(TestCase):
+    """Phase 4 admin: screens render and staff actions keep the booking rules."""
+
+    # Same catalogue fixture and checkout helper as the pricing tests, without re-running them.
+    setUpTestData = ComponentPricingTests.__dict__["setUpTestData"]
+    checkout = ComponentPricingTests.checkout
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        self.staff = get_user_model().objects.create_superuser(
+            email="ops@example.com", password="x-Strong-pass-1", first_name="Akosua", last_name="Darko")
+        self.client.force_login(self.staff)
+
+    def booked(self, n=2, stay="airbnb_1bed"):
+        from .services import create_hold
+        token, _, _ = create_hold(self.pkg, [stay])
+        return self.checkout(token, n=n, rooms=[{"stay_type": stay, "occupants": list(range(n))}])
+
+    def test_screens_render(self):
+        booking = self.booked()
+        urls = [
+            "/admin/", "/admin/reports/", "/admin/reports/?export=csv",
+            "/admin/bookings/booking/", "/admin/bookings/booking/?queue=needs_coordinator",
+            "/admin/bookings/booking/?queue=contact_overdue", f"/admin/bookings/booking/{booking.pk}/change/",
+            "/admin/bookings/lead/", "/admin/packages/roomunit/", "/admin/packages/roomunit/?state=held",
+            f"/admin/packages/travelpackage/{self.pkg.pk}/change/", "/admin/payments/payment/", "/admin/payments/opsconfig/1/change/",
+        ]
+        from payments.models import OpsConfig
+        OpsConfig.get()
+        for url in urls:
+            with self.subTest(url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_assign_coordinator_records_time(self):
+        booking = self.booked()
+        self.client.post("/admin/bookings/booking/", {
+            "action": "assign_coordinator", "_selected_action": [booking.pk], "apply": "1", "coordinator": self.staff.pk})
+        booking.refresh_from_db()
+        self.assertEqual(booking.coordinator, self.staff)
+        self.assertIsNotNone(booking.coordinator_assigned_at)
+
+    def test_quote_reminder_needs_marketing_consent(self):
+        from unittest import mock
+        from .models import Lead
+        lead = Lead.objects.create(name="K", email="k@example.com", quote={"total": "1.00"}, marketing_consent=False)
+        with mock.patch("payments.email.send_saved_quote") as send:
+            self.client.get(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
+            send.assert_not_called()
+            Lead.objects.filter(pk=lead.pk).update(marketing_consent=True)
+            self.client.get(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
+            send.assert_called_once()
+
+    def test_move_allocation_keeps_guests_with_their_booking(self):
+        from packages.models import RoomUnit
+        from .services import reassign_unit
+        booking = self.booked()
+        unit = booking.room_units.get()
+        target = RoomUnit.objects.available().filter(stay_type=unit.stay_type).exclude(pk=unit.pk).first()
+        reassign_unit(unit, target)
+        self.assertEqual(set(booking.travellers.values_list("unit", flat=True)), {target.pk})
+        unit.refresh_from_db()
+        self.assertIsNone(unit.booking_id)
+
+    def test_publish_from_package_page(self):
+        from packages.models import PriceListVersion
+        self.client.get(f"/admin/packages/travelpackage/{self.pkg.pk}/publish-prices/")
+        self.assertEqual(PriceListVersion.objects.get(package=self.pkg).number, 1)

@@ -1,0 +1,12 @@
+<div class="az-summary">
+  <div class="az-kpi"><span>Collected</span>
+    <strong>{% for c in ledger.collected %}{{ c.currency }} {{ c.t|floatformat:"2g" }}{% if not forloop.last %} · {% endif %}{% empty %}—{% endfor %}</strong>
+    <span>Successful payments, booked in the ledger currency</span></div>
+  <div class="az-kpi"><span>Refunded</span>
+    <strong>{% for c in ledger.refunded %}{{ c.currency }} {{ c.t|floatformat:"2g" }}{% if not forloop.last %} · {% endif %}{% empty %}—{% endfor %}</strong>
+    <span>Processed refunds</span></div>
+  <a class="az-kpi {% if ledger.review %}az-kpi--late{% endif %}" href="?needs_review__exact=1" style="text-decoration:none">
+    <span>Needs review</span><strong>{{ ledger.review }}</strong>
+    <span>Mismatches, overpayments, money for closed bookings</span></a>
+</div>
+<p class="az-note">The ledger is append-only. A repeat gateway notification for a verified payment is logged and ignored, so it never counts twice. Corrections are new entries or refunds.</p>
