@@ -747,3 +747,33 @@ class TripUpdate(models.Model):
             from django.utils import timezone
             self.published_at = timezone.now()
         super().save(*args, **kwargs)
+
+
+class PriceListVersion(models.Model):
+    """A published, immutable snapshot of a component package's prices (Core,
+    stays, experiences, bundles). Staff edit the catalogue tables as a draft;
+    publishing snapshots them as the next live version. Quotes, checkout and
+    receipts price from the live snapshot, and each booking records the version
+    it was sold under. Deposit rules and deadlines stay live on the package."""
+
+    class Status(models.TextChoices):
+        LIVE = "live", "Live"
+        RETIRED = "retired", "Retired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="price_lists")
+    number = models.PositiveIntegerField()
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
+    snapshot = models.JSONField()
+    note = models.CharField(max_length=300, blank=True, help_text="What changed, e.g. 'Couple room confirmed at $380'.")
+    published_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    published_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-number"]
+        constraints = [models.UniqueConstraint(fields=["package", "number"], name="unique_price_list_number")]
+
+    def __str__(self):
+        return f"{self.package.title} · price list v{self.number} ({self.status})"

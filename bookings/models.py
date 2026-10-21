@@ -162,6 +162,10 @@ class Booking(models.Model):
 
     # ── Component pricing (Change Request v2) ────────────────────────────────
     mode = models.CharField(max_length=10, choices=Mode.choices, blank=True)
+    price_list_version = models.ForeignKey(
+        "packages.PriceListVersion", on_delete=models.PROTECT, null=True, blank=True, related_name="bookings",
+        help_text="Published price list this booking was priced from (component pricing).",
+    )
     quote_snapshot = models.JSONField(
         default=dict, blank=True,
         help_text="Full component quote at booking time: per-traveller Core, rooms, experiences, discounts.",

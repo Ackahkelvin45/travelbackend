@@ -141,6 +141,12 @@ class Command(BaseCommand):
         if options["content"]:
             self._content(pkg)
 
+        from bookings.services import publish_price_list
+        from packages.models import PriceListVersion
+        if not pkg.price_lists.filter(status=PriceListVersion.Status.LIVE).exists():
+            v = publish_price_list(pkg, note="Change Request v2 catalogue")
+            self.stdout.write(f"Published price list v{v.number}.")
+
         self.stdout.write(self.style.SUCCESS(
             f"{pkg.title}: component pricing, Core ${pkg.base_price_per_person}, "
             f"{pkg.stay_types.count()} stay types, {len(bundle)} experiences, {retired} old add-ons retired. "

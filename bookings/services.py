@@ -290,6 +290,7 @@ def create_component_booking(
             addons=quote.booking_addons(),
             discount_amount=quote.discount_total, discount_note=quote.discount_note(),
             quote_snapshot=quote.as_dict(),
+            price_list_version=quote.price_list_version,
             refund_tiers_snapshot=package.refund_tiers,
             deposit_required=quote.deposit_required,
         )
@@ -327,6 +328,21 @@ def create_component_booking(
         booking.total_amount, booking.currency,
     )
     return booking
+
+
+def publish_price_list(package, *, user=None, note: str = ""):
+    """Snapshot the draft catalogue as the next live price list; the previous
+    live version is retired. Existing bookings keep the version they bought."""
+    from packages.models import PriceListVersion
+    from .pricing import catalog_snapshot
+
+    with transaction.atomic():
+        current = list(PriceListVersion.objects.select_for_update().filter(package=package).order_by("-number")[:1])
+        package.price_lists.filter(status=PriceListVersion.Status.LIVE).update(status=PriceListVersion.Status.RETIRED)
+        return PriceListVersion.objects.create(
+            package=package, number=(current[0].number + 1) if current else 1,
+            snapshot=catalog_snapshot(package), note=note, published_by=user,
+        )
 
 
 def move_traveller(traveller, unit) -> BookingTraveller:

@@ -452,6 +452,69 @@ def build_pricing_matrix(package, at=None) -> dict:
 
 # ── Component pricing (Change Request v2) ─────────────────────────────────────
 
+def catalog_snapshot(package) -> dict:
+    """The editable catalogue tables (the draft) as JSON-safe data."""
+    from packages.models import PackageAddon, PackageDiscountRule
+
+    return {
+        "core_price": str(package.base_price_per_person) if package.base_price_per_person is not None else None,
+        "stay_types": [
+            {"code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity, "min_occupancy": s.min_occupancy,
+             "price_per_night": str(s.price_per_night), "nights": s.nights, "discount_percent": str(s.discount_percent),
+             "on_sale": s.on_sale, "note": s.note}
+            for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
+        ],
+        "experiences": [
+            {"code": a.code, "name": a.name, "description": a.description or "", "price": str(a.price),
+             "refundable": a.refundable}
+            for a in package.addons.filter(is_active=True, unit=PackageAddon.Unit.PER_PERSON).order_by("order", "name")
+        ],
+        "bundles": [
+            {"name": r.name, "percent": str(r.percent), "members": sorted(a.code for a in r.required_addons.all())}
+            for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+        ],
+    }
+
+
+@dataclass
+class Catalog:
+    version: object  # PriceListVersion, or None while nothing is published (prices from the draft tables)
+    core_price: Decimal | None
+    stay_types: dict
+    experiences: dict
+    bundles: list
+
+
+def _catalog(snap: dict, version) -> Catalog:
+    from types import SimpleNamespace as NS
+    dec = lambda d, *keys: {**d, **{k: Decimal(d[k]) for k in keys}}
+    return Catalog(
+        version=version,
+        core_price=Decimal(snap["core_price"]) if snap.get("core_price") is not None else None,
+        stay_types={s["code"]: NS(**dec(s, "price_per_night", "discount_percent")) for s in snap["stay_types"]},
+        experiences={e["code"]: NS(**dec(e, "price")) for e in snap["experiences"]},
+        bundles=[(Decimal(b["percent"]), b["name"], set(b["members"])) for b in snap["bundles"]],
+    )
+
+
+def live_catalog(package) -> Catalog:
+    """Prices customers see: the live published version, or the draft tables
+    for a package that has never been published."""
+    from packages.models import PriceListVersion
+    version = package.price_lists.filter(status=PriceListVersion.Status.LIVE).order_by("-number").first()
+    return _catalog(version.snapshot if version else catalog_snapshot(package), version)
+
+
+def draft_catalog(package) -> Catalog:
+    return _catalog(catalog_snapshot(package), None)
+
+
+def units_left(package, code: str, hold_token: str = "") -> int:
+    """Sellable units of one stay type, counting this checkout's own hold as its own."""
+    st = package.stay_types.filter(code=code).first()
+    return st.units_available(hold_token=hold_token) if st else 0
+
+
 @dataclass
 class ComponentQuote:
     """Core per traveller + each room unit once + experiences per guest.
@@ -461,6 +524,7 @@ class ComponentQuote:
     mode: str
     payment_plan: str
     core_price: Decimal
+    price_list_version: object = None
     travellers: list = field(default_factory=list)
     rooms: list = field(default_factory=list)
     core_total: Decimal = Decimal("0")
@@ -517,6 +581,7 @@ class ComponentQuote:
             "payment_plan": self.payment_plan,
             "currency": self.package.currency,
             "core_price_per_person": str(self.core_price),
+            "price_list_version": self.price_list_version.number if self.price_list_version else None,
             "num_guests": self.num_guests,
             "travellers": self.travellers,
             "rooms": self.rooms,
@@ -538,7 +603,7 @@ class ComponentQuote:
 
 
 def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True,
-                            hold_token="") -> ComponentQuote:
+                            hold_token="", catalog: Catalog | None = None) -> ComponentQuote:
     """Price a component selection server-side.
 
     travellers: [{"name": str, "experiences": [addon codes]}] — list index is
@@ -547,13 +612,14 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         entry is one unit, charged once whatever its occupancy.
     """
     from bookings.models import Booking
-    from packages.models import PackageAddon, PackageDiscountRule, TravelPackage
+    from packages.models import TravelPackage
 
     if not package.is_active:
         raise QuoteError("This tour is not open for booking.")
     if package.pricing_model != TravelPackage.PricingModel.COMPONENT:
         raise QuoteError("This tour does not use component pricing.")
-    if package.base_price_per_person is None:
+    cat = catalog or live_catalog(package)
+    if cat.core_price is None:
         raise QuoteError("This tour has no Core price configured.")
     n = len(travellers or [])
     if n < 1:
@@ -569,12 +635,13 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
     if payment_plan == Booking.PaymentPlan.INSTALLMENT and not package.allow_installments:
         raise QuoteError("Installment payment is not available for this tour.")
 
-    core = quantize(package.base_price_per_person)
-    quote = ComponentQuote(package=package, mode=mode, payment_plan=payment_plan, core_price=core)
+    core = quantize(cat.core_price)
+    quote = ComponentQuote(package=package, mode=mode, payment_plan=payment_plan, core_price=core,
+                           price_list_version=cat.version)
     room_of = {}
 
     # ── Rooms: each unit once; discount = unit + its occupants' Core ─────────
-    stay_types = {s.code: s for s in package.stay_types.all()}
+    stay_types = cat.stay_types
     requested = {}
     for room in rooms or []:
         st = stay_types.get(room.get("stay_type"))
@@ -604,7 +671,7 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
 
     if check_availability:
         for code, count in requested.items():
-            left = stay_types[code].units_available(hold_token=hold_token)
+            left = units_left(package, code, hold_token)
             if count > left:
                 raise QuoteError(
                     f"{stay_types[code].name} is sold out." if left == 0
@@ -612,12 +679,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
                 )
 
     # ── Experiences per guest; best complete bundle discounted once ──────────
-    addons = {a.code: a for a in package.addons.filter(is_active=True, unit=PackageAddon.Unit.PER_PERSON)}
-    bundles = [
-        (r.percent, r.name, {a.code for a in r.required_addons.all()})
-        for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
-        .prefetch_related("required_addons")
-    ]
+    addons = cat.experiences
+    bundles = cat.bundles
     for i, t in enumerate(travellers):
         codes = list(dict.fromkeys(t.get("experiences") or []))
         unknown = [c for c in codes if c not in addons]
@@ -668,15 +731,15 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
 
 
 def build_component_matrix(package) -> dict:
-    """Catalogue for the trip builder. Display only: totals always come from
-    the quote endpoint, never from client-side arithmetic."""
-    from packages.models import PackageAddon, PackageDiscountRule
-
+    """Catalogue for the trip builder (the live price list). Display only:
+    totals always come from the quote endpoint, never client-side arithmetic."""
+    cat = live_catalog(package)
     return {
         "package_id": str(package.id),
         "pricing_model": "component",
+        "price_list_version": cat.version.number if cat.version else None,
         "currency": package.currency,
-        "core_price_per_person": str(quantize(package.base_price_per_person)) if package.base_price_per_person else None,
+        "core_price_per_person": str(quantize(cat.core_price)) if cat.core_price is not None else None,
         "tour_start": package.available_from,
         "tour_end": package.available_to,
         "stay_types": [
@@ -685,18 +748,17 @@ def build_component_matrix(package) -> dict:
                 "min_occupancy": s.min_occupancy, "price_per_night": str(quantize(s.price_per_night)),
                 "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
                 "discount_percent": str(s.discount_percent), "on_sale": s.on_sale, "note": s.note,
-                "units_available": s.units_available() if s.on_sale else 0,
+                "units_available": units_left(package, s.code) if s.on_sale else 0,
             }
-            for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
+            for s in cat.stay_types.values()
         ],
         "experiences": [
-            {"code": a.code, "name": a.name, "description": a.description,
+            {"code": a.code, "name": a.name, "description": a.description or None,
              "price": str(quantize(a.price)), "refundable": a.refundable}
-            for a in package.addons.filter(is_active=True, unit=PackageAddon.Unit.PER_PERSON)
+            for a in cat.experiences.values()
         ],
         "bundles": [
-            {"name": r.name, "percent": str(r.percent), "members": [a.code for a in r.required_addons.all()]}
-            for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+            {"name": name, "percent": str(pct), "members": sorted(members)} for pct, name, members in cat.bundles
         ],
         "installments": {
             "enabled": installments_open(package),

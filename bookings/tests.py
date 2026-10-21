@@ -920,6 +920,30 @@ class ComponentPricingTests(TestCase):
         payment.refresh_from_db()
         self.assertTrue(payment.needs_review)
 
+    # ── Versioned price lists ─────────────────────────────────────────────────
+
+    def test_draft_edits_reach_customers_only_after_publishing(self):
+        from packages.models import StayType
+        from .services import create_hold, publish_price_list
+
+        rooms = [{"stay_type": "airbnb_1bed", "occupants": [0]}]
+        v1 = publish_price_list(self.pkg, note="launch")
+        StayType.objects.filter(package=self.pkg, code="airbnb_1bed").update(price_per_night=Decimal("250"))
+        self.assertEqual(self.quote("single", 1, rooms).total, Decimal("1725.63"))  # still v1
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        booking = self.checkout(token, mode="single", n=1, rooms=rooms)
+        self.assertEqual(booking.price_list_version, v1)
+
+        v2 = publish_price_list(self.pkg, note="1-bed now $250")
+        q = self.quote("single", 1, rooms)
+        self.assertEqual(q.total, Decimal("1842.03"))  # (899 + 1000) × 0.97
+        self.assertEqual(q.as_dict()["price_list_version"], 2)
+        v1.refresh_from_db()
+        self.assertEqual((v1.status, v2.status), ("retired", "live"))
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_amount, Decimal("1725.63"))  # sold price never changes
+
     # ── API ───────────────────────────────────────────────────────────────────
 
     def test_owner_can_change_message_preferences(self):
