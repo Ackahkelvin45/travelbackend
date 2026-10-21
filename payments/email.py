@@ -11,7 +11,7 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-def deliver(kind: str, to: str, subject: str, html_body: str, *, booking=None, attachments=None) -> bool:
+def deliver(kind: str, to: str, subject: str, html_body: str, *, booking=None, lead=None, attachments=None) -> bool:
     """Send one customer email through Resend and record the attempt in
     EmailLog (Appendix C: staff must be able to see what was sent and whether
     the provider accepted it). Never raises."""
@@ -19,7 +19,7 @@ def deliver(kind: str, to: str, subject: str, html_body: str, *, booking=None, a
 
     def _log(status, provider_id="", error=""):
         try:
-            EmailLog.objects.create(booking=booking, kind=kind, to_email=to, subject=subject[:300],
+            EmailLog.objects.create(booking=booking, lead=lead, kind=kind, to_email=to, subject=subject[:300],
                                     status=status, provider_id=provider_id or "", error=error[:2000])
         except Exception:
             logger.exception("EmailLog write failed for %s → %s", kind, to)
@@ -79,6 +79,12 @@ def _build_html(booking, payment) -> str:
 
     from .email import build_claim_token  # self-import safe at call time
     claim_url = f"{settings.FRONTEND_URL}/claim?token={build_claim_token(booking)}"
+    # Component bookings: one travel form per guest, reached after claiming.
+    travel_info_line = (
+        '<p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#9992;&#65039; Once your booking is in your dashboard, '
+        'complete the <strong>travel information</strong> for each guest: flights, transfers, emergency contact and dietary needs.</p>'
+        if booking.mode else ""
+    )
 
     # Terms Part A: the confirmation identifies inclusions/add-ons and the
     # exact policy versions accepted, with durable links to each.
@@ -265,6 +271,7 @@ def _build_html(booking, payment) -> str:
                 <a href="{claim_url}" style="color:#d4a843;text-decoration:none;font-weight:600;">open your booking dashboard</a>
                 and sign in — or create a free account — using <strong>this same email address</strong>. Your booking attaches to it automatically.
               </p>
+{travel_info_line}
               <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128222; Our team will reach out within 24 hours to confirm your trip details.</p>
               <p style="margin:0 0 10px;color:#555;font-size:13px;line-height:1.6;">&#128203; A full itinerary will be shared with you before departure.</p>
               <p style="margin:0;color:#555;font-size:13px;line-height:1.6;">&#10067; Questions? Email us at
@@ -550,3 +557,39 @@ def send_addon_removed(booking, line: dict, fee, refund) -> None:
     <p style="margin:0;font-size:12px;color:#888;">Questions? <a href="mailto:hello@azuratravels.live" style="color:#d4a843;">hello@azuratravels.live</a></p>"""
     deliver("addon_removed", b.email, f"{line.get('name', 'Add-on')} cancelled – {b.reference} | Azura Travels",
             _shell("Add-on cancelled", body), booking=b)
+
+
+def send_saved_quote(lead) -> None:
+    """The guest saved a trip-builder quote: send it back with a link to resume.
+    Prices are the server quote stored on the lead, never client figures."""
+    q = lead.quote or {}
+    if not q:
+        return
+    c = q.get("currency", "USD")
+    money = lambda v: f"{c} {Decimal(str(v)):,.2f}"
+    rows = [("Core experience × " + str(q.get("num_guests", 1)), q.get("core_total", "0"))]
+    if Decimal(q.get("rooms_total", "0")):
+        rows.append(("Accra stay", q["rooms_total"]))
+    if Decimal(q.get("experiences_total", "0")):
+        rows.append(("Experiences", q["experiences_total"]))
+    table = "".join(
+        f'<tr><td style="padding:5px 0;font-size:13px;">{html.escape(label)}</td><td align="right" style="padding:5px 0;font-size:13px;">{money(v)}</td></tr>'
+        for label, v in rows
+    )
+    if Decimal(q.get("discount_total", "0")):
+        table += (f'<tr><td style="padding:5px 0;font-size:13px;color:#2e7d32;">Savings applied automatically</td>'
+                  f'<td align="right" style="padding:5px 0;font-size:13px;color:#2e7d32;">− {money(q["discount_total"])}</td></tr>')
+    resume = f"{settings.FRONTEND_URL.rstrip('/')}/tour/{q.get('package_id', '')}#book"
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(lead.name)}, here's the trip you saved</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 14px;">{table}
+      <tr><td style="padding:8px 0;color:#1a1a2e;font-weight:800;border-top:1px solid #eee;">Total</td>
+          <td align="right" style="padding:8px 0;color:#1a1a2e;font-weight:800;border-top:1px solid #eee;">{money(q.get("total", "0"))}</td></tr>
+      <tr><td style="padding:4px 0;font-size:12px;color:#888;">Average per person</td>
+          <td align="right" style="padding:4px 0;font-size:12px;color:#888;">{money(q.get("average_per_person", "0"))}</td></tr>
+    </table>
+    <p style="margin:0 0 18px;font-size:13px;">Prices and room availability can change until you book. Rooms are held only during checkout.</p>
+    <p style="margin:0 0 18px;"><a href="{resume}" style="background:#BD8F3A;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:10px;display:inline-block;">Continue planning</a></p>
+    <p style="margin:0;font-size:12px;color:#888;">Questions? Reply to this email and our team will help.</p>"""
+    deliver("saved_quote", lead.email, "Your saved Ghana trip quote | Azura Travels",
+            _shell("Your saved quote", body), lead=lead)

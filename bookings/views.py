@@ -802,6 +802,9 @@ class LeadCreateView(APIView):
             **data, quote=quote,
             reply_due_at=timezone.now() + timedelta(hours=OpsConfig.get().lead_reply_hours),
         )
+        if quote:
+            from payments.email import send_saved_quote
+            send_saved_quote(lead)  # never raises; the attempt is logged against the lead
         return Response({"id": str(lead.id), "detail": "Thanks — our team will be in touch."},
                         status=status.HTTP_201_CREATED)
 

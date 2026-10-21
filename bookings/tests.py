@@ -951,14 +951,19 @@ class ComponentPricingTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["total"], "1725.63")
 
-        res = self.client.post("/api/leads/", {
-            "name": "Kofi", "email": "kofi@example.com", "source": "saved_quote",
-            "quote": {"total": "1.00"}, "selection": body,
-        }, content_type="application/json")
+        from unittest import mock
+        with mock.patch("payments.email.deliver") as deliver:
+            res = self.client.post("/api/leads/", {
+                "name": "Kofi", "email": "kofi@example.com", "source": "saved_quote",
+                "quote": {"total": "1.00"}, "selection": body,
+            }, content_type="application/json")
         self.assertEqual(res.status_code, 201)
         lead = Lead.objects.get()
         self.assertEqual(lead.quote["total"], "1725.63")  # server-priced, client value ignored
         self.assertIsNotNone(lead.reply_due_at)
+        kind, to, _subject, html_body = deliver.call_args.args
+        self.assertEqual((kind, to), ("saved_quote", "kofi@example.com"))
+        self.assertIn("1,725.63", html_body)
 
     def test_hold_and_checkout_endpoints(self):
         res = self.client.post("/api/bookings/holds/", {"package_id": str(self.pkg.id), "stay_types": ["fp_couple"]},
