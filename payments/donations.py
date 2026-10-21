@@ -11,6 +11,7 @@ import secrets
 from decimal import Decimal
 from types import SimpleNamespace
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers, status
@@ -132,6 +133,7 @@ class DonationCreateView(APIView):
             gw = initialize_transaction(
                 email=donation.donor_email, amount_kobo=to_subunits(donation.charged_amount),
                 reference=donation.reference, currency="GHS", subaccount=subaccount,
+                callback_url=f"{settings.FRONTEND_URL.rstrip('/')}/donate/thanks",
                 metadata={"kind": "academy_donation", "booking_reference": booking.reference if booking else ""},
             )
         except Exception:

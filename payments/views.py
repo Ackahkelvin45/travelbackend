@@ -177,7 +177,8 @@ class InitializePaymentView(APIView):
         # ── Server-computed amount, whatever the intent ──────────────────────
         balance = booking.balance
         if intent == "deposit":
-            if booking.payment_plan != Booking.PaymentPlan.INSTALLMENT or not booking.deposit_required:
+            if (booking.payment_plan != Booking.PaymentPlan.INSTALLMENT and not booking.pay_separately) \
+                    or not booking.deposit_required:
                 return Response({"detail": "This booking has no deposit plan."},
                                 status=status.HTTP_400_BAD_REQUEST)
             outstanding_deposit = quantize(booking.deposit_required) - booking.amount_paid
@@ -190,7 +191,8 @@ class InitializePaymentView(APIView):
             amount = min(quantize(serializer.validated_data["amount"]), balance)
             # Installment Policy: the FIRST payment must at least meet the deposit
             # (later top-ups can be any amount).
-            if (booking.payment_plan == Booking.PaymentPlan.INSTALLMENT and booking.amount_paid == 0
+            if ((booking.payment_plan == Booking.PaymentPlan.INSTALLMENT or booking.pay_separately)
+                    and booking.amount_paid == 0
                     and booking.deposit_required and amount < min(quantize(booking.deposit_required), balance)):
                 return Response(
                     {"detail": f"The first payment must be at least {booking.currency} {quantize(booking.deposit_required)}."},
@@ -219,7 +221,7 @@ class InitializePaymentView(APIView):
 
         if intent == "addon":
             purpose = Payment.Purpose.ADDON
-        elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT:
+        elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT or booking.pay_separately:
             purpose = (
                 Payment.Purpose.DEPOSIT
                 if booking.amount_paid < (booking.deposit_required or 0)

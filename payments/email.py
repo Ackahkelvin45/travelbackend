@@ -572,12 +572,14 @@ def send_saved_quote(lead) -> None:
         rows.append(("Accra stay", q["rooms_total"]))
     if Decimal(q.get("experiences_total", "0")):
         rows.append(("Experiences", q["experiences_total"]))
+    if Decimal(q.get("transfers_total", "0")):
+        rows.append(("Airport transfers", q["transfers_total"]))
     table = "".join(
         f'<tr><td style="padding:5px 0;font-size:13px;">{html.escape(label)}</td><td align="right" style="padding:5px 0;font-size:13px;">{money(v)}</td></tr>'
         for label, v in rows
     )
     if Decimal(q.get("discount_total", "0")):
-        table += (f'<tr><td style="padding:5px 0;font-size:13px;color:#2e7d32;">Savings applied automatically</td>'
+        table += (f'<tr><td style="padding:5px 0;font-size:13px;color:#2e7d32;">{html.escape(q.get("discount_name") or "Group saving")} (accommodation)</td>'
                   f'<td align="right" style="padding:5px 0;font-size:13px;color:#2e7d32;">− {money(q["discount_total"])}</td></tr>')
     resume = f"{settings.FRONTEND_URL.rstrip('/')}/tour/{q.get('package_id', '')}#book"
     body = f"""
