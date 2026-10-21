@@ -777,10 +777,11 @@ class ComponentPricingTests(TestCase):
         self.assertRejected("couple", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 2]}])
         self.assertRejected("group", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]},
                                          {"stay_type": "fp_standard", "occupants": [1]}])
-        # Couple: one shared room; standard rooms stay single; couple room needs two.
+        # Standard rooms stay single (a couple there takes two rooms); the couple room needs two.
         self.assertRejected("couple", 2, [{"stay_type": "fp_standard", "occupants": [0, 1]}])
-        self.assertRejected("couple", 2, [{"stay_type": "fp_standard", "occupants": [0]},
-                                          {"stay_type": "fp_standard", "occupants": [1]}])
+        two_rooms = self.quote("couple", 2, [{"stay_type": "fp_standard", "occupants": [0]},
+                                             {"stay_type": "fp_standard", "occupants": [1]}])
+        self.assertEqual(two_rooms.total, Decimal("4216.10"))  # 2 × 2108.05
         self.assertRejected("group", 1, [{"stay_type": "fp_couple", "occupants": [0]}])
         self.assertRejected("single", 1, [{"stay_type": "fp_closed", "occupants": [0]}])
         self.assertRejected("single", 2)

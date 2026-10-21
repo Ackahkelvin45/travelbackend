@@ -595,9 +595,6 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         quote.rooms_total += charge
         quote.discount_total += discount
 
-    if mode == Booking.Mode.COUPLE and rooms and (len(rooms) != 1 or len(quote.rooms[0]["occupants"]) != 2):
-        raise QuoteError("A couple shares one room — choose the couple room or a shared Airbnb.")
-
     if check_availability:
         for code, count in requested.items():
             left = stay_types[code].units_available()
