@@ -698,6 +698,7 @@ class ComponentPricingTests(TestCase):
         cls.pkg = make_package(
             pricing_model=TravelPackage.PricingModel.COMPONENT, base_price_per_person=Decimal("899.00"),
             available_from=date(2027, 1, 6), available_to=date(2027, 1, 11),
+            final_payment_deadline=date(2026, 12, 5),
         )
 
         def stay(code, cap, price, pct, units, min_occ=1, on_sale=True):

@@ -527,7 +527,10 @@ class ComponentQuote:
             "deposit_required": str(self.deposit_required) if self.deposit_required is not None else None,
             "amount_due_today": str(self.amount_due_today),
             "balance_after_today": str(quantize(self.total - self.amount_due_today)),
-            "final_payment_deadline": self.package.final_payment_deadline,
+            # Stored in JSONFields (Booking.quote_snapshot, Lead.quote): ISO string, not a date.
+            "final_payment_deadline": (
+                self.package.final_payment_deadline.isoformat() if self.package.final_payment_deadline else None
+            ),
         }
 
 
