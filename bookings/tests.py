@@ -823,6 +823,17 @@ class ComponentPricingTests(TestCase):
         _, _, again = create_hold(self.pkg, ["airbnb_2bed"])
         self.assertEqual(again[0].pk, units[0].pk)
 
+    def test_own_hold_does_not_count_as_sold_out(self):
+        from .pricing import compute_component_quote
+        from .services import create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_2bed"])  # the only 2-bed unit
+        rooms = [{"stay_type": "airbnb_2bed", "occupants": [0]}]
+        self.assertRejected("single", 1, rooms)
+        q = compute_component_quote(self.pkg, mode="single", travellers=[{}], rooms=rooms,
+                                    payment_plan="full", hold_token=token)
+        self.assertEqual(q.total, Decimal("2191.23"))
+
     def test_checkout_issues_one_core_ticket_per_traveller(self):
         from .services import create_hold
 

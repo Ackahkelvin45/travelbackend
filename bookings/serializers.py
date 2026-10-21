@@ -365,6 +365,7 @@ class ComponentQuoteSerializer(serializers.Serializer):
     travellers = _TravellerInput(many=True)
     rooms = _RoomInput(many=True, default=list)
     payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
+    hold_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
 
     def validate_travellers(self, value):
         if not 1 <= len(value) <= 20:
@@ -379,7 +380,6 @@ class HoldSerializer(serializers.Serializer):
 
 
 class ComponentCheckoutSerializer(ComponentQuoteSerializer):
-    hold_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     email = serializers.EmailField()

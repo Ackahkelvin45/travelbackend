@@ -594,8 +594,14 @@ class StayType(models.Model):
     def __str__(self):
         return f"{self.name} ({self.price_per_night}/night, max {self.capacity})"
 
-    def units_available(self, now=None):
-        return RoomUnit.objects.available(now).filter(stay_type=self).count()
+    def units_available(self, now=None, hold_token=""):
+        """Free units, plus any this checkout already holds (its own hold is not competition)."""
+        from django.utils import timezone
+        now = now or timezone.now()
+        free = RoomUnit.objects.available(now).filter(stay_type=self).count()
+        if not hold_token:
+            return free
+        return free + self.units.filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now).count()
 
 
 class RoomUnitQuerySet(models.QuerySet):

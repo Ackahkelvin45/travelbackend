@@ -607,6 +607,7 @@ class ComponentQuoteView(APIView):
             quote = compute_component_quote(
                 package, mode=data["mode"], travellers=data["travellers"],
                 rooms=data["rooms"], payment_plan=data["payment_plan"],
+                hold_token=data.get("hold_token", ""),
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

@@ -477,7 +477,10 @@ class ComponentQuote:
         return len(self.travellers)
 
     def discount_note(self) -> str:
-        notes = [f"{r['name']} {r['discount_percent']}%" for r in self.rooms if Decimal(r["discount"])]
+        pct = lambda v: f"{Decimal(v).normalize():f}%"  # "3.00" → "3%"
+        notes = list(dict.fromkeys(
+            f"Stay package saving ({r['name']}, {pct(r['discount_percent'])})" for r in self.rooms if Decimal(r["discount"])
+        ))
         notes += list(dict.fromkeys(t["bundle"] for t in self.travellers if t["bundle"]))
         return "; ".join(notes)[:200]
 
@@ -534,7 +537,8 @@ class ComponentQuote:
         }
 
 
-def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True) -> ComponentQuote:
+def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True,
+                            hold_token="") -> ComponentQuote:
     """Price a component selection server-side.
 
     travellers: [{"name": str, "experiences": [addon codes]}] — list index is
@@ -600,7 +604,7 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
 
     if check_availability:
         for code, count in requested.items():
-            left = stay_types[code].units_available()
+            left = stay_types[code].units_available(hold_token=hold_token)
             if count > left:
                 raise QuoteError(
                     f"{stay_types[code].name} is sold out." if left == 0
