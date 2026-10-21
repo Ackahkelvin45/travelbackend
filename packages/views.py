@@ -45,7 +45,7 @@ class PackagePricingView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, id):
-        from bookings.pricing import build_configurable_matrix, build_pricing_matrix
+        from bookings.pricing import build_component_matrix, build_configurable_matrix, build_pricing_matrix
 
         try:
             package = TravelPackage.objects.prefetch_related("options", "addon_groups", "addons", "discount_rules").get(
@@ -55,6 +55,8 @@ class PackagePricingView(APIView):
 
         if package.pricing_model == TravelPackage.PricingModel.CORE_PLUS_ADDONS:
             return Response(build_configurable_matrix(package), status=status.HTTP_200_OK)
+        if package.pricing_model == TravelPackage.PricingModel.COMPONENT:
+            return Response(build_component_matrix(package), status=status.HTTP_200_OK)
         return Response(build_pricing_matrix(package), status=status.HTTP_200_OK)
 
 

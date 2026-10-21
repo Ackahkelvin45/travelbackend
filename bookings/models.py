@@ -18,6 +18,11 @@ class Booking(models.Model):
         FULL = "full", "Full Payment"
         INSTALLMENT = "installment", "Installment"
 
+    class Mode(models.TextChoices):
+        SINGLE = "single", "Single"
+        COUPLE = "couple", "Couple"
+        GROUP = "group", "Group"
+
     class CancellationReason(models.TextChoices):
         CUSTOMER = "customer", "Customer requested"
         EXPIRED = "expired", "Pending booking expired unpaid"
@@ -154,6 +159,23 @@ class Booking(models.Model):
         null=True,
         blank=True,
     )
+
+    # ── Component pricing (Change Request v2) ────────────────────────────────
+    mode = models.CharField(max_length=10, choices=Mode.choices, blank=True)
+    quote_snapshot = models.JSONField(
+        default=dict, blank=True,
+        help_text="Full component quote at booking time: per-traveller Core, rooms, experiences, discounts.",
+    )
+    marketing_consent = models.BooleanField(default=False)
+
+    # ── Coordinator workflow ──────────────────────────────────────────────────
+    coordinator = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="coordinated_bookings", limit_choices_to={"is_staff": True},
+    )
+    coordinator_assigned_at = models.DateTimeField(null=True, blank=True)
+    lead_contacted_at = models.DateTimeField(null=True, blank=True)
+    checklist = models.JSONField(default=dict, blank=True, help_text='e.g. {"travel_info": true, "flights": false}')
 
     # Idempotency markers for scheduled reminder emails, e.g. {"7d": "<iso ts>"}
     reminders_sent = models.JSONField(default=dict, blank=True)
@@ -406,3 +428,86 @@ class PolicyAcceptance(models.Model):
 
     def __str__(self):
         return f"{self.email} accepted {self.document} for {self.booking.reference}"
+
+
+class BookingTraveller(models.Model):
+    """One Core ticket. A traveller is charged Core exactly once however often
+    they are moved between rooms; travel-form answers live on the same row."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="travellers")
+    full_name = models.CharField(max_length=200)
+    is_lead = models.BooleanField(default=False)
+    unit = models.ForeignKey(
+        "packages.RoomUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="occupants",
+    )
+    experiences = models.JSONField(default=list, blank=True, help_text="Add-on codes chosen for this guest.")
+
+    # ── Travel information (post-booking form) ────────────────────────────────
+    arrival_at = models.DateTimeField(null=True, blank=True)
+    arrival_flight = models.CharField(max_length=60, blank=True)
+    departure_at = models.DateTimeField(null=True, blank=True)
+    departure_flight = models.CharField(max_length=60, blank=True)
+    needs_transfer = models.BooleanField(default=False)
+    emergency_contact = models.CharField(max_length=200, blank=True)
+    emergency_phone = models.CharField(max_length=30, blank=True)
+    dietary = models.TextField(blank=True)
+    accessibility = models.TextField(blank=True)
+    travel_info_submitted_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-is_lead", "created_at"]
+
+    def __str__(self):
+        return f"{self.full_name} ({self.booking.reference})"
+
+
+class Lead(models.Model):
+    """A sales enquiry: chat hand-off, saved quote, contact form, referral."""
+
+    class Source(models.TextChoices):
+        CHAT = "chat", "Chat"
+        SAVED_QUOTE = "saved_quote", "Saved quote"
+        CONTACT = "contact", "Contact form"
+        WHATSAPP = "whatsapp", "WhatsApp"
+        REFERRAL = "referral", "Referral"
+        OTHER = "other", "Other"
+
+    class Stage(models.TextChoices):
+        NEW = "new", "New"
+        CONTACTED = "contacted", "Contacted"
+        QUOTED = "quoted", "Quoted"
+        WON = "won", "Won"
+        LOST = "lost", "Lost"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    email = models.EmailField()
+    phone = models.CharField(max_length=30, blank=True)
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.OTHER)
+    message = models.TextField(blank=True)
+    marketing_consent = models.BooleanField(default=False)
+    stage = models.CharField(max_length=10, choices=Stage.choices, default=Stage.NEW)
+    package = models.ForeignKey(
+        "packages.TravelPackage", on_delete=models.SET_NULL, null=True, blank=True, related_name="leads",
+    )
+    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
+    quote = models.JSONField(default=dict, blank=True, help_text="Server quote the guest saved, if any.")
+    referral_code = models.CharField(max_length=40, blank=True)
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="leads", limit_choices_to={"is_staff": True},
+    )
+    reply_due_at = models.DateTimeField(null=True, blank=True)
+    replied_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} <{self.email}> [{self.stage}]"

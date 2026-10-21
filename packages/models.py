@@ -160,6 +160,11 @@ class TravelPackage(models.Model):
                   "the minimum for each guest, capped at that guest's share of the "
                   "total (so a $878 guest pays $878, never the $1,000 minimum).",
     )
+    deposit_threshold = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Component pricing only: carts below this total are payable in full "
+                  "(no deposit offered). Leave empty to switch the rule off.",
+    )
     final_payment_deadline = models.DateField(
         null=True, blank=True,
         help_text="Installment balances must be fully paid by this date. "
@@ -239,6 +244,7 @@ class TravelPackage(models.Model):
         OPTION_BASED = "option_based", "Option-based (hotel × occupancy)"
         FLAT = "flat", "Flat per-person (day tour / legacy)"
         CORE_PLUS_ADDONS = "core_plus_addons", "Core tour + optional add-ons"
+        COMPONENT = "component", "Core per traveller + rooms per unit + experiences per guest"
 
     pricing_model = models.CharField(
         max_length=20, choices=PricingModel.choices, default=PricingModel.FLAT,
@@ -310,7 +316,7 @@ class TravelPackage(models.Model):
         ]
         if prices:
             return min(prices)
-        if self.pricing_model == self.PricingModel.CORE_PLUS_ADDONS and self.base_price_per_person is not None:
+        if self.pricing_model in (self.PricingModel.CORE_PLUS_ADDONS, self.PricingModel.COMPONENT) and self.base_price_per_person is not None:
             return self.base_price_per_person
         return self.price_shared
 
@@ -550,6 +556,85 @@ class PackageAddon(models.Model):
         return f"{self.package.title} — {self.name} ({self.price} {self.get_unit_display()})"
 
 
+class StayType(models.Model):
+    """An accommodation product for the component pricing model, priced per
+    unit per night: a unit is charged once whatever its occupancy. Its
+    discount_percent applies to the unit charge plus the Core tickets of the
+    unit's occupants (Change Request v2: 3% Airbnb, 5% Four Points)."""
+
+    class Kind(models.TextChoices):
+        AIRBNB = "airbnb", "Airbnb"
+        HOTEL = "hotel", "Hotel"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="stay_types")
+    code = models.SlugField(help_text="Stable machine code, e.g. 'airbnb_1bed'.")
+    name = models.CharField(max_length=200)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    capacity = models.PositiveSmallIntegerField(help_text="Maximum occupants per unit.")
+    min_occupancy = models.PositiveSmallIntegerField(
+        default=1, help_text="e.g. 2 for a couple room that must be shared.",
+    )
+    price_per_night = models.DecimalField(max_digits=12, decimal_places=2, help_text="Per unit, package currency.")
+    nights = models.PositiveSmallIntegerField(default=4)
+    discount_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        help_text="Off the unit charge + its occupants' Core tickets, e.g. 3.00.",
+    )
+    on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
+    note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["package", "code"], name="unique_stay_code_per_package"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.price_per_night}/night, max {self.capacity})"
+
+    def units_available(self, now=None):
+        return RoomUnit.objects.available(now).filter(stay_type=self).count()
+
+
+class RoomUnitQuerySet(models.QuerySet):
+    def available(self, now=None):
+        """Free = not blocked, not sold, and any hold has run out. An expired
+        hold needs no sweeper to stop blocking a sale."""
+        from django.utils import timezone
+        now = now or timezone.now()
+        return self.filter(blocked=False).filter(
+            models.Q(booking__isnull=True) | models.Q(held_until__isnull=False)
+        ).exclude(held_until__gt=now)
+
+
+class RoomUnit(models.Model):
+    """One sellable room/apartment, allocated for the whole stay.
+
+    State lives on the row: booking set + held_until empty = sold; held_until
+    in the future = held (checkout hold, or an unpaid booking's window);
+    otherwise free. Claims lock the row (select_for_update)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stay_type = models.ForeignKey(StayType, on_delete=models.CASCADE, related_name="units")
+    label = models.CharField(max_length=60, help_text="e.g. 'Airbnb 1-bed A'.")
+    blocked = models.BooleanField(default=False, help_text="Stop selling this unit.")
+    booking = models.ForeignKey(
+        "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="room_units",
+    )
+    hold_token = models.CharField(max_length=40, blank=True, db_index=True)
+    held_until = models.DateTimeField(null=True, blank=True)
+
+    objects = RoomUnitQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["stay_type__order", "label"]
+
+    def __str__(self):
+        return self.label
+
+
 class PackageDiscountRule(models.Model):
     """A bundle discount: applies `percent` off the subtotal when EVERY add-on in
     `required_addons` is in the cart. Discounts never stack — the pricing engine
@@ -558,7 +643,12 @@ class PackageDiscountRule(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
+    class Scope(models.TextChoices):
+        CART = "cart", "Whole cart, highest rule wins (core + add-ons model)"
+        TRAVELLER_BUNDLE = "traveller_bundle", "A traveller's complete extras bundle (component model)"
+
     name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
+    scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.CART)
     percent = models.DecimalField(max_digits=5, decimal_places=2, help_text="e.g. 10.00 for 10%.")
     required_addons = models.ManyToManyField(
         PackageAddon, related_name="discount_rules",

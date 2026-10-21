@@ -13,8 +13,10 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from .models import Booking, PolicyAcceptance, PolicyDocument
-from .pricing import QuoteError, compute_configurable_quote, compute_quote, assert_capacity
+from .models import Booking, BookingTraveller, Lead, PolicyAcceptance, PolicyDocument
+from .pricing import (
+    QuoteError, assert_capacity, compute_component_quote, compute_configurable_quote, compute_quote,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +180,169 @@ class IllegalTransition(Exception):
     pass
 
 
+# ── Component bookings: room holds, checkout, traveller moves ────────────────
+
+def create_hold(package, stay_codes: list, *, replace_token: str = ""):
+    """Hold one unit per entry in ``stay_codes`` for OpsConfig.hold_minutes.
+    Returns (token, held_until, units). Rows are claimed under a row lock so
+    two checkouts can never hold the same unit; a previous hold of the same
+    checkout (``replace_token``) is released first."""
+    import secrets
+    from collections import Counter
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from packages.models import RoomUnit
+    from payments.models import OpsConfig
+
+    if not stay_codes:
+        raise QuoteError("Choose at least one room to hold.")
+    now = timezone.now()
+    held_until = now + timedelta(minutes=OpsConfig.get().hold_minutes)
+    token = secrets.token_urlsafe(16)
+    claimed = []
+    with transaction.atomic():
+        if replace_token:
+            release_hold(replace_token)
+        for code, count in Counter(stay_codes).items():
+            units = list(
+                RoomUnit.objects.available(now)
+                .select_for_update(skip_locked=True, of=("self",))
+                .filter(stay_type__package=package, stay_type__code=code, stay_type__on_sale=True)
+                .select_related("stay_type")[:count]
+            )
+            if len(units) < count:
+                raise QuoteError(f"Sorry — not enough '{code}' rooms are left.")
+            claimed += units
+        RoomUnit.objects.filter(pk__in=[u.pk for u in claimed]).update(
+            booking=None, hold_token=token, held_until=held_until,
+        )
+    return token, held_until, claimed
+
+
+def release_hold(token: str) -> int:
+    """Give back a checkout hold that has not become a booking."""
+    from packages.models import RoomUnit
+    if not token:
+        return 0
+    return RoomUnit.objects.filter(hold_token=token, booking__isnull=True).update(hold_token="", held_until=None)
+
+
+def create_component_booking(
+    *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
+    contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
+    user=None, ip_address: str | None = None,
+) -> Booking:
+    """Turn a room hold into a priced, snapshotted booking with one
+    BookingTraveller (= one Core ticket) per guest. The units stay held for
+    the unpaid-booking window and become sold on the first payment."""
+    from datetime import timedelta
+
+    from django.conf import settings
+    from django.utils import timezone
+
+    from packages.models import RoomUnit
+
+    quote = compute_component_quote(
+        package, mode=mode, travellers=travellers, rooms=rooms,
+        payment_plan=payment_plan, check_availability=False,  # the hold is the availability
+    )
+    assert_capacity(package, quote.num_guests)
+    if mode == Booking.Mode.COUPLE and not all((t.get("name") or "").strip() for t in travellers):
+        raise QuoteError("Please give both guests' names.")
+
+    documents = required_policy_documents()
+    accepted = set(accepted_policy_types)
+    missing = [d.type for d in documents if d.type not in accepted]
+    if missing:
+        raise PolicyAcceptanceRequired(missing)
+    optional = list(PolicyDocument.objects.filter(
+        is_current=True, published_at__isnull=False, is_required=False, type__in=accepted,
+    ))
+
+    now = timezone.now()
+    with transaction.atomic():
+        held = list(
+            RoomUnit.objects.select_for_update(of=("self",))
+            .filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now,
+                    stay_type__package=package)
+            .select_related("stay_type")
+        ) if hold_token else []
+        by_code = {}
+        for unit in held:
+            by_code.setdefault(unit.stay_type.code, []).append(unit)
+        if sorted(r["stay_type"] for r in quote.rooms) != sorted(u.stay_type.code for u in held):
+            raise QuoteError("Your room hold has expired or changed — please choose your rooms again.")
+
+        lead_name = f"{contact['first_name']} {contact['last_name']}".strip()
+        booking = Booking.objects.create(
+            user=user,
+            first_name=contact["first_name"], last_name=contact["last_name"], email=contact["email"],
+            phone=contact.get("phone"), country=contact.get("country"),
+            special_requests=contact.get("special_requests"),
+            package=package, option=None, mode=mode, marketing_consent=marketing_consent,
+            payment_plan=quote.payment_plan, num_guests=quote.num_guests,
+            travel_date=package.available_from,
+            unit_price=quote.core_price, total_amount=quote.total, currency=package.currency,
+            option_snapshot={"component": True, "core_price_per_person": str(quote.core_price)},
+            addons=quote.booking_addons(),
+            discount_amount=quote.discount_total, discount_note=quote.discount_note(),
+            quote_snapshot=quote.as_dict(),
+            refund_tiers_snapshot=package.refund_tiers,
+            deposit_required=quote.deposit_required,
+        )
+        ttl = timedelta(hours=getattr(settings, "PENDING_BOOKING_TTL_HOURS", 24))
+        unit_of = {}
+        for room in quote.rooms:
+            unit = by_code[room["stay_type"]].pop()
+            unit.booking, unit.hold_token, unit.held_until = booking, "", booking.created_at + ttl
+            unit.save(update_fields=["booking", "hold_token", "held_until"])
+            room["unit"] = unit.label
+            for i in room["occupants"]:
+                unit_of[i] = unit
+        booking.quote_snapshot = quote.as_dict()  # now with unit labels
+        booking.save(update_fields=["quote_snapshot"])
+
+        BookingTraveller.objects.bulk_create([
+            BookingTraveller(
+                booking=booking, is_lead=(i == 0), unit=unit_of.get(i),
+                full_name=(t.get("name") or "").strip() or (lead_name if i == 0 else f"Guest {i + 1}"),
+                experiences=[e["code"] for e in quote.travellers[i]["experiences"]],
+            )
+            for i, t in enumerate(travellers)
+        ])
+        PolicyAcceptance.objects.bulk_create([
+            PolicyAcceptance(booking=booking, document=d, email=booking.email, ip_address=ip_address)
+            for d in documents + optional
+        ])
+        Lead.objects.filter(email__iexact=booking.email, booking__isnull=True).exclude(
+            stage=Lead.Stage.LOST,
+        ).update(stage=Lead.Stage.WON, booking=booking)
+
+    logger.info(
+        "Component booking created: ref=%s pkg=%s mode=%s guests=%s rooms=%s total=%s %s",
+        booking.reference, package.id, mode, quote.num_guests, len(quote.rooms),
+        booking.total_amount, booking.currency,
+    )
+    return booking
+
+
+def move_traveller(traveller, unit) -> BookingTraveller:
+    """Staff: move a guest to another of the booking's rooms (or none). The
+    guest keeps their single Core ticket — nothing is re-priced or re-issued."""
+    with transaction.atomic():
+        Booking.objects.select_for_update().get(pk=traveller.booking_id)
+        if unit is not None:
+            if unit.booking_id != traveller.booking_id:
+                raise IllegalTransition("Travellers can only move between this booking's own rooms.")
+            if unit.occupants.exclude(pk=traveller.pk).count() >= unit.stay_type.capacity:
+                raise IllegalTransition(f"{unit.label} is full.")
+        traveller.unit = unit
+        traveller.save(update_fields=["unit"])
+    return traveller
+
+
 def cancel_booking(booking, *, reason: str, refund_reason: str = "", at=None) -> Booking:
     """
     The one legal way to cancel a booking. Sets the cancellation facts and,
@@ -204,6 +369,9 @@ def cancel_booking(booking, *, reason: str, refund_reason: str = "", at=None) ->
         booking.cancelled_at = timezone.now()
         booking.cancellation_reason = reason
         booking.save(update_fields=["status", "cancelled_at", "cancellation_reason", "updated_at"])
+        # Rooms go back on sale; the quote snapshot keeps what was booked.
+        booking.travellers.update(unit=None)
+        booking.room_units.update(booking=None, hold_token="", held_until=None)
 
         legs = []
         if booking.amount_paid > booking.amount_refunded:

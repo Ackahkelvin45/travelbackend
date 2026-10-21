@@ -2,6 +2,8 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
+
+from bookings.views import LeadCreateView, SiteSettingsView
 from django.http import JsonResponse
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
@@ -38,6 +40,8 @@ urlpatterns = [
 
     # Bookings
     path("api/bookings/", include("bookings.urls")),
+    path("api/leads/", LeadCreateView.as_view(), name="lead-create"),
+    path("api/site-settings/", SiteSettingsView.as_view(), name="site-settings"),
 
     # Payments (initialize, verify, webhook)
     path("api/payments/", include("payments.urls")),

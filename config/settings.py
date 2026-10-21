@@ -289,6 +289,10 @@ REST_FRAMEWORK = {
         'payments': '30/min',
         'payment-status': '120/min',
         'booking-status': '60/min',
+        # Trip builder re-quotes on every change; holds/checkout/leads write rows.
+        'quote': '120/min',
+        'holds': '20/min',
+        'leads': '10/min',
         # Email verification / resend — cheap to abuse (email spam), so cap it.
         'auth': '10/min',
         # Live password-rule check from the signup form — generous for typing,

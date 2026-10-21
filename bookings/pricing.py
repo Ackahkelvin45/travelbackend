@@ -448,3 +448,251 @@ def build_pricing_matrix(package, at=None) -> dict:
         # offset = server_now - Date.now() and derives countdowns from it.
         "server_now": at,
     }
+
+
+# ── Component pricing (Change Request v2) ─────────────────────────────────────
+
+@dataclass
+class ComponentQuote:
+    """Core per traveller + each room unit once + experiences per guest.
+    Discounts are per component (a unit with its occupants' Core tickets; one
+    guest's complete extras bundle), each rounded half-up to cents, then summed."""
+    package: object
+    mode: str
+    payment_plan: str
+    core_price: Decimal
+    travellers: list = field(default_factory=list)
+    rooms: list = field(default_factory=list)
+    core_total: Decimal = Decimal("0")
+    rooms_total: Decimal = Decimal("0")
+    experiences_total: Decimal = Decimal("0")
+    subtotal: Decimal = Decimal("0")
+    discount_total: Decimal = Decimal("0")
+    total: Decimal = Decimal("0")
+    deposit_required: Decimal | None = None
+    amount_due_today: Decimal = Decimal("0")
+
+    @property
+    def num_guests(self):
+        return len(self.travellers)
+
+    def discount_note(self) -> str:
+        notes = [f"{r['name']} {r['discount_percent']}%" for r in self.rooms if Decimal(r["discount"])]
+        notes += list(dict.fromkeys(t["bundle"] for t in self.travellers if t["bundle"]))
+        return "; ".join(notes)[:200]
+
+    def booking_addons(self) -> list:
+        """Experience lines aggregated per code, in the shape Booking.addons
+        (receipts, refunds) already reads. Gross of the bundle discount, which
+        is in discount_amount like every other bundle discount."""
+        lines = {}
+        for t in self.travellers:
+            for e in t["experiences"]:
+                line = lines.setdefault(e["code"], {
+                    "code": e["code"], "name": e["name"], "unit": "per_person",
+                    "unit_price": e["price"], "quantity": 0, "line_total": "0.00",
+                    "refundable": e["refundable"],
+                })
+                line["quantity"] += 1
+                line["line_total"] = str(quantize(Decimal(line["line_total"]) + Decimal(e["price"])))
+        return list(lines.values())
+
+    def as_dict(self):
+        return {
+            "package_id": str(self.package.id),
+            "pricing_model": "component",
+            "mode": self.mode,
+            "payment_plan": self.payment_plan,
+            "currency": self.package.currency,
+            "core_price_per_person": str(self.core_price),
+            "num_guests": self.num_guests,
+            "travellers": self.travellers,
+            "rooms": self.rooms,
+            "core_total": str(self.core_total),
+            "rooms_total": str(self.rooms_total),
+            "experiences_total": str(self.experiences_total),
+            "subtotal": str(self.subtotal),
+            "discount_total": str(self.discount_total),
+            "total": str(self.total),
+            "average_per_person": str(quantize(self.total / self.num_guests)),
+            "deposit_required": str(self.deposit_required) if self.deposit_required is not None else None,
+            "amount_due_today": str(self.amount_due_today),
+            "balance_after_today": str(quantize(self.total - self.amount_due_today)),
+            "final_payment_deadline": self.package.final_payment_deadline,
+        }
+
+
+def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True) -> ComponentQuote:
+    """Price a component selection server-side.
+
+    travellers: [{"name": str, "experiences": [addon codes]}] — list index is
+        the traveller's id; each one is exactly one Core ticket.
+    rooms: [{"stay_type": code, "occupants": [traveller indexes]}] — each
+        entry is one unit, charged once whatever its occupancy.
+    """
+    from bookings.models import Booking
+    from packages.models import PackageAddon, PackageDiscountRule, TravelPackage
+
+    if not package.is_active:
+        raise QuoteError("This tour is not open for booking.")
+    if package.pricing_model != TravelPackage.PricingModel.COMPONENT:
+        raise QuoteError("This tour does not use component pricing.")
+    if package.base_price_per_person is None:
+        raise QuoteError("This tour has no Core price configured.")
+    n = len(travellers or [])
+    if n < 1:
+        raise QuoteError("At least one traveller is required.")
+    if mode not in Booking.Mode.values:
+        raise QuoteError("Choose Single, Couple or Group.")
+    if mode == Booking.Mode.SINGLE and n != 1:
+        raise QuoteError("Single is for one traveller — choose Couple or Group.")
+    if mode == Booking.Mode.COUPLE and n != 2:
+        raise QuoteError("A couple booking is for exactly two travellers.")
+    if payment_plan not in (Booking.PaymentPlan.FULL, Booking.PaymentPlan.INSTALLMENT):
+        raise QuoteError("Unknown payment plan.")
+    if payment_plan == Booking.PaymentPlan.INSTALLMENT and not package.allow_installments:
+        raise QuoteError("Installment payment is not available for this tour.")
+
+    core = quantize(package.base_price_per_person)
+    quote = ComponentQuote(package=package, mode=mode, payment_plan=payment_plan, core_price=core)
+    room_of = {}
+
+    # ── Rooms: each unit once; discount = unit + its occupants' Core ─────────
+    stay_types = {s.code: s for s in package.stay_types.all()}
+    requested = {}
+    for room in rooms or []:
+        st = stay_types.get(room.get("stay_type"))
+        if st is None or not st.on_sale:
+            raise QuoteError(f"'{room.get('stay_type')}' is not available.")
+        occupants = room.get("occupants") or []
+        if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < n for i in occupants):
+            raise QuoteError("Every room occupant must be one of the travellers and hold a Core ticket.")
+        if len(set(occupants)) != len(occupants) or room_of.keys() & set(occupants):
+            raise QuoteError("Each traveller can be assigned to one room only.")
+        if len(occupants) > st.capacity:
+            raise QuoteError(f"{st.name} sleeps at most {st.capacity}.")
+        if len(occupants) < max(st.min_occupancy, 1):
+            raise QuoteError(f"{st.name} needs {max(st.min_occupancy, 1)} guests.")
+        requested[st.code] = requested.get(st.code, 0) + 1
+        charge = quantize(st.price_per_night * st.nights)
+        discount = quantize((core * len(occupants) + charge) * st.discount_percent / Decimal("100"))
+        for i in occupants:
+            room_of[i] = st.name
+        quote.rooms.append({
+            "stay_type": st.code, "name": st.name, "occupants": occupants,
+            "price_per_night": str(quantize(st.price_per_night)), "nights": st.nights,
+            "charge": str(charge), "discount_percent": str(st.discount_percent), "discount": str(discount),
+        })
+        quote.rooms_total += charge
+        quote.discount_total += discount
+
+    if mode == Booking.Mode.COUPLE and rooms and (len(rooms) != 1 or len(quote.rooms[0]["occupants"]) != 2):
+        raise QuoteError("A couple shares one room — choose the couple room or a shared Airbnb.")
+
+    if check_availability:
+        for code, count in requested.items():
+            left = stay_types[code].units_available()
+            if count > left:
+                raise QuoteError(
+                    f"{stay_types[code].name} is sold out." if left == 0
+                    else f"Only {left} × {stay_types[code].name} left."
+                )
+
+    # ── Experiences per guest; best complete bundle discounted once ──────────
+    addons = {a.code: a for a in package.addons.filter(is_active=True, unit=PackageAddon.Unit.PER_PERSON)}
+    bundles = [
+        (r.percent, r.name, {a.code for a in r.required_addons.all()})
+        for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+        .prefetch_related("required_addons")
+    ]
+    for i, t in enumerate(travellers):
+        codes = list(dict.fromkeys(t.get("experiences") or []))
+        unknown = [c for c in codes if c not in addons]
+        if unknown:
+            raise QuoteError(f"Unknown experience(s): {', '.join(unknown)}.")
+        chosen = [addons[c] for c in codes]
+        subtotal = quantize(sum((a.price for a in chosen), Decimal("0")))
+        qualifying = [b for b in bundles if b[2] and b[2] <= set(codes)]
+        bundle = max(qualifying, key=lambda b: b[0], default=None)
+        bundle_discount = Decimal("0.00")
+        if bundle:
+            base = sum((a.price for a in chosen if a.code in bundle[2]), Decimal("0"))
+            bundle_discount = quantize(base * bundle[0] / Decimal("100"))
+        quote.travellers.append({
+            "index": i, "name": (t.get("name") or "").strip(), "core": str(core),
+            "room": room_of.get(i),
+            "experiences": [
+                {"code": a.code, "name": a.name, "price": str(quantize(a.price)), "refundable": a.refundable}
+                for a in chosen
+            ],
+            "experiences_subtotal": str(subtotal),
+            "bundle": f"{bundle[1]} ({bundle[0]}%)" if bundle else "",
+            "bundle_discount": str(bundle_discount),
+        })
+        quote.experiences_total += subtotal
+        quote.discount_total += bundle_discount
+
+    quote.core_total = quantize(core * n)
+    quote.rooms_total = quantize(quote.rooms_total)
+    quote.experiences_total = quantize(quote.experiences_total)
+    quote.discount_total = quantize(quote.discount_total)
+    quote.subtotal = quantize(quote.core_total + quote.rooms_total + quote.experiences_total)
+    quote.total = quantize(quote.subtotal - quote.discount_total)
+
+    if payment_plan == Booking.PaymentPlan.INSTALLMENT:
+        if not package.deposit_minimum:
+            raise QuoteError("Installment payment is not configured for this tour.")
+        if not installments_open(package):
+            raise QuoteError("The final payment deadline has passed — this booking is payable in full.")
+        # A cart exactly AT the threshold may pay a deposit; below it pays in full.
+        if package.deposit_threshold is not None and quote.total < package.deposit_threshold:
+            raise QuoteError(f"Bookings under {quantize(package.deposit_threshold)} are payable in full.")
+        quote.deposit_required = deposit_for(package, quote.total, n)
+        quote.amount_due_today = quote.deposit_required
+    else:
+        quote.amount_due_today = quote.total
+    return quote
+
+
+def build_component_matrix(package) -> dict:
+    """Catalogue for the trip builder. Display only: totals always come from
+    the quote endpoint, never from client-side arithmetic."""
+    from packages.models import PackageAddon, PackageDiscountRule
+
+    return {
+        "package_id": str(package.id),
+        "pricing_model": "component",
+        "currency": package.currency,
+        "core_price_per_person": str(quantize(package.base_price_per_person)) if package.base_price_per_person else None,
+        "tour_start": package.available_from,
+        "tour_end": package.available_to,
+        "stay_types": [
+            {
+                "code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity,
+                "min_occupancy": s.min_occupancy, "price_per_night": str(quantize(s.price_per_night)),
+                "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
+                "discount_percent": str(s.discount_percent), "on_sale": s.on_sale, "note": s.note,
+                "units_available": s.units_available() if s.on_sale else 0,
+            }
+            for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
+        ],
+        "experiences": [
+            {"code": a.code, "name": a.name, "description": a.description,
+             "price": str(quantize(a.price)), "refundable": a.refundable}
+            for a in package.addons.filter(is_active=True, unit=PackageAddon.Unit.PER_PERSON)
+        ],
+        "bundles": [
+            {"name": r.name, "percent": str(r.percent), "members": [a.code for a in r.required_addons.all()]}
+            for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+        ],
+        "installments": {
+            "enabled": installments_open(package),
+            "deposit_minimum": str(quantize(package.deposit_minimum)) if package.deposit_minimum else None,
+            "deposit_unit": package.deposit_unit,
+            "deposit_threshold": str(quantize(package.deposit_threshold)) if package.deposit_threshold is not None else None,
+            "final_payment_deadline": package.final_payment_deadline,
+        },
+        "charge": _charge_info(package),
+        "notices": {"fees": _fee_notice()},
+        "server_now": timezone.now(),
+    }

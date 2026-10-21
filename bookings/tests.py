@@ -684,3 +684,257 @@ class OptionalPolicyTests(TestCase):
         r = APIClient().get("/api/bookings/policies/")
         self.assertEqual({d["type"]: d["is_required"] for d in r.data},
                          {"terms": True, "media": False})
+
+
+# ── Component pricing (Change Request v2) ─────────────────────────────────────
+
+class ComponentPricingTests(TestCase):
+    """The client's acceptance totals and room/ticket rules (Change Request v2 §6)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from packages.models import PackageAddon, PackageDiscountRule, RoomUnit, StayType
+
+        cls.pkg = make_package(
+            pricing_model=TravelPackage.PricingModel.COMPONENT, base_price_per_person=Decimal("899.00"),
+            available_from=date(2027, 1, 6), available_to=date(2027, 1, 11),
+        )
+
+        def stay(code, cap, price, pct, units, min_occ=1, on_sale=True):
+            st = StayType.objects.create(
+                package=cls.pkg, code=code, name=code, kind="airbnb" if "airbnb" in code else "hotel",
+                capacity=cap, min_occupancy=min_occ, price_per_night=Decimal(price),
+                discount_percent=Decimal(pct), on_sale=on_sale,
+            )
+            for i in range(units):
+                RoomUnit.objects.create(stay_type=st, label=f"{code}-{i}")
+            return st
+
+        stay("airbnb_1bed", 2, "220", "3", 2)
+        stay("airbnb_2bed", 4, "340", "3", 1)
+        stay("fp_standard", 1, "330", "5", 2)
+        stay("fp_couple", 2, "380", "5", 1, min_occ=2)
+        stay("fp_closed", 2, "999", "5", 1, on_sale=False)
+
+        def addon(code, price):
+            return PackageAddon.objects.create(package=cls.pkg, code=code, name=code, price=Decimal(price))
+
+        members = [addon("enzo_vip", "220"), addon("waterfall_massage", "100"), addon("farewell_dinner", "100")]
+        rule = PackageDiscountRule.objects.create(
+            package=cls.pkg, name="Complete extras bundle", percent=Decimal("5"),
+            scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE,
+        )
+        rule.required_addons.set(members)
+
+    def quote(self, mode, travellers, rooms=(), plan="full"):
+        from .pricing import compute_component_quote
+        if isinstance(travellers, int):
+            travellers = [{} for _ in range(travellers)]
+        return compute_component_quote(self.pkg, mode=mode, travellers=travellers, rooms=list(rooms), payment_plan=plan)
+
+    def assertRejected(self, *args, **kwargs):
+        from .pricing import QuoteError
+        with self.assertRaises(QuoteError):
+            self.quote(*args, **kwargs)
+
+    BUNDLE = ["enzo_vip", "waterfall_massage", "farewell_dinner"]
+
+    def test_acceptance_totals(self):
+        cases = [
+            ("1 Core + 1-bed", "single", 1, [("airbnb_1bed", [0])], "1725.63"),
+            ("2 Core + same 1-bed", "couple", 2, [("airbnb_1bed", [0, 1])], "2597.66"),
+            ("4 Core + one 2-bed", "group", 4, [("airbnb_2bed", [0, 1, 2, 3])], "4807.32"),
+            ("1 Core + Four Points", "single", 1, [("fp_standard", [0])], "2108.05"),
+            ("Couple + Four Points couple", "couple", 2, [("fp_couple", [0, 1])], "3152.10"),
+        ]
+        for label, mode, n, rooms, expected in cases:
+            with self.subTest(label):
+                q = self.quote(mode, n, [{"stay_type": s, "occupants": o} for s, o in rooms])
+                self.assertEqual(q.total, Decimal(expected))
+
+    def test_experience_totals(self):
+        cases = [
+            ("Two-person ENZO", [["enzo_vip"], ["enzo_vip"]], "440.00"),
+            ("Two complete bundles", [self.BUNDLE, self.BUNDLE], "798.00"),
+            ("One bundle + one massage", [self.BUNDLE, ["waterfall_massage"]], "499.00"),
+        ]
+        for label, picks, expected in cases:
+            with self.subTest(label):
+                q = self.quote("couple", [{"experiences": p} for p in picks])
+                self.assertEqual(q.total - q.core_total, Decimal(expected))
+
+    def test_core_only_has_no_discount(self):
+        self.assertEqual(self.quote("couple", 2).total, Decimal("1798.00"))
+
+    def test_one_guest_may_book_a_two_bed_unit(self):
+        q = self.quote("single", 1, [{"stay_type": "airbnb_2bed", "occupants": [0]}])
+        self.assertEqual(q.total, Decimal("2191.23"))  # (899 + 1360) × 0.97
+
+    def test_room_rules(self):
+        self.assertRejected("group", 5, [{"stay_type": "airbnb_2bed", "occupants": [0, 1, 2, 3, 4]}])
+        self.assertRejected("group", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1, 2]}])
+        # Every occupant must be a traveller (= hold Core); nobody in two rooms.
+        self.assertRejected("couple", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 2]}])
+        self.assertRejected("group", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]},
+                                         {"stay_type": "fp_standard", "occupants": [1]}])
+        # Couple: one shared room; standard rooms stay single; couple room needs two.
+        self.assertRejected("couple", 2, [{"stay_type": "fp_standard", "occupants": [0, 1]}])
+        self.assertRejected("couple", 2, [{"stay_type": "fp_standard", "occupants": [0]},
+                                          {"stay_type": "fp_standard", "occupants": [1]}])
+        self.assertRejected("group", 1, [{"stay_type": "fp_couple", "occupants": [0]}])
+        self.assertRejected("single", 1, [{"stay_type": "fp_closed", "occupants": [0]}])
+        self.assertRejected("single", 2)
+        self.assertRejected("couple", 3)
+
+    def test_quote_rejects_sold_out_rooms(self):
+        self.assertRejected("group", 2, [{"stay_type": "airbnb_2bed", "occupants": [0]},
+                                         {"stay_type": "airbnb_2bed", "occupants": [1]}])
+
+    def test_deposit_threshold(self):
+        TravelPackage.objects.filter(pk=self.pkg.pk).update(
+            allow_installments=True, deposit_minimum=Decimal("1000"), deposit_threshold=Decimal("1000"))
+        self.pkg.refresh_from_db()
+        self.assertRejected("single", 1, plan="installment")  # $899 < $1,000 → pay in full
+        q = self.quote("couple", 2, plan="installment")
+        self.assertEqual(q.amount_due_today, Decimal("1000.00"))
+
+    # ── Holds, checkout, moves ────────────────────────────────────────────────
+
+    def checkout(self, token, mode="couple", n=2, rooms=None, **kwargs):
+        from .services import create_component_booking
+        rooms = rooms if rooms is not None else [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}]
+        return create_component_booking(
+            package=self.pkg, mode=mode, travellers=[{"name": f"G{i}"} for i in range(n)], rooms=rooms,
+            payment_plan="full", hold_token=token, accepted_policy_types=[],
+            contact={"first_name": "Ama", "last_name": "Owusu", "email": "ama@example.com"}, **kwargs,
+        )
+
+    def test_hold_blocks_others_until_it_expires(self):
+        from .pricing import QuoteError
+        from .services import create_hold
+        from packages.models import RoomUnit
+
+        token, _, units = create_hold(self.pkg, ["airbnb_2bed"])
+        with self.assertRaises(QuoteError):
+            create_hold(self.pkg, ["airbnb_2bed"])
+        RoomUnit.objects.filter(hold_token=token).update(held_until=timezone.now() - timedelta(seconds=1))
+        _, _, again = create_hold(self.pkg, ["airbnb_2bed"])
+        self.assertEqual(again[0].pk, units[0].pk)
+
+    def test_checkout_issues_one_core_ticket_per_traveller(self):
+        from .services import create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        booking = self.checkout(token)
+        self.assertEqual(booking.total_amount, Decimal("2597.66"))
+        self.assertEqual(booking.travellers.count(), 2)
+        unit = booking.room_units.get()
+        self.assertEqual(set(booking.travellers.values_list("unit", flat=True)), {unit.pk})
+        self.assertIsNotNone(unit.held_until)  # unpaid window, not yet sold
+
+    def test_checkout_with_expired_hold_is_refused(self):
+        from .pricing import QuoteError
+        from .services import create_hold
+        from packages.models import RoomUnit
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        RoomUnit.objects.filter(hold_token=token).update(held_until=timezone.now() - timedelta(seconds=1))
+        with self.assertRaises(QuoteError):
+            self.checkout(token)
+        self.assertFalse(Booking.objects.exists())
+
+    def test_move_traveller_never_adds_a_ticket(self):
+        from .services import IllegalTransition, create_hold, move_traveller
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed", "fp_standard"])
+        booking = self.checkout(token, mode="group", n=3, rooms=[
+            {"stay_type": "airbnb_1bed", "occupants": [0, 1]}, {"stay_type": "fp_standard", "occupants": [2]},
+        ])
+        hotel = booking.room_units.get(stay_type__code="fp_standard")
+        g0, g1, g2 = booking.travellers.order_by("created_at", "full_name")
+        with self.assertRaises(IllegalTransition):
+            move_traveller(g0, hotel)  # standard room already full
+        move_traveller(g2, None)
+        move_traveller(g0, hotel)
+        self.assertEqual(booking.travellers.count(), 3)
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_amount, Decimal("4705.71"))  # 2597.66 + 2108.05, not re-priced
+
+        other_token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        other = self.checkout(other_token)
+        with self.assertRaises(IllegalTransition):
+            move_traveller(g1, other.room_units.get())
+
+    def test_payment_sells_rooms_and_cancel_releases_them(self):
+        from payments.models import Payment
+        from payments.services import apply_successful_payment, generate_payment_reference
+        from .services import cancel_booking, create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_2bed"])
+        booking = self.checkout(token, mode="single", n=1, rooms=[{"stay_type": "airbnb_2bed", "occupants": [0]}])
+        payment = Payment.objects.create(
+            booking=booking, paystack_reference=generate_payment_reference(booking),
+            amount=booking.total_amount, currency=booking.currency,
+        )
+        result = apply_successful_payment(payment, None)
+        self.assertNotIn("room_lost", result.problems)
+        unit = booking.room_units.get()
+        self.assertIsNone(unit.held_until)
+        self.assertEqual(self.pkg.stay_types.get(code="airbnb_2bed").units_available(), 0)
+
+        cancel_booking(booking, reason=Booking.CancellationReason.ADMIN)
+        self.assertEqual(self.pkg.stay_types.get(code="airbnb_2bed").units_available(), 1)
+
+    def test_payment_after_lapsed_hold_is_flagged(self):
+        from payments.models import Payment
+        from payments.services import apply_successful_payment, generate_payment_reference
+        from packages.models import RoomUnit
+        from .services import create_hold
+
+        token, _, _ = create_hold(self.pkg, ["airbnb_2bed"])
+        booking = self.checkout(token, mode="single", n=1, rooms=[{"stay_type": "airbnb_2bed", "occupants": [0]}])
+        RoomUnit.objects.filter(booking=booking).update(held_until=timezone.now() - timedelta(seconds=1))
+        create_hold(self.pkg, ["airbnb_2bed"])  # someone else takes the lapsed unit
+        payment = Payment.objects.create(
+            booking=booking, paystack_reference=generate_payment_reference(booking),
+            amount=booking.total_amount, currency=booking.currency,
+        )
+        result = apply_successful_payment(payment, None)
+        self.assertIn("room_lost", result.problems)
+        payment.refresh_from_db()
+        self.assertTrue(payment.needs_review)
+
+    # ── API ───────────────────────────────────────────────────────────────────
+
+    def test_quote_endpoint_and_saved_quote_lead(self):
+        from .models import Lead
+
+        body = {"package_id": str(self.pkg.id), "mode": "single", "travellers": [{}],
+                "rooms": [{"stay_type": "airbnb_1bed", "occupants": [0]}]}
+        res = self.client.post("/api/bookings/quote/", body, content_type="application/json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["total"], "1725.63")
+
+        res = self.client.post("/api/leads/", {
+            "name": "Kofi", "email": "kofi@example.com", "source": "saved_quote",
+            "quote": {"total": "1.00"}, "selection": body,
+        }, content_type="application/json")
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get()
+        self.assertEqual(lead.quote["total"], "1725.63")  # server-priced, client value ignored
+        self.assertIsNotNone(lead.reply_due_at)
+
+    def test_hold_and_checkout_endpoints(self):
+        res = self.client.post("/api/bookings/holds/", {"package_id": str(self.pkg.id), "stay_types": ["fp_couple"]},
+                               content_type="application/json")
+        self.assertEqual(res.status_code, 201)
+        token = res.json()["token"]
+        res = self.client.post("/api/bookings/checkout/component/", {
+            "package_id": str(self.pkg.id), "mode": "couple", "hold_token": token,
+            "travellers": [{"name": "Ama Owusu"}, {"name": "Kojo Owusu"}],
+            "rooms": [{"stay_type": "fp_couple", "occupants": [0, 1]}],
+            "first_name": "Ama", "last_name": "Owusu", "email": "ama@example.com",
+            "expected_total": "3152.10",
+        }, content_type="application/json")
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()["total_amount"], "3152.10")

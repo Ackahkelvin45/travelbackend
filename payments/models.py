@@ -273,6 +273,26 @@ class OpsConfig(models.Model):
         help_text="Shown at checkout before payment, e.g. 'Prices include all taxes and the "
                   "Ghana tourism levy; no payment fees are added.' Leave empty to show nothing.",
     )
+    # ── Public contact details (blank = not yet confirmed; never publish placeholders)
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=30, blank=True)
+    whatsapp_number = models.CharField(max_length=30, blank=True)
+    emergency_phone = models.CharField(max_length=30, blank=True)
+    staffed_hours = models.CharField(max_length=200, blank=True, help_text="e.g. 'Mon–Sat, 9:00–18:00 GMT'")
+    legal_name = models.CharField(max_length=200, blank=True)
+    legal_address = models.TextField(blank=True)
+
+    # ── Checkout and CRM timings
+    hold_minutes = models.PositiveSmallIntegerField(default=15, help_text="How long rooms are held at checkout.")
+    lead_reply_hours = models.PositiveSmallIntegerField(default=24, help_text="Reply due this long after a lead arrives.")
+    coordinator_contact_hours = models.PositiveSmallIntegerField(
+        default=24, help_text="The coordinator must contact a new booking within this many hours.",
+    )
+    reminder_schedule_hours = models.JSONField(
+        default=list, blank=True,
+        help_text="Saved-quote / abandoned-checkout reminders, hours after the event, e.g. [24, 72]. "
+                  "Sent only with marketing consent.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -323,6 +343,9 @@ class EmailLog(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     booking = models.ForeignKey(
         "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="emails",
+    )
+    lead = models.ForeignKey(
+        "bookings.Lead", on_delete=models.SET_NULL, null=True, blank=True, related_name="emails",
     )
     kind = models.CharField(max_length=60, help_text="e.g. confirmation, receipt, reminder, overdue")
     to_email = models.EmailField()

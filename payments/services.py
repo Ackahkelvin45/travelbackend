@@ -196,6 +196,25 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
         booking.save(update_fields=["amount_paid", "status", "updated_at"]
                      + (["addons", "total_amount"] if addon_added else []))
 
+        # ── 5b. Component bookings: money in → held rooms become sold ────────
+        # A room whose unpaid window lapsed may have been resold; flag it.
+        rooms_expected = len((booking.quote_snapshot or {}).get("rooms", []))
+        if rooms_expected:
+            from packages.models import RoomUnit
+            rooms_kept = RoomUnit.objects.filter(booking=booking).update(held_until=None)
+            if rooms_kept < rooms_expected:
+                payment.needs_review = True
+                payment.review_note = (
+                    f"Booking {booking.reference} paid but holds {rooms_kept} of "
+                    f"{rooms_expected} rooms — the unpaid hold lapsed. Reassign a room."
+                )
+                payment.save(update_fields=["needs_review", "review_note", "updated_at"])
+                transaction.on_commit(
+                    lambda ref=booking.reference, note=payment.review_note:
+                        alert_admin(f"room-lost-{ref}", f"Booking {ref} lost a room", note)
+                )
+                result.problems.append("room_lost")
+
         result.applied = True
         result.fully_paid = booking.is_paid
 

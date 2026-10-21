@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from packages.models import TourDeparture, TravelPackage
-from .models import Booking
+from .models import Booking, BookingTraveller, Lead
 
 
 # Map frontend tier name → model field name
@@ -337,3 +337,75 @@ class ConfigurableCheckoutSerializer(serializers.Serializer):
         max_digits=12, decimal_places=2, required=False,
         help_text="The total the customer was shown. Mismatch returns 409 with a fresh quote.",
     )
+
+
+# ── Component pricing (Change Request v2) ─────────────────────────────────────
+
+class _TravellerInput(serializers.Serializer):
+    name = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    experiences = serializers.ListField(child=serializers.CharField(max_length=60), default=list, max_length=20)
+
+
+class _RoomInput(serializers.Serializer):
+    stay_type = serializers.CharField(max_length=60)
+    occupants = serializers.ListField(child=serializers.IntegerField(min_value=0), max_length=10)
+
+
+class ComponentQuoteSerializer(serializers.Serializer):
+    """Travellers by list index; rooms list their occupants by that index."""
+    package_id = serializers.UUIDField()
+    mode = serializers.ChoiceField(choices=["single", "couple", "group"])
+    travellers = _TravellerInput(many=True)
+    rooms = _RoomInput(many=True, default=list)
+    payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
+
+    def validate_travellers(self, value):
+        if not 1 <= len(value) <= 20:
+            raise serializers.ValidationError("Between 1 and 20 travellers per booking.")
+        return value
+
+
+class HoldSerializer(serializers.Serializer):
+    package_id = serializers.UUIDField()
+    stay_types = serializers.ListField(child=serializers.CharField(max_length=60), min_length=1, max_length=10)
+    replace_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
+
+
+class ComponentCheckoutSerializer(ComponentQuoteSerializer):
+    hold_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    first_name = serializers.CharField(max_length=100)
+    last_name = serializers.CharField(max_length=100)
+    email = serializers.EmailField()
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    country = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    special_requests = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    accepted_policies = serializers.ListField(child=serializers.CharField(), default=list)
+    marketing_consent = serializers.BooleanField(default=False)
+    expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
+
+
+class TravelInfoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BookingTraveller
+        fields = [
+            "id", "full_name", "is_lead", "arrival_at", "arrival_flight", "departure_at",
+            "departure_flight", "needs_transfer", "emergency_contact", "emergency_phone",
+            "dietary", "accessibility", "travel_info_submitted_at",
+        ]
+        read_only_fields = ["id", "full_name", "is_lead", "travel_info_submitted_at"]
+
+
+class LeadSerializer(serializers.ModelSerializer):
+    """Public lead capture. A saved quote sends its trip-builder ``selection``
+    and the server prices it — a client-supplied total is never stored."""
+    selection = ComponentQuoteSerializer(required=False, write_only=True)
+
+    class Meta:
+        model = Lead
+        fields = ["name", "email", "phone", "source", "message", "marketing_consent", "package",
+                  "referral_code", "selection"]
+
+    def validate_source(self, value):
+        if value not in (Lead.Source.CHAT, Lead.Source.SAVED_QUOTE, Lead.Source.CONTACT):
+            raise serializers.ValidationError("Unsupported source.")
+        return value
