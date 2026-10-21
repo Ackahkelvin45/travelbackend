@@ -168,12 +168,15 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     line_items = serializers.SerializerMethodField()
     cure_deadline = serializers.DateTimeField(read_only=True)
     cancellation_request = serializers.SerializerMethodField()
+    coordinator_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id",
             "reference",
+            "mode",
+            "coordinator_name",
             "first_name",
             "last_name",
             "email",
@@ -224,6 +227,10 @@ class BookingDetailSerializer(serializers.ModelSerializer):
 
     def get_balance(self, obj):
         return str(obj.balance)
+
+    def get_coordinator_name(self, obj):
+        """First name only — this serializer also backs the public status view."""
+        return obj.coordinator.first_name if obj.coordinator else None
 
     def get_payment_deadline(self, obj):
         return obj.effective_payment_deadline
