@@ -109,6 +109,7 @@ def initialize_transaction(
     callback_url: str | None = None,
     metadata: dict | None = None,
     channels: list[str] | None = None,
+    subaccount: str | None = None,
 ) -> dict:
     """
     POST /transaction/initialize (hosted checkout / Inline popup).
@@ -127,6 +128,11 @@ def initialize_transaction(
     }
     if channels:
         payload["channels"] = channels
+    if subaccount:
+        # Split settlement: the subaccount (created with a 0% main-account
+        # share) receives the charge and bears the Paystack fee.
+        payload["subaccount"] = subaccount
+        payload["bearer"] = "subaccount"
     if callback_url:
         payload["callback_url"] = callback_url
     if metadata:

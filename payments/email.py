@@ -593,3 +593,22 @@ def send_saved_quote(lead) -> None:
     <p style="margin:0;font-size:12px;color:#888;">Questions? Reply to this email and our team will help.</p>"""
     deliver("saved_quote", lead.email, "Your saved Ghana trip quote | Azura Travels",
             _shell("Your saved quote", body), lead=lead)
+
+
+def send_donation_receipt(donation) -> None:
+    """Thank-you and receipt for an Academy donation (separate from any booking receipt)."""
+    from django.utils import timezone
+
+    body = f"""
+    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Thank you, {html.escape(donation.donor_name)}</p>
+    <p style="margin:0 0 14px;font-size:14px;">Your donation to the Michael Blackson Academy has been received.</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 14px;font-size:13px;">
+      <tr><td style="padding:5px 0;">Donation</td><td align="right" style="padding:5px 0;font-weight:800;">{donation.currency} {donation.amount:,.2f}</td></tr>
+      <tr><td style="padding:5px 0;">Charged</td><td align="right" style="padding:5px 0;">{donation.charged_currency} {donation.charged_amount:,.2f}</td></tr>
+      <tr><td style="padding:5px 0;">Reference</td><td align="right" style="padding:5px 0;">{donation.reference}</td></tr>
+      <tr><td style="padding:5px 0;">Date</td><td align="right" style="padding:5px 0;">{(donation.paid_at or timezone.now()):%d %b %Y}</td></tr>
+    </table>
+    <p style="margin:0;font-size:12px;color:#888;">This donation is voluntary, separate from any travel booking, and goes to the Academy's own account.</p>"""
+    if deliver("donation_receipt", donation.donor_email, "Thank you for supporting the Academy | Azura Travels",
+               _shell("Donation receipt", body), booking=donation.booking):
+        type(donation).objects.filter(pk=donation.pk).update(receipt_sent_at=timezone.now())

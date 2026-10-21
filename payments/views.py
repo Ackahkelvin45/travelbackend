@@ -581,6 +581,19 @@ class PaystackWebhookView(APIView):
         if event_type not in ("charge.success", "charge.failed") or not reference:
             return Response(status=status.HTTP_200_OK)
 
+        if reference.startswith("DON-"):  # Academy donation: its own records, never a booking payment
+            from .donations import apply_donation
+            from .models import Donation
+            donation = Donation.objects.filter(reference=reference).first()
+            if donation and event_type == "charge.success":
+                verified = verify_transaction(reference)
+                if verified.get("status") == "success":
+                    apply_donation(donation, verified)
+            elif donation:
+                Donation.objects.filter(pk=donation.pk, status=Donation.Status.PENDING).update(
+                    status=Donation.Status.FAILED)
+            return Response(status=status.HTTP_200_OK)
+
         try:
             payment = Payment.objects.select_related("booking").get(paystack_reference=reference)
         except Payment.DoesNotExist:

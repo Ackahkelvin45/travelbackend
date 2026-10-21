@@ -843,6 +843,7 @@ class SiteSettingsView(APIView):
             "whatsapp_number": c.whatsapp_number, "emergency_phone": c.emergency_phone,
             "staffed_hours": c.staffed_hours, "legal_name": c.legal_name,
             "legal_address": c.legal_address, "hold_minutes": c.hold_minutes,
+            "donations_open": c.donations_enabled and bool(c.donation_subaccount),
         })
 
 
