@@ -330,6 +330,23 @@ def create_component_booking(
     return booking
 
 
+def send_balance_reminder(booking) -> bool:
+    """Email the balance reminder now (staff action). Paid, cancelled and
+    deadline-less bookings are skipped; returns whether an email went out."""
+    from django.utils import timezone
+
+    from bookings.management.commands.send_payment_reminders import _build_reminder_html
+    from payments.email import deliver
+
+    deadline = booking.effective_payment_deadline
+    if booking.status != Booking.Status.CONFIRMED or booking.is_paid or not deadline:
+        return False
+    days_left = max((deadline - timezone.localdate()).days, 0)
+    return deliver("reminder_manual", booking.email,
+                   f"Balance due {deadline.strftime('%b %d')} – {booking.reference} | Azura Travels",
+                   _build_reminder_html(booking, days_left), booking=booking)
+
+
 def publish_price_list(package, *, user=None, note: str = ""):
     """Snapshot the draft catalogue as the next live price list; the previous
     live version is retired. Existing bookings keep the version they bought."""
@@ -343,6 +360,27 @@ def publish_price_list(package, *, user=None, note: str = ""):
             package=package, number=(current[0].number + 1) if current else 1,
             snapshot=catalog_snapshot(package), note=note, published_by=user,
         )
+
+
+def reassign_unit(unit, target):
+    """Move a whole allocation (booking, hold expiry and its guests) to a free
+    unit of the same stay type — e.g. when a unit has to be blocked."""
+    from packages.models import RoomUnit
+
+    with transaction.atomic():
+        unit, target = (RoomUnit.objects.select_for_update().get(pk=u.pk) for u in (unit, target))
+        if not unit.booking_id:
+            raise IllegalTransition(f"{unit.label} has no booking to move.")
+        if target.stay_type_id != unit.stay_type_id:
+            raise IllegalTransition("Move to a unit of the same stay type (prices are per stay type).")
+        if not RoomUnit.objects.available().filter(pk=target.pk).exists():
+            raise IllegalTransition(f"{target.label} is not free.")
+        target.booking_id, target.held_until, target.hold_token = unit.booking_id, unit.held_until, ""
+        target.save(update_fields=["booking", "held_until", "hold_token"])
+        BookingTraveller.objects.filter(unit=unit).update(unit=target)
+        unit.booking, unit.held_until, unit.hold_token = None, None, ""
+        unit.save(update_fields=["booking", "held_until", "hold_token"])
+    return target
 
 
 def move_traveller(traveller, unit) -> BookingTraveller:

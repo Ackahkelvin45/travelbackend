@@ -1,0 +1,16 @@
+{% load package_admin %}
+{% if original %}{% price_list_panel original as p %}{% if p %}
+<div class="az-summary">
+  <div class="az-kpi"><span>Live price list</span>
+    <strong>{% if p.live %}v{{ p.live.number }}{% else %}None published{% endif %}</strong>
+    <span>{% if p.live %}{{ p.live.published_at|date:"d M Y H:i" }}{% else %}Customers see the draft until you publish{% endif %}</span></div>
+  <div class="az-kpi {% if p.draft_differs %}az-kpi--due{% endif %}"><span>Draft</span>
+    <strong>{% if p.draft_differs %}Unpublished changes{% else %}Same as live{% endif %}</strong>
+    <span>{% if p.draft_differs %}Use "Publish price list" above to make them live{% else %}Edit stays, experiences or savings to start a draft{% endif %}</span></div>
+  <div class="az-kpi {% if p.checks and p.passed != p.checks|length %}az-kpi--late{% endif %}"><span>Client acceptance totals (draft)</span>
+    <strong>{{ p.passed }} of {{ p.checks|length }} match</strong><span>Unconfirmed items are priced as if on sale</span></div>
+</div>
+{% if p.checks %}<details class="az-checks"><summary>Acceptance checks</summary>
+<table>{% for c in p.checks %}<tr class="{% if c.ok %}ok{% else %}bad{% endif %}"><td>{% if c.ok %}✓{% else %}✗{% endif %}</td><td>{{ c.label }}</td><td>USD {{ c.expected }}</td><td>{{ c.got }}</td></tr>{% endfor %}</table>
+</details>{% endif %}
+{% endif %}{% endif %}

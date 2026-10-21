@@ -452,16 +452,20 @@ def build_pricing_matrix(package, at=None) -> dict:
 
 # ── Component pricing (Change Request v2) ─────────────────────────────────────
 
-def catalog_snapshot(package) -> dict:
-    """The editable catalogue tables (the draft) as JSON-safe data."""
+def catalog_snapshot(package, *, everything_on_sale: bool = False) -> dict:
+    """The editable catalogue tables (the draft) as JSON-safe data.
+    everything_on_sale prices unconfirmed items too (acceptance checks only)."""
     from packages.models import PackageAddon, PackageDiscountRule
+    rules = package.discount_rules.filter(scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+    if not everything_on_sale:
+        rules = rules.filter(is_active=True)
 
     return {
         "core_price": str(package.base_price_per_person) if package.base_price_per_person is not None else None,
         "stay_types": [
             {"code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity, "min_occupancy": s.min_occupancy,
              "price_per_night": str(s.price_per_night), "nights": s.nights, "discount_percent": str(s.discount_percent),
-             "on_sale": s.on_sale, "note": s.note}
+             "on_sale": s.on_sale or everything_on_sale, "note": s.note}
             for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
         ],
         "experiences": [
@@ -471,7 +475,7 @@ def catalog_snapshot(package) -> dict:
         ],
         "bundles": [
             {"name": r.name, "percent": str(r.percent), "members": sorted(a.code for a in r.required_addons.all())}
-            for r in package.discount_rules.filter(is_active=True, scope=PackageDiscountRule.Scope.TRAVELLER_BUNDLE)
+            for r in rules
         ],
     }
 
@@ -507,6 +511,41 @@ def live_catalog(package) -> Catalog:
 
 def draft_catalog(package) -> Catalog:
     return _catalog(catalog_snapshot(package), None)
+
+
+# The client's acceptance totals (Change Request v2) — (label, mode, travellers'
+# experiences, rooms as (stay code, occupants), expected, compare) where
+# compare is "total" or "extras" (total minus Core).
+_BUNDLE = ["enzo_vip", "waterfall_massage", "farewell_dinner"]
+ACCEPTANCE_SCENARIOS = [
+    ("1 Core + 1-bed Airbnb", "single", [[]], [("airbnb_1bed", [0])], "1725.63", "total"),
+    ("2 Core + same 1-bed unit", "couple", [[], []], [("airbnb_1bed", [0, 1])], "2597.66", "total"),
+    ("4 Core + one 2-bed unit", "group", [[]] * 4, [("airbnb_2bed", [0, 1, 2, 3])], "4807.32", "total"),
+    ("1 Core + Four Points standard", "single", [[]], [("fourpoints_standard", [0])], "2108.05", "total"),
+    ("Couple + Four Points couple room", "couple", [[], []], [("fourpoints_couple", [0, 1])], "3152.10", "total"),
+    ("Two-person ENZO VIP", "couple", [["enzo_vip"], ["enzo_vip"]], [], "440.00", "extras"),
+    ("Two complete extras bundles", "couple", [_BUNDLE, _BUNDLE], [], "798.00", "extras"),
+    ("One bundle + one massage", "couple", [_BUNDLE, ["waterfall_massage"]], [], "499.00", "extras"),
+]
+
+
+def acceptance_checks(package) -> list:
+    """Price the client's acceptance scenarios against the DRAFT catalogue with
+    every item treated as on sale. [{label, expected, got, ok}]."""
+    cat = _catalog(catalog_snapshot(package, everything_on_sale=True), None)
+    results = []
+    for label, mode, exps, rooms, expected, compare in ACCEPTANCE_SCENARIOS:
+        try:
+            q = compute_component_quote(
+                package, mode=mode, travellers=[{"experiences": e} for e in exps],
+                rooms=[{"stay_type": c, "occupants": o} for c, o in rooms],
+                payment_plan="full", check_availability=False, catalog=cat,
+            )
+            got = q.total - q.core_total if compare == "extras" else q.total
+            results.append({"label": label, "expected": expected, "got": f"{got:.2f}", "ok": f"{got:.2f}" == expected})
+        except QuoteError as exc:
+            results.append({"label": label, "expected": expected, "got": str(exc), "ok": False})
+    return results
 
 
 def units_left(package, code: str, hold_token: str = "") -> int:

@@ -173,3 +173,41 @@ img[src*="/admin/img/logodark.png"] {
 .dark {
   scrollbar-color: var(--color-base-700) transparent;
 }
+
+/* ── Change Request v2 admin pieces ─────────────────────────────────────── */
+.az-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.az-kpi { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--color-base-200); border-radius: 12px; background: var(--color-base-50); }
+.dark .az-kpi { border-color: var(--color-base-800); background: var(--color-base-900); }
+.az-kpi > span:first-child { font-size: 12px; color: var(--color-base-500); }
+.az-kpi > strong { font-size: 18px; font-weight: 700; color: var(--color-base-900); }
+.dark .az-kpi > strong { color: var(--color-base-100); }
+.az-kpi > span:last-child:not(.az-bar):not(:first-child) { font-size: 12px; color: var(--color-base-500); }
+.az-kpi--late { border-color: #fecaca; background: #fef2f2; }
+.az-kpi--late > span:last-child { color: #b91c1c !important; font-weight: 600; }
+.az-kpi--due > span:last-child { color: #b45309 !important; font-weight: 600; }
+.az-bar { display: block; height: 6px; border-radius: 999px; background: color-mix(in srgb, var(--color-primary-500) 22%, transparent); overflow: hidden; }
+.az-bar > span { display: block; height: 100%; background: var(--color-primary-600); border-radius: inherit; }
+.az-paid { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
+.az-panel { max-width: 640px; display: flex; flex-direction: column; gap: 14px; padding: 24px 0; }
+.az-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.az-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; }
+.az-field select, .az-field input { border: 1px solid var(--color-base-300); border-radius: 8px; padding: 9px 10px; background: transparent; font: inherit; font-weight: 400; }
+.az-actions { display: flex; gap: 12px; align-items: center; }
+.az-btn { background: var(--color-primary-600); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font-weight: 700; cursor: pointer; }
+.az-link { color: var(--color-primary-700); font-weight: 600; }
+.az-checks { margin: -8px 0 20px; font-size: 13px; }
+.az-checks summary { cursor: pointer; font-weight: 600; color: var(--color-primary-700); }
+.az-checks table { margin-top: 8px; border-collapse: collapse; }
+.az-checks td { padding: 4px 12px 4px 0; }
+.az-checks tr.bad td { color: #b91c1c; font-weight: 600; }
+.az-checks tr.ok td:first-child { color: #15803d; }
+.az-rooms { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 8px; }
+.az-roomcard { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border: 1px solid var(--color-base-200); border-radius: 12px; text-decoration: none; color: inherit; }
+.dark .az-roomcard { border-color: var(--color-base-800); }
+.az-roomcard:hover { border-color: var(--color-primary-500); }
+.az-roomcard > span { font-size: 12px; color: var(--color-base-500); }
+.az-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.az-chips i { font-style: normal; font-weight: 600; font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.az-chips .sold { background: #dcfce7; color: #14532d; } .az-chips .held { background: #fef3c7; color: #78350f; }
+.az-chips .free { background: #dbeafe; color: #1e3a8a; } .az-chips .blocked { background: #fee2e2; color: #991b1b; }
+.az-note { font-size: 12px; color: var(--color-base-500); margin: 0 0 16px; }

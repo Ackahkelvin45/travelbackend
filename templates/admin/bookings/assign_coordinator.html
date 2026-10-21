@@ -1,0 +1,22 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Assign coordinator</h1>
+  <p class="text-subtle">The coordinator contacts each lead guest within 24 hours of payment.</p>
+  <form method="post">{% csrf_token %}
+    {% for b in bookings %}<input type="hidden" name="{{ action_checkbox_name }}" value="{{ b.pk }}">{% endfor %}
+    <input type="hidden" name="action" value="assign_coordinator">
+    <ul class="az-list">{% for b in bookings %}<li>{{ b.reference }} · {{ b.full_name }}</li>{% endfor %}</ul>
+    <label class="az-field">Coordinator
+      <select name="coordinator" required>
+        <option value="">Choose…</option>
+        {% for u in staff %}<option value="{{ u.pk }}">{{ u.full_name|default:u.email }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="az-actions">
+      <button type="submit" name="apply" value="1" class="az-btn">Assign to {{ bookings|length }} booking{{ bookings|length|pluralize }}</button>
+      <a href="." class="az-link">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

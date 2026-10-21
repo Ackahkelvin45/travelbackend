@@ -1,0 +1,14 @@
+{% load booking_admin %}
+{% if original %}{% booking_summary original as s %}
+<div class="az-summary">
+  <div class="az-kpi"><span>Total</span><strong>{{ original.currency }} {{ original.total_amount|floatformat:"2g" }}</strong></div>
+  <div class="az-kpi"><span>Paid</span><strong>{{ original.currency }} {{ original.amount_paid|floatformat:"2g" }}</strong>
+    <span class="az-bar"><span style="width:{{ s.paid_pct }}%"></span></span></div>
+  <div class="az-kpi"><span>Balance</span><strong>{{ original.currency }} {{ original.balance|floatformat:"2g" }}</strong></div>
+  <div class="az-kpi"><span>Balance due</span><strong>{{ s.deadline|date:"d M Y"|default:"—" }}</strong><span>Reminders 14, 7 and 1 days before</span></div>
+  <div class="az-kpi az-kpi--{{ s.sla_state }}"><span>Coordinator · 24-hour contact</span>
+    <strong>{{ s.coordinator|default:"Unassigned" }}</strong><span>{{ s.sla_text }}</span></div>
+  <div class="az-kpi"><span>Checklist</span><strong>{{ s.checks_done }} of {{ s.checks_total }}</strong>
+    <span class="az-bar"><span style="width:{{ s.checks_pct }}%"></span></span></div>
+</div>
+{% endif %}
