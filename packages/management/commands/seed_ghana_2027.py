@@ -29,6 +29,11 @@ from packages.models import (
 )
 
 SLUG = "michael-blackson-ghana-experience"
+# Not in the final change request (v4, 14 Oct 2026): the original option-based
+# flagship (its Marriott/premium tiers are to be removed) and the August day
+# tours. Switched off, never deleted; re-enable in the admin if Azura confirms
+# any as December offerings.
+RETIRED_SLUGS = ["ghana-flagship-tour-2027", "accra-city-tour", "akosombo-trip", "cape-coast-tour", "ada-tour", "aburi-tour"]
 
 # (code, name, kind, capacity, min_occupancy, $/night, nights, on_sale, units, note)
 # ponytail: unit counts are placeholders until the client confirms inventory; edit in admin.
@@ -112,6 +117,9 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        retired = TravelPackage.objects.filter(slug__in=RETIRED_SLUGS, is_active=True).update(is_active=False)
+        if retired:
+            self.stdout.write(f"Switched off {retired} package(s) not in the final change request.")
         pkg = TravelPackage.objects.filter(slug=SLUG).first()
         if pkg is None:
             self.stderr.write("Run seed_michael_blackson first — the flagship package does not exist.")
