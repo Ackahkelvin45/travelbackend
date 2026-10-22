@@ -829,10 +829,20 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
     return quote
 
 
-def build_component_matrix(package) -> dict:
+def build_component_matrix(package, request=None) -> dict:
     """Catalogue for the trip builder (the live price list). Display only:
-    totals always come from the quote endpoint, never client-side arithmetic."""
+    totals always come from the quote endpoint, never client-side arithmetic.
+    Stay details and photos come from the stay rows (not price-versioned)."""
     cat = live_catalog(package)
+    url = (lambda u: request.build_absolute_uri(u)) if request else (lambda u: u)
+    shown = {
+        s.code: {
+            "bedding": s.bedding, "breakfast": s.breakfast, "location": s.location,
+            "amenities": [a.strip() for a in s.amenities.splitlines() if a.strip()],
+            "images": [{"url": url(i.image.url), "alt": i.alt_text} for i in s.images.all()],
+        }
+        for s in package.stay_types.prefetch_related("images")
+    }
     return {
         "package_id": str(package.id),
         "pricing_model": "component",
@@ -848,6 +858,7 @@ def build_component_matrix(package) -> dict:
                 "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
                 "on_sale": s.on_sale, "note": s.note,
                 "units_available": units_left(package, s.code) if s.on_sale else 0,
+                **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": []}),
             }
             for s in cat.stay_types.values()
         ],

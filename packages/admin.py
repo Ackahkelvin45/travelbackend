@@ -21,6 +21,7 @@ from .models import (
     PackageVideo,
     PriceListVersion,
     RoomUnit,
+    StayImage,
     StayType,
     TourDeparture,
     TravelPackage,
@@ -421,6 +422,35 @@ class StayTypeInline(TabularInline):
     verbose_name_plural = "Stays"
     fields = ["code", "name", "kind", "capacity", "min_occupancy", "price_per_night", "nights",
               "on_sale", "note", "order"]
+    show_change_link = True  # photos, bedding, amenities: on the stay's own page
+
+
+class StayImageInline(ImagePreviewMixin, TabularInline):
+    model = StayImage
+    extra = 1
+    fields = ["image_preview", "image", "alt_text", "order"]
+    readonly_fields = ["image_preview"]
+
+
+@admin.register(StayType)
+class StayTypeAdmin(ModelAdmin):
+    """What guests see on the Stays page. Prices and capacity are edited on the
+    package (Stays tab) and go live with "Publish price list"."""
+    list_display = ["name", "package", "kind", "photo_count", "on_sale"]
+    list_filter = [("package", RelatedDropdownFilter)]
+    readonly_fields = ["package", "code", "kind", "capacity", "price_per_night", "nights", "on_sale"]
+    fieldsets = (
+        ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note")}),
+        ("Shown on the Stays page", {"fields": ("bedding", "amenities", "breakfast", "location")}),
+    )
+    inlines = [StayImageInline]
+
+    @admin.display(description="Photos")
+    def photo_count(self, obj):
+        return obj.images.count()
+
+    def has_add_permission(self, request):
+        return False  # stays are added on the package
 
 
 class PriceListVersionInline(TabularInline):

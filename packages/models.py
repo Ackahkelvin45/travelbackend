@@ -584,6 +584,11 @@ class StayType(models.Model):
     nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
     on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
     note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
+    bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
+    amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")
+    breakfast = models.CharField(max_length=200, blank=True, help_text="e.g. 'Not included' or 'Buffet breakfast included'.")
+    location = models.CharField(max_length=200, blank=True, help_text="Area and what's nearby, e.g. 'Airport Residential, 10 min to Osu'.")
     order = models.PositiveIntegerField(default=0)
 
     class Meta:
@@ -603,6 +608,22 @@ class StayType(models.Model):
         if not hold_token:
             return free
         return free + self.units.filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now).count()
+
+
+class StayImage(models.Model):
+    """An approved property photo for the Stays page; alt text is required (accessibility)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stay_type = models.ForeignKey(StayType, on_delete=models.CASCADE, related_name="images")
+    image = models.ImageField(upload_to="stays/images/")
+    alt_text = models.CharField(max_length=200, help_text="What the photo shows, e.g. 'Bedroom with king bed and city view'.")
+    order = models.PositiveIntegerField(default=0, help_text="Lower first; the first photo is the card cover.")
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return self.alt_text
 
 
 class RoomUnitQuerySet(models.QuerySet):

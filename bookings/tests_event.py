@@ -175,3 +175,24 @@ class AfterBookingTests(TestCase):
         self.assertEqual(booking.total_amount, Decimal("4547.00"))  # 4,597 − 100 + 50 fee
         self.assertEqual(sum(t.share for t in booking.travellers.all()), booking.total_amount)
         self.assertContains(self.client.get(f"{url}/change/"), "Emails sent")
+
+    # ── Stays page details and photos (Change Request v4 §1) ─────────────────
+
+    def test_stays_show_details_and_photos_with_alt_text(self):
+        import tempfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.test import override_settings
+        from packages.models import StayImage, StayType
+
+        with override_settings(MEDIA_ROOT=tempfile.mkdtemp()):
+            st = StayType.objects.get(package=self.pkg, code="airbnb_1bed")
+            st.bedding, st.amenities, st.breakfast = "One queen bed", "Wi-Fi\n\nAir conditioning\n", "Not included"
+            st.save()
+            StayImage.objects.create(stay_type=st, alt_text="Bedroom with queen bed",
+                                     image=SimpleUploadedFile("bed.gif", b"GIF89a", content_type="image/gif"))
+            data = self.client.get(f"/api/packages/{self.pkg.id}/pricing/").json()
+        stay = next(s for s in data["stay_types"] if s["code"] == "airbnb_1bed")
+        self.assertEqual((stay["bedding"], stay["amenities"], stay["breakfast"]),
+                         ("One queen bed", ["Wi-Fi", "Air conditioning"], "Not included"))
+        self.assertEqual(stay["images"][0]["alt"], "Bedroom with queen bed")
+        self.assertTrue(stay["images"][0]["url"].startswith("http://testserver/media/stays/images/"))

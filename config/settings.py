@@ -366,6 +366,8 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
+# Staff sign in at /admin/login/; without ?next= Django would send them to /accounts/profile/ (404).
+LOGIN_REDIRECT_URL = "/admin/"
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://azuratravels.live")
