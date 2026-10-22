@@ -52,7 +52,7 @@ def _confirmation_threshold(booking):
     """
     deposit_required = getattr(booking, "deposit_required", None)
     payment_plan = getattr(booking, "payment_plan", None)
-    if payment_plan == "installment" and deposit_required:
+    if deposit_required and (payment_plan == "installment" or getattr(booking, "pay_separately", False)):
         return min(deposit_required, booking.total_amount)
     return booking.total_amount
 
@@ -192,9 +192,33 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
         ):
             booking.status = Booking.Status.CONFIRMED
             result.promoted = True
+            # Paid: the guest's open leads are won, which stops sales reminders.
+            from bookings.models import Lead
+            Lead.objects.filter(email__iexact=booking.email).exclude(
+                stage__in=[Lead.Stage.WON, Lead.Stage.LOST],
+            ).update(stage=Lead.Stage.WON, booking=booking)
 
         booking.save(update_fields=["amount_paid", "status", "updated_at"]
                      + (["addons", "total_amount"] if addon_added else []))
+
+        # ── 5b. Component bookings: required payment in → held rooms become sold
+        # A room whose checkout window lapsed may have been resold; flag it.
+        rooms_expected = len((booking.quote_snapshot or {}).get("rooms", []))
+        if rooms_expected and booking.status == Booking.Status.CONFIRMED:
+            from packages.models import RoomUnit
+            rooms_kept = RoomUnit.objects.filter(booking=booking).update(held_until=None)
+            if rooms_kept < rooms_expected:
+                payment.needs_review = True
+                payment.review_note = (
+                    f"Booking {booking.reference} paid but holds {rooms_kept} of "
+                    f"{rooms_expected} rooms — the unpaid hold lapsed. Reassign a room."
+                )
+                payment.save(update_fields=["needs_review", "review_note", "updated_at"])
+                transaction.on_commit(
+                    lambda ref=booking.reference, note=payment.review_note:
+                        alert_admin(f"room-lost-{ref}", f"Booking {ref} lost a room", note)
+                )
+                result.problems.append("room_lost")
 
         result.applied = True
         result.fully_paid = booking.is_paid
@@ -216,6 +240,11 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                     send_payment_receipt(b, p)
             except Exception:
                 logger.exception("Post-commit email failed for booking %s", booking_id)
+            try:
+                from .whatsapp_notify import send_payment_whatsapp
+                send_payment_whatsapp(Booking.objects.get(pk=booking_id))
+            except Exception:
+                logger.exception("Post-commit WhatsApp failed for booking %s", booking_id)
 
         if "terminal_booking" not in result.problems:
             transaction.on_commit(_send)

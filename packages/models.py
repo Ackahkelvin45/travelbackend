@@ -160,6 +160,11 @@ class TravelPackage(models.Model):
                   "the minimum for each guest, capped at that guest's share of the "
                   "total (so a $878 guest pays $878, never the $1,000 minimum).",
     )
+    accommodation_deposit_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=50,
+        help_text="Component pricing only: share of each room's price paid at booking to secure it. "
+                  "Core tickets, experiences and transfers are always paid in full.",
+    )
     final_payment_deadline = models.DateField(
         null=True, blank=True,
         help_text="Installment balances must be fully paid by this date. "
@@ -239,6 +244,7 @@ class TravelPackage(models.Model):
         OPTION_BASED = "option_based", "Option-based (hotel × occupancy)"
         FLAT = "flat", "Flat per-person (day tour / legacy)"
         CORE_PLUS_ADDONS = "core_plus_addons", "Core tour + optional add-ons"
+        COMPONENT = "component", "Core per traveller + rooms per unit + experiences per guest"
 
     pricing_model = models.CharField(
         max_length=20, choices=PricingModel.choices, default=PricingModel.FLAT,
@@ -310,7 +316,7 @@ class TravelPackage(models.Model):
         ]
         if prices:
             return min(prices)
-        if self.pricing_model == self.PricingModel.CORE_PLUS_ADDONS and self.base_price_per_person is not None:
+        if self.pricing_model in (self.PricingModel.CORE_PLUS_ADDONS, self.PricingModel.COMPONENT) and self.base_price_per_person is not None:
             return self.base_price_per_person
         return self.price_shared
 
@@ -520,6 +526,7 @@ class PackageAddon(models.Model):
     class Unit(models.TextChoices):
         PER_PERSON = "per_person", "Per person (× guests)"
         PER_BOOKING = "per_booking", "Per booking (flat)"
+        PER_VEHICLE = "per_vehicle", "Per vehicle (component model: guests share up to vehicle capacity)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="addons")
@@ -537,6 +544,11 @@ class PackageAddon(models.Model):
     refundable = models.BooleanField(
         default=True, help_text="Untick for non-refundable components (excluded from refunds).",
     )
+    adults_only = models.BooleanField(default=False, help_text="Guests must confirm they are 18 or over.")
+    requires_stay = models.BooleanField(
+        default=False, help_text="Only for guests staying in Azura accommodation (e.g. airport transfers).",
+    )
+    vehicle_capacity = models.PositiveSmallIntegerField(default=2, help_text="Per vehicle unit only: guests per vehicle.")
     order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 
@@ -550,19 +562,132 @@ class PackageAddon(models.Model):
         return f"{self.package.title} — {self.name} ({self.price} {self.get_unit_display()})"
 
 
+class StayType(models.Model):
+    """An accommodation product for the component pricing model, priced per
+    unit per night: a unit is charged once whatever its occupancy, for a fixed
+    block of nights (Change Request v4: Airbnb 5, Four Points 4)."""
+
+    class Kind(models.TextChoices):
+        AIRBNB = "airbnb", "Airbnb"
+        HOTEL = "hotel", "Hotel"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="stay_types")
+    code = models.SlugField(help_text="Stable machine code, e.g. 'airbnb_1bed'.")
+    name = models.CharField(max_length=200)
+    kind = models.CharField(max_length=10, choices=Kind.choices)
+    capacity = models.PositiveSmallIntegerField(help_text="Maximum occupants per unit.")
+    min_occupancy = models.PositiveSmallIntegerField(
+        default=1, help_text="e.g. 2 for a couple room that must be shared.",
+    )
+    price_per_night = models.DecimalField(max_digits=12, decimal_places=2, help_text="Per unit, package currency.")
+    nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
+    on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
+    note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
+    bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
+    amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")
+    breakfast = models.CharField(max_length=200, blank=True, help_text="e.g. 'Not included' or 'Buffet breakfast included'.")
+    location = models.CharField(max_length=200, blank=True, help_text="Area and what's nearby, e.g. 'Airport Residential, 10 min to Osu'.")
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["order", "name"]
+        constraints = [
+            models.UniqueConstraint(fields=["package", "code"], name="unique_stay_code_per_package"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.price_per_night}/night, max {self.capacity})"
+
+    def units_available(self, now=None, hold_token=""):
+        """Free units, plus any this checkout already holds (its own hold is not competition)."""
+        from django.utils import timezone
+        now = now or timezone.now()
+        free = RoomUnit.objects.available(now).filter(stay_type=self).count()
+        if not hold_token:
+            return free
+        return free + self.units.filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now).count()
+
+
+class StayImage(models.Model):
+    """An approved property photo for the Stays page; alt text is required (accessibility)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stay_type = models.ForeignKey(StayType, on_delete=models.CASCADE, related_name="images")
+    image = models.ImageField(upload_to="stays/images/")
+    alt_text = models.CharField(max_length=200, help_text="What the photo shows, e.g. 'Bedroom with king bed and city view'.")
+    order = models.PositiveIntegerField(default=0, help_text="Lower first; the first photo is the card cover.")
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return self.alt_text
+
+
+class RoomUnitQuerySet(models.QuerySet):
+    def available(self, now=None):
+        """Free = not blocked, not sold, and any hold has run out. An expired
+        hold needs no sweeper to stop blocking a sale."""
+        from django.utils import timezone
+        now = now or timezone.now()
+        return self.filter(blocked=False).filter(
+            models.Q(booking__isnull=True) | models.Q(held_until__isnull=False)
+        ).exclude(held_until__gt=now)
+
+
+class RoomUnit(models.Model):
+    """One sellable room/apartment, allocated for the whole stay.
+
+    State lives on the row: booking set + held_until empty = sold; held_until
+    in the future = held (checkout hold, or an unpaid booking's window);
+    otherwise free. Claims lock the row (select_for_update)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stay_type = models.ForeignKey(StayType, on_delete=models.CASCADE, related_name="units")
+    label = models.CharField(max_length=60, help_text="e.g. 'Airbnb 1-bed A'.")
+    blocked = models.BooleanField(default=False, help_text="Stop selling this unit.")
+    booking = models.ForeignKey(
+        "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="room_units",
+    )
+    hold_token = models.CharField(max_length=40, blank=True, db_index=True)
+    held_until = models.DateTimeField(null=True, blank=True)
+
+    objects = RoomUnitQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["stay_type__order", "label"]
+
+    def __str__(self):
+        return self.label
+
+
 class PackageDiscountRule(models.Model):
     """A bundle discount: applies `percent` off the subtotal when EVERY add-on in
     `required_addons` is in the cart. Discounts never stack — the pricing engine
     applies only the single highest qualifying rule (max percent wins). This
-    reproduces the doc's 5/7/10/12/15% ladder with no negative conditions."""
+    reproduces the doc's 5/7/10/12/15% ladder with no negative conditions.
+
+    Component model: GROUP_ACCOMMODATION rules take `percent` off the room
+    charges only (never Core) once the booking has `min_travellers`; the
+    highest qualifying rule wins (Change Request v4 §5)."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
+    class Scope(models.TextChoices):
+        CART = "cart", "Whole cart, highest rule wins (core + add-ons model)"
+        GROUP_ACCOMMODATION = "group_accommodation", "Group size, accommodation only (component model)"
+
     name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
+    scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.CART)
     percent = models.DecimalField(max_digits=5, decimal_places=2, help_text="e.g. 10.00 for 10%.")
+    min_travellers = models.PositiveSmallIntegerField(
+        null=True, blank=True, help_text="Group accommodation rules: smallest qualifying group.",
+    )
     required_addons = models.ManyToManyField(
-        PackageAddon, related_name="discount_rules",
-        help_text="ALL of these must be in the cart for the rule to qualify.",
+        PackageAddon, related_name="discount_rules", blank=True,
+        help_text="Whole-cart rules: ALL of these must be in the cart for the rule to qualify.",
     )
     is_active = models.BooleanField(default=True)
 
@@ -580,6 +705,7 @@ class PackageFAQ(models.Model):
         on_delete=models.CASCADE,
         related_name="faqs",
     )
+    topic = models.CharField(max_length=40, blank=True, help_text="Groups the FAQ page, e.g. 'Trip', 'Stays', 'Payments'.")
     question = models.CharField(max_length=300)
     answer = models.TextField()
     order = models.PositiveIntegerField(default=0, help_text="Display order (lower = first)")
@@ -650,3 +776,33 @@ class TripUpdate(models.Model):
             from django.utils import timezone
             self.published_at = timezone.now()
         super().save(*args, **kwargs)
+
+
+class PriceListVersion(models.Model):
+    """A published, immutable snapshot of a component package's prices (Core,
+    stays, experiences, bundles). Staff edit the catalogue tables as a draft;
+    publishing snapshots them as the next live version. Quotes, checkout and
+    receipts price from the live snapshot, and each booking records the version
+    it was sold under. Deposit rules and deadlines stay live on the package."""
+
+    class Status(models.TextChoices):
+        LIVE = "live", "Live"
+        RETIRED = "retired", "Retired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="price_lists")
+    number = models.PositiveIntegerField()
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
+    snapshot = models.JSONField()
+    note = models.CharField(max_length=300, blank=True, help_text="What changed, e.g. 'Couple room confirmed at $380'.")
+    published_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    published_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-number"]
+        constraints = [models.UniqueConstraint(fields=["package", "number"], name="unique_price_list_number")]
+
+    def __str__(self):
+        return f"{self.package.title} · price list v{self.number} ({self.status})"

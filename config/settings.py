@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from datetime import timedelta
+from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.utils.translation import gettext_lazy as _
 import os
@@ -33,9 +34,8 @@ load_dotenv(BASE_DIR / _env_file)
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45",  # dev fallback only
+SECRET_KEY = os.environ.get("SECRET_KEY") or (
+    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45"  # dev fallback only
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -80,16 +80,41 @@ INSTALLED_APPS = [
     "reviews",
     "blog",
     'rest_framework',
+    # Refresh tokens are revoked on logout and on every rotation.
+    'rest_framework_simplejwt.token_blacklist',
     'drf_yasg',
     "corsheaders",
 ]
 
+
+
+def _nav(title, items, separator=True):
+    """One sidebar group: (label, material icon, link, badge callable path)."""
+    return {
+        "title": _(title), "separator": separator, "collapsible": False,
+        "items": [
+            {"title": _(label), "icon": icon, "link": link,
+             "permission": lambda request: request.user.is_staff, **({"badge": badge} if badge else {})}
+            for label, icon, link, badge in items
+        ],
+    }
+
+
+def _tabs(base, param, items):
+    """Changelist tabs that filter by one query parameter; active when it matches."""
+    return [
+        {"title": _(label), "link": f"{base}?{param}={value}" if value else base,
+         "active": (lambda v: lambda request: request.GET.get(param, "") == v)(value)}
+        for label, value in items
+    ]
+
 UNFOLD = {
-    "SITE_TITLE": "Travel & Tour",
+    "SITE_TITLE": "Azura Travels Admin",
     "DASHBOARD_CALLBACK": "config.dashboard.dashboard_callback",
-    "SITE_HEADER": "Travel & Tour Admin",
+    "SITE_HEADER": "Azura Admin",
     "SITE_SUBHEADER": "Management Portal",
-    "SITE_URL": "/",
+    # Header link and the sign-in page's "manage it on the website" link.
+    "SITE_URL": lambda request: FRONTEND_URL,
     "SITE_SYMBOL": "travel_explore",
     "SHOW_HISTORY": True,
     "SHOW_VIEW_ON_SITE": True,
@@ -126,147 +151,59 @@ UNFOLD = {
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": True,
+        # Grouped by job (canvas: Django admin row). Badges count work waiting.
         "navigation": [
-            {
-                "title": _("Overview"),
-                "separator": False,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Dashboard"),
-                        "icon": "dashboard",
-                        "link": "/admin/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
-            {
-                "title": _("Users & Auth"),
-                "separator": True,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Users"),
-                        "icon": "people",
-                        "link": "/admin/accounts/user/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Newsletter"),
-                        "icon": "mail",
-                        "link": "/admin/newsletter/newslettersubscriber/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
-            {
-                "title": _("Packages"),
-                "separator": True,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Destinations"),
-                        "icon": "place",
-                        "link": "/admin/packages/destination/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Travel Packages"),
-                        "icon": "luggage",
-                        "link": "/admin/packages/travelpackage/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Trip Updates"),
-                        "icon": "campaign",
-                        "link": "/admin/packages/tripupdate/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
-            {
-                "title": _("Bookings & Payments"),
-                "separator": True,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Bookings"),
-                        "icon": "book_online",
-                        "link": "/admin/bookings/booking/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Payments"),
-                        "icon": "payments",
-                        "link": "/admin/payments/payment/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Refunds"),
-                        "icon": "currency_exchange",
-                        "link": "/admin/payments/refund/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Exchange Rates"),
-                        "icon": "trending_up",
-                        "link": "/admin/payments/fxrate/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Scheduled Tasks"),
-                        "icon": "schedule",
-                        "link": "/admin/payments/scheduledtask/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Operational Settings"),
-                        "icon": "settings",
-                        "link": "/admin/payments/opsconfig/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Policy Documents"),
-                        "icon": "gavel",
-                        "link": "/admin/bookings/policydocument/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
-            {
-                "title": _("Reviews"),
-                "separator": True,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Reviews"),
-                        "icon": "star",
-                        "link": "/admin/reviews/review/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
-            {
-                "title": _("Blog"),
-                "separator": True,
-                "collapsible": False,
-                "items": [
-                    {
-                        "title": _("Blog Posts"),
-                        "icon": "article",
-                        "link": "/admin/blog/blog/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                    {
-                        "title": _("Blog Approvals"),
-                        "icon": "rate_review",
-                        "link": "/admin/blog/pendingblog/",
-                        "permission": lambda request: request.user.is_staff,
-                    },
-                ],
-            },
+            _nav("Overview", [
+                ("Dashboard", "dashboard", "/admin/", None),
+                ("Reports", "bar_chart", "/admin/reports/", None),
+            ], separator=False),
+            _nav("Sales & CRM", [
+                ("Leads & quotes", "group", "/admin/bookings/lead/", "config.dashboard.badge_leads"),
+                ("Newsletter", "mail", "/admin/newsletter/newslettersubscriber/", None),
+            ]),
+            _nav("Bookings", [
+                ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
+                ("Room allocation", "bed", "/admin/packages/roomunit/", None),
+                ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
+                ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
+            ]),
+            _nav("Money", [
+                ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
+                ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
+                ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
+                ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
+            ]),
+            _nav("Catalogue", [
+                ("Packages & pricing", "luggage", "/admin/packages/travelpackage/", None),
+                ("Trip updates", "campaign", "/admin/packages/tripupdate/", None),
+                ("Destinations", "place", "/admin/packages/destination/", None),
+            ]),
+            _nav("Content", [
+                ("Policy documents", "gavel", "/admin/bookings/policydocument/", None),
+                ("Reviews", "star", "/admin/reviews/review/", None),
+                ("Blog posts", "article", "/admin/blog/blog/", None),
+                ("Blog approvals", "rate_review", "/admin/blog/pendingblog/", None),
+            ]),
+            _nav("System", [
+                ("Users & staff", "people", "/admin/accounts/user/", None),
+                ("Settings", "settings", "/admin/payments/opsconfig/", None),
+                ("Scheduled tasks", "schedule", "/admin/payments/scheduledtask/", None),
+            ]),
         ],
     },
+    # Work-queue tabs above the bookings and leads lists.
+    "TABS": [
+        {"models": ["bookings.booking"], "items": _tabs("/admin/bookings/booking/", "queue", [
+            ("All", ""), ("Needs coordinator", "needs_coordinator"), ("Contact overdue", "contact_overdue"),
+            ("Balance due", "balance_due"), ("Paid in full", "paid"), ("Pending payment", "pending"), ("Cancelled", "cancelled"),
+        ])},
+        {"models": ["bookings.lead"], "items": _tabs("/admin/bookings/lead/", "stage__exact", [
+            ("All", ""), ("New", "new"), ("Contacted", "contacted"), ("Saved quotes", "quoted"), ("Converted", "won"), ("Lost", "lost"),
+        ])},
+        {"models": ["payments.payment"], "items": _tabs("/admin/payments/payment/", "needs_review__exact", [
+            ("All", ""), ("Needs review", "1"),
+        ])},
+    ],
 }
 
 
@@ -289,17 +226,29 @@ REST_FRAMEWORK = {
         'payments': '30/min',
         'payment-status': '120/min',
         'booking-status': '60/min',
+        # Trip builder re-quotes on every change; holds/checkout/leads write rows.
+        'quote': '120/min',
+        'holds': '20/min',
+        'leads': '10/min',
+        # Each assistant message is a paid model call.
+        'assistant': '20/min',
         # Email verification / resend — cheap to abuse (email spam), so cap it.
         'auth': '10/min',
         # Live password-rule check from the signup form — generous for typing,
         # capped so it can't be abused as a password-guessing oracle.
         'password_check': '60/min',
+        # Anonymous review posting: spam cap.
+        'reviews': '5/hour',
     },
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    # Short access tokens; each refresh issues a new refresh token and revokes
+    # the old one, so a copied refresh token stops working once either side uses it.
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'TOKEN_OBTAIN_SERIALIZER': 'accounts.jwt_serializers.VerifiedEmailTokenObtainPairSerializer',
 }
@@ -325,6 +274,22 @@ AUTOTASKS_ENABLED = "test" not in sys.argv
 
 # Trust the X-Forwarded-Proto header from the proxy (Nginx)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+if os.environ.get("DJANGO_ENV") == "production":
+    if DEBUG:
+        raise ImproperlyConfigured("DEBUG must be False in production (set DEBUG=False in .env.prod).")
+    if SECRET_KEY.startswith("django-insecure-"):
+        raise ImproperlyConfigured("SECRET_KEY is missing from .env.prod; refusing to sign sessions and tokens with the dev key.")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    # Off by default: TLS ends before Nginx (which listens on :80), so Django
+    # can't always tell a request was HTTPS and a redirect here could loop.
+    # Turn on once the proxy forwards X-Forwarded-Proto: https.
+    SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
+    SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
+    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = ("rest_framework.renderers.JSONRenderer",)
 
 ROOT_URLCONF = "config.urls"
 
@@ -368,6 +333,8 @@ if _db_url.startswith("postgres"):
             "CONN_MAX_AGE": 60,  # persistent connections
         }
     }
+elif os.environ.get("DJANGO_ENV") == "production":
+    raise ImproperlyConfigured("DATABASE_URL must be a postgres:// URL in production; refusing to fall back to SQLite.")
 else:
     DATABASES = {
         "default": {
@@ -425,6 +392,8 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
+# Staff sign in at /admin/login/; without ?next= Django would send them to /accounts/profile/ (404).
+LOGIN_REDIRECT_URL = "/admin/"
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://azuratravels.live")
@@ -462,3 +431,17 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 # ── Resend ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
+
+# ── Guest assistant (site chat + WhatsApp) ───────────────────────────────────
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "deepseek-chat")
+# WhatsApp Cloud API (Meta app → WhatsApp → API setup). Unset = webhook rejects everything.
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
+WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
+
+# Framework emails (admin password reset) go through Resend like every other email.
+EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"
+DEFAULT_FROM_EMAIL = RESEND_FROM_EMAIL

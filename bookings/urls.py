@@ -9,6 +9,12 @@ from .views import (
     CancellationQuoteView,
     CancellationRequestView,
     ClaimBookingView,
+    ComponentCheckoutView,
+    ComponentQuoteView,
+    HoldView,
+    TravellerShareView,
+    TravelInfoView,
+    BookingPreferencesView,
     CreateBookingView,
     MyBookingsView,
 )
@@ -25,6 +31,13 @@ urlpatterns = [
     # POST — core + add-ons checkout (Michael Blackson style)
     path("checkout/configurable/", ConfigurableCheckoutView.as_view(), name="checkout-configurable"),
 
+    # Component pricing (Change Request v2): quote → hold → checkout
+    path("quote/", ComponentQuoteView.as_view(), name="quote"),
+    path("holds/", HoldView.as_view(), name="holds"),
+    path("holds/<str:token>/", HoldView.as_view(), name="hold-release"),
+    path("checkout/component/", ComponentCheckoutView.as_view(), name="checkout-component"),
+    path("share/<uuid:traveller_id>/", TravellerShareView.as_view(), name="traveller-share"),
+
     # GET — currently-published policy documents (accepted at checkout)
     path("policies/", CurrentPoliciesView.as_view(), name="policies"),
 
@@ -36,6 +49,8 @@ urlpatterns = [
 
     # Owner-only cancellation: preview the refund, then lodge the request
     path("<str:reference>/addons/available/", AvailableAddonsView.as_view(), name="addons-available"),
+    path("<str:reference>/travel/", TravelInfoView.as_view(), name="travel-info"),
+    path("<str:reference>/preferences/", BookingPreferencesView.as_view(), name="preferences"),
     path("<str:reference>/cancellation-quote/", CancellationQuoteView.as_view(), name="cancellation-quote"),
     path("<str:reference>/cancellation-request/", CancellationRequestView.as_view(), name="cancellation-request"),
 

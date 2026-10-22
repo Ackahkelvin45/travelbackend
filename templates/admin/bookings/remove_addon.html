@@ -1,0 +1,26 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Remove an add-on · {{ booking.reference }}</h1>
+  <p class="text-subtle">50% of the add-on's price is kept as a cancellation fee (booking terms). Any over-payment becomes a pending refund for Finance.</p>
+  {% if choices or lines %}
+  <form method="post">{% csrf_token %}
+    <fieldset class="az-field">
+      {% if booking.mode %}
+        {% for c in choices %}<label><input type="radio" name="code" value="{{ c.value }}" required> {{ c.label }} · {{ booking.currency }} {{ c.price }}</label>{% endfor %}
+      {% else %}
+        {% for l in lines %}<label><input type="radio" name="code" value="{{ l.code }}" required> {{ l.name }} · {{ l.quantity }} × {{ booking.currency }} {{ l.unit_price }} = {{ booking.currency }} {{ l.line_total }}</label>{% endfor %}
+      {% endif %}
+    </fieldset>
+    <label class="az-field">Note <input name="note" maxlength="300" placeholder="Why, and who asked"></label>
+    <div class="az-actions">
+      <button type="submit" class="az-btn">Remove add-on</button>
+      <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <p>This booking has no add-ons that can be removed. Rooms and airport transfers are changed by staff in the guests and rooms tab.</p>
+  <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Back to the booking</a>
+  {% endif %}
+</div>
+{% endblock %}

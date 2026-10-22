@@ -43,7 +43,12 @@ def installments_open(package, today=None) -> bool:
     made on or after that date is payable in full (policy Part C). Ghana keeps
     GMT year-round and settings.TIME_ZONE is UTC, so localdate() IS the
     Africa/Accra date the policy's 23:59 boundary is expressed in."""
-    if not (package.allow_installments and package.deposit_minimum):
+    from packages.models import TravelPackage
+
+    if not package.allow_installments:
+        return False
+    # Component bookings split by accommodation_deposit_percent, not a minimum.
+    if package.pricing_model != TravelPackage.PricingModel.COMPONENT and not package.deposit_minimum:
         return False
     if package.final_payment_deadline:
         from django.utils import timezone
@@ -447,4 +452,431 @@ def build_pricing_matrix(package, at=None) -> dict:
         # Server clock — the frontend corrects browser clock drift with
         # offset = server_now - Date.now() and derives countdowns from it.
         "server_now": at,
+    }
+
+
+# ── Component pricing (Change Request v4) ─────────────────────────────────────
+
+def catalog_snapshot(package, *, everything_on_sale: bool = False) -> dict:
+    """The editable catalogue tables (the draft) as JSON-safe data.
+    everything_on_sale prices unconfirmed rooms too (acceptance checks only)."""
+    from packages.models import PackageAddon, PackageDiscountRule
+
+    return {
+        "core_price": str(package.base_price_per_person) if package.base_price_per_person is not None else None,
+        "stay_types": [
+            {"code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity, "min_occupancy": s.min_occupancy,
+             "price_per_night": str(s.price_per_night), "nights": s.nights,
+             "on_sale": s.on_sale or everything_on_sale, "note": s.note}
+            for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
+        ],
+        "experiences": [
+            {"code": a.code, "name": a.name, "description": a.description or "", "price": str(a.price),
+             "refundable": a.refundable, "unit": a.unit, "adults_only": a.adults_only,
+             "requires_stay": a.requires_stay, "vehicle_capacity": a.vehicle_capacity}
+            for a in package.addons.filter(
+                is_active=True, unit__in=[PackageAddon.Unit.PER_PERSON, PackageAddon.Unit.PER_VEHICLE],
+            ).order_by("order", "name")
+        ],
+        "group_discounts": [
+            {"name": r.name, "percent": str(r.percent), "min_travellers": r.min_travellers}
+            for r in package.discount_rules.filter(
+                scope=PackageDiscountRule.Scope.GROUP_ACCOMMODATION, is_active=True, min_travellers__isnull=False,
+            )
+        ],
+    }
+
+
+@dataclass
+class Catalog:
+    version: object  # PriceListVersion, or None while nothing is published (prices from the draft tables)
+    core_price: Decimal | None
+    stay_types: dict
+    experiences: dict
+    group_discounts: list
+
+
+_EXPERIENCE_DEFAULTS = {"unit": "per_person", "adults_only": False, "requires_stay": False, "vehicle_capacity": 2}
+
+
+def _catalog(snap: dict, version) -> Catalog:
+    from types import SimpleNamespace as NS
+    dec = lambda d, *keys: {**d, **{k: Decimal(d[k]) for k in keys}}
+    return Catalog(
+        version=version,
+        core_price=Decimal(snap["core_price"]) if snap.get("core_price") is not None else None,
+        stay_types={s["code"]: NS(**dec(s, "price_per_night")) for s in snap["stay_types"]},
+        # Snapshots published before v4 lack the newer keys.
+        experiences={e["code"]: NS(**{**_EXPERIENCE_DEFAULTS, **dec(e, "price")}) for e in snap["experiences"]},
+        group_discounts=[(Decimal(g["percent"]), g["name"], g["min_travellers"]) for g in snap.get("group_discounts", [])],
+    )
+
+
+def live_catalog(package) -> Catalog:
+    """Prices customers see: the live published version, or the draft tables
+    for a package that has never been published."""
+    from packages.models import PriceListVersion
+    version = package.price_lists.filter(status=PriceListVersion.Status.LIVE).order_by("-number").first()
+    return _catalog(version.snapshot if version else catalog_snapshot(package), version)
+
+
+def draft_catalog(package) -> Catalog:
+    return _catalog(catalog_snapshot(package), None)
+
+
+# The client's acceptance totals (Change Request v4 §5 and §9), before any
+# group discount — (label, mode, travellers' experiences, rooms as
+# (stay code, occupants), expected, compare) where compare is "total" or
+# "extras" (total minus Core).
+ACCEPTANCE_SCENARIOS = [
+    ("Couple · Core only", "couple", [[], []], [], "1798.00", "total"),
+    ("Couple · one-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_1bed", [0, 1])], "2898.00", "total"),
+    ("Couple · two-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_2bed", [0, 1])], "3498.00", "total"),
+    ("Couple · Four Points couple room, 4 nights", "couple", [[], []], [("fourpoints_couple", [0, 1])], "3318.00", "total"),
+    ("Single · one-bedroom Airbnb", "single", [[]], [("airbnb_1bed", [0])], "1999.00", "total"),
+    ("Single · Four Points standard room", "single", [[]], [("fourpoints_standard", [0])], "2219.00", "total"),
+    ("Two-person ENZO VIP", "couple", [["enzo_vip"], ["enzo_vip"]], [], "440.00", "extras"),
+]
+
+
+def acceptance_checks(package) -> list:
+    """Price the client's acceptance scenarios against the DRAFT catalogue with
+    every room treated as on sale and no group discount. [{label, expected, got, ok}]."""
+    snap = catalog_snapshot(package, everything_on_sale=True)
+    cat = _catalog({**snap, "group_discounts": []}, None)
+    results = []
+    for label, mode, exps, rooms, expected, compare in ACCEPTANCE_SCENARIOS:
+        try:
+            q = compute_component_quote(
+                package, mode=mode, travellers=[{"experiences": e, "adult": True} for e in exps],
+                rooms=[{"stay_type": c, "occupants": o} for c, o in rooms],
+                payment_plan="full", check_availability=False, catalog=cat,
+            )
+            got = q.total - q.core_total if compare == "extras" else q.total
+            results.append({"label": label, "expected": expected, "got": f"{got:.2f}", "ok": f"{got:.2f}" == expected})
+        except QuoteError as exc:
+            results.append({"label": label, "expected": expected, "got": str(exc), "ok": False})
+    return results
+
+
+def units_left(package, code: str, hold_token: str = "") -> int:
+    """Sellable units of one stay type, counting this checkout's own hold as its own."""
+    st = package.stay_types.filter(code=code).first()
+    return st.units_available(hold_token=hold_token) if st else 0
+
+
+def split_evenly(amount: Decimal, parts: int) -> list:
+    """Split cents across `parts` so the pieces sum to `amount` exactly
+    (leftover cents go to the first pieces)."""
+    cents = int(quantize(amount) * 100)
+    base, extra = divmod(cents, parts)
+    return [Decimal(base + (1 if i < extra else 0)) / 100 for i in range(parts)]
+
+
+@dataclass
+class ComponentQuote:
+    """Core per traveller + each room unit once + experiences per guest +
+    transfers per vehicle. The only discount is the group accommodation rule,
+    applied to each room charge (never Core) and rounded per unit.
+
+    Each traveller carries a `share` (their part of the total) and `due_now`;
+    shares sum to the total exactly, so a group can pay per person."""
+    package: object
+    mode: str
+    payment_plan: str
+    core_price: Decimal
+    price_list_version: object = None
+    travellers: list = field(default_factory=list)
+    rooms: list = field(default_factory=list)
+    transfers: list = field(default_factory=list)
+    core_total: Decimal = Decimal("0")
+    rooms_total: Decimal = Decimal("0")
+    experiences_total: Decimal = Decimal("0")
+    transfers_total: Decimal = Decimal("0")
+    subtotal: Decimal = Decimal("0")
+    discount_percent: Decimal = Decimal("0")
+    discount_name: str = ""
+    discount_total: Decimal = Decimal("0")
+    total: Decimal = Decimal("0")
+    deposit_required: Decimal | None = None
+    amount_due_today: Decimal = Decimal("0")
+
+    @property
+    def num_guests(self):
+        return len(self.travellers)
+
+    def discount_note(self) -> str:
+        if not self.discount_total:
+            return ""
+        return f"{self.discount_name} ({self.discount_percent.normalize():f}% off accommodation)"[:200]
+
+    def booking_addons(self) -> list:
+        """Room, experience and transfer lines aggregated per code, in the
+        shape Booking.addons (receipts, refunds) already reads, so Core × guests
+        + these lines − discount_amount reconciles to the total."""
+        lines = {}
+
+        def add(code, name, unit, unit_price, quantity, line_total, refundable):
+            line = lines.setdefault(code, {"code": code, "name": name, "unit": unit, "unit_price": unit_price,
+                                           "quantity": 0, "line_total": "0.00", "refundable": refundable})
+            line["quantity"] += quantity
+            line["line_total"] = str(quantize(Decimal(line["line_total"]) + Decimal(line_total)))
+
+        for r in self.rooms:
+            add(f"stay_{r['stay_type']}", f"{r['name']} · {r['nights']} nights", "per_unit", r["charge"], 1,
+                r["charge"], True)
+        for t in self.travellers:
+            for e in t["experiences"]:
+                add(e["code"], e["name"], "per_person", e["price"], 1, e["price"], e["refundable"])
+        for tr in self.transfers:
+            add(tr["code"], tr["name"], "per_vehicle", tr["price"], tr["vehicles"], tr["charge"], tr["refundable"])
+        return list(lines.values())
+
+    def as_dict(self):
+        return {
+            "package_id": str(self.package.id),
+            "pricing_model": "component",
+            "mode": self.mode,
+            "payment_plan": self.payment_plan,
+            "currency": self.package.currency,
+            "core_price_per_person": str(self.core_price),
+            "price_list_version": self.price_list_version.number if self.price_list_version else None,
+            "num_guests": self.num_guests,
+            "travellers": self.travellers,
+            "rooms": self.rooms,
+            "transfers": self.transfers,
+            "core_total": str(self.core_total),
+            "rooms_total": str(self.rooms_total),
+            "experiences_total": str(self.experiences_total),
+            "transfers_total": str(self.transfers_total),
+            "subtotal": str(self.subtotal),
+            "discount_name": self.discount_name if self.discount_total else "",
+            "discount_percent": str(self.discount_percent) if self.discount_total else "0",
+            "discount_total": str(self.discount_total),
+            "total": str(self.total),
+            "average_per_person": str(quantize(self.total / self.num_guests)),
+            "accommodation_deposit_percent": str(self.package.accommodation_deposit_percent),
+            "deposit_required": str(self.deposit_required) if self.deposit_required is not None else None,
+            "amount_due_today": str(self.amount_due_today),
+            "balance_after_today": str(quantize(self.total - self.amount_due_today)),
+            # Stored in JSONFields (Booking.quote_snapshot, Lead.quote): ISO string, not a date.
+            "final_payment_deadline": (
+                self.package.final_payment_deadline.isoformat() if self.package.final_payment_deadline else None
+            ),
+        }
+
+
+def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True,
+                            hold_token="", catalog: Catalog | None = None) -> ComponentQuote:
+    """Price a component selection server-side.
+
+    travellers: [{"name": str, "experiences": [addon codes], "adult": bool}] —
+        list index is the traveller's id; each one is exactly one Core ticket.
+        Experiences include at most one airport transfer (a per-vehicle item).
+    rooms: [{"stay_type": code, "occupants": [traveller indexes]}] — each
+        entry is one unit, charged once whatever its occupancy.
+
+    Installment plan (Change Request v4 §6): Core, experiences and transfers
+    are due in full now; each room needs accommodation_deposit_percent now.
+    """
+    import math
+
+    from bookings.models import Booking
+    from packages.models import TravelPackage
+
+    if not package.is_active:
+        raise QuoteError("This tour is not open for booking.")
+    if package.pricing_model != TravelPackage.PricingModel.COMPONENT:
+        raise QuoteError("This tour does not use component pricing.")
+    cat = catalog or live_catalog(package)
+    if cat.core_price is None:
+        raise QuoteError("This tour has no Core price configured.")
+    n = len(travellers or [])
+    if n < 1:
+        raise QuoteError("At least one traveller is required.")
+    if mode not in Booking.Mode.values:
+        raise QuoteError("Choose Single, Couple or Group.")
+    if mode == Booking.Mode.SINGLE and n != 1:
+        raise QuoteError("Single is for one traveller — choose Couple or Group.")
+    if mode == Booking.Mode.COUPLE and n != 2:
+        raise QuoteError("A couple booking is for exactly two travellers.")
+    if payment_plan not in (Booking.PaymentPlan.FULL, Booking.PaymentPlan.INSTALLMENT):
+        raise QuoteError("Unknown payment plan.")
+    installment = payment_plan == Booking.PaymentPlan.INSTALLMENT
+    if installment and not installments_open(package):
+        raise QuoteError("Paying accommodation in instalments is not available for this booking — please pay in full.")
+    if installment and not rooms:
+        raise QuoteError("Only accommodation can be paid in instalments; Core tickets and experiences are paid in full.")
+
+    core = quantize(cat.core_price)
+    quote = ComponentQuote(package=package, mode=mode, payment_plan=payment_plan, core_price=core,
+                           price_list_version=cat.version)
+    label = lambda i: (travellers[i].get("name") or "").strip() or f"Guest {i + 1}"
+    shares = [{"core": core, "extras": Decimal("0"), "room": Decimal("0"), "room_deposit": Decimal("0"),
+               "transfer": Decimal("0")} for _ in range(n)]
+
+    # Group accommodation discount: the highest rule the group size qualifies for.
+    qualifying = [g for g in cat.group_discounts if g[2] and n >= g[2]]
+    if qualifying:
+        quote.discount_percent, quote.discount_name, _ = max(qualifying, key=lambda g: g[0])
+    deposit_pct = package.accommodation_deposit_percent if installment else Decimal("100")
+
+    # ── Rooms: each unit once; split among its occupants ─────────────────────
+    room_of = {}
+    stay_types = cat.stay_types
+    requested = {}
+    for room in rooms or []:
+        st = stay_types.get(room.get("stay_type"))
+        if st is None or not st.on_sale:
+            raise QuoteError(f"'{room.get('stay_type')}' is not available.")
+        occupants = room.get("occupants") or []
+        if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < n for i in occupants):
+            raise QuoteError("Every room occupant must be one of the travellers and hold a Core ticket.")
+        if len(set(occupants)) != len(occupants) or room_of.keys() & set(occupants):
+            raise QuoteError("Each traveller can be assigned to one room only.")
+        if len(occupants) > st.capacity:
+            raise QuoteError(f"{st.name} sleeps at most {st.capacity}.")
+        if len(occupants) < max(st.min_occupancy, 1):
+            raise QuoteError(f"{st.name} needs {max(st.min_occupancy, 1)} guests.")
+        requested[st.code] = requested.get(st.code, 0) + 1
+        charge = quantize(st.price_per_night * st.nights)
+        discount = quantize(charge * quote.discount_percent / Decimal("100"))
+        deposit = quantize((charge - discount) * deposit_pct / Decimal("100"))
+        for i, part, dep in zip(occupants, split_evenly(charge - discount, len(occupants)),
+                                split_evenly(deposit, len(occupants))):
+            room_of[i] = st.name
+            shares[i]["room"] += part
+            shares[i]["room_deposit"] += dep
+        quote.rooms.append({
+            "stay_type": st.code, "name": st.name, "occupants": occupants,
+            "price_per_night": str(quantize(st.price_per_night)), "nights": st.nights,
+            "charge": str(charge), "discount": str(discount), "deposit": str(deposit),
+        })
+        quote.rooms_total += charge
+        quote.discount_total += discount
+
+    if check_availability:
+        for code, count in requested.items():
+            left = units_left(package, code, hold_token)
+            if count > left:
+                raise QuoteError(
+                    f"{stay_types[code].name} is sold out." if left == 0
+                    else f"Only {left} × {stay_types[code].name} left."
+                )
+
+    # ── Experiences per guest; transfers pooled into vehicles ────────────────
+    addons = cat.experiences
+    riders = {}
+    for i, t in enumerate(travellers):
+        codes = list(dict.fromkeys(t.get("experiences") or []))
+        unknown = [c for c in codes if c not in addons]
+        if unknown:
+            raise QuoteError(f"Unknown experience(s): {', '.join(unknown)}.")
+        chosen = [addons[c] for c in codes]
+        for a in chosen:
+            if a.adults_only and t.get("adult") is not True:
+                raise QuoteError(f"{a.name} is for guests aged 18 or over — please confirm {label(i)} is 18+.")
+            if a.requires_stay and i not in room_of:
+                raise QuoteError(f"{a.name} is for guests staying in Azura accommodation.")
+        transfers = [a for a in chosen if a.unit == "per_vehicle"]
+        if len(transfers) > 1:
+            raise QuoteError(f"Choose one airport transfer for {label(i)}.")
+        for a in transfers:
+            riders.setdefault(a.code, []).append(i)
+        per_person = [a for a in chosen if a.unit != "per_vehicle"]
+        subtotal = quantize(sum((a.price for a in per_person), Decimal("0")))
+        shares[i]["extras"] = subtotal
+        quote.travellers.append({
+            "index": i, "name": (t.get("name") or "").strip(), "core": str(core),
+            "room": room_of.get(i), "adult": t.get("adult") is True,
+            "experiences": [
+                {"code": a.code, "name": a.name, "price": str(quantize(a.price)), "refundable": a.refundable}
+                for a in per_person
+            ],
+            "transfer": transfers[0].code if transfers else None,
+            "experiences_subtotal": str(subtotal),
+        })
+        quote.experiences_total += subtotal
+
+    # ponytail: guests on one transfer share vehicles in booking order; ops
+    # regroup by flight time. Per-flight vehicle planning if that matters.
+    for code, guests in riders.items():
+        a = addons[code]
+        vehicles = math.ceil(len(guests) / max(a.vehicle_capacity, 1))
+        charge = quantize(a.price * vehicles)
+        for i, part in zip(guests, split_evenly(charge, len(guests))):
+            shares[i]["transfer"] = part
+        quote.transfers.append({"code": a.code, "name": a.name, "guests": guests, "vehicles": vehicles,
+                                "price": str(quantize(a.price)), "charge": str(charge), "refundable": a.refundable})
+        quote.transfers_total += charge
+
+    for t, s in zip(quote.travellers, shares):
+        paid_upfront = s["core"] + s["extras"] + s["transfer"]
+        t.update(room_share=str(s["room"]), transfer_share=str(s["transfer"]),
+                 share=str(quantize(paid_upfront + s["room"])),
+                 room_deposit=str(s["room_deposit"]), due_now=str(quantize(paid_upfront + s["room_deposit"])))
+
+    quote.core_total = quantize(core * n)
+    quote.rooms_total = quantize(quote.rooms_total)
+    quote.experiences_total = quantize(quote.experiences_total)
+    quote.transfers_total = quantize(quote.transfers_total)
+    quote.discount_total = quantize(quote.discount_total)
+    quote.subtotal = quantize(quote.core_total + quote.rooms_total + quote.experiences_total + quote.transfers_total)
+    quote.total = quantize(quote.subtotal - quote.discount_total)
+    quote.amount_due_today = quantize(sum((Decimal(t["due_now"]) for t in quote.travellers), Decimal("0")))
+    if installment:
+        quote.deposit_required = quote.amount_due_today
+    return quote
+
+
+def build_component_matrix(package, request=None) -> dict:
+    """Catalogue for the trip builder (the live price list). Display only:
+    totals always come from the quote endpoint, never client-side arithmetic.
+    Stay details and photos come from the stay rows (not price-versioned)."""
+    cat = live_catalog(package)
+    url = (lambda u: request.build_absolute_uri(u)) if request else (lambda u: u)
+    shown = {
+        s.code: {
+            "bedding": s.bedding, "breakfast": s.breakfast, "location": s.location,
+            "amenities": [a.strip() for a in s.amenities.splitlines() if a.strip()],
+            "images": [{"url": url(i.image.url), "alt": i.alt_text} for i in s.images.all()],
+        }
+        for s in package.stay_types.prefetch_related("images")
+    }
+    return {
+        "package_id": str(package.id),
+        "pricing_model": "component",
+        "price_list_version": cat.version.number if cat.version else None,
+        "currency": package.currency,
+        "core_price_per_person": str(quantize(cat.core_price)) if cat.core_price is not None else None,
+        "tour_start": package.available_from,
+        "tour_end": package.available_to,
+        "stay_types": [
+            {
+                "code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity,
+                "min_occupancy": s.min_occupancy, "price_per_night": str(quantize(s.price_per_night)),
+                "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
+                "on_sale": s.on_sale, "note": s.note,
+                "units_available": units_left(package, s.code) if s.on_sale else 0,
+                **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": []}),
+            }
+            for s in cat.stay_types.values()
+        ],
+        "experiences": [
+            {"code": a.code, "name": a.name, "description": a.description or None,
+             "price": str(quantize(a.price)), "refundable": a.refundable, "unit": a.unit,
+             "adults_only": a.adults_only, "requires_stay": a.requires_stay, "vehicle_capacity": a.vehicle_capacity}
+            for a in cat.experiences.values()
+        ],
+        "group_discounts": [
+            {"name": name, "percent": str(pct), "min_travellers": m} for pct, name, m in cat.group_discounts
+        ],
+        "installments": {
+            "enabled": installments_open(package),
+            "accommodation_deposit_percent": str(package.accommodation_deposit_percent),
+            "final_payment_deadline": package.final_payment_deadline,
+        },
+        "charge": _charge_info(package),
+        "notices": {"fees": _fee_notice()},
+        "server_now": timezone.now(),
     }

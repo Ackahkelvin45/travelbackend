@@ -9,13 +9,20 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from .models import Booking
-from .pricing import QuoteError, compute_configurable_quote, compute_quote
+from .models import Booking, Lead
+from .pricing import QuoteError, compute_component_quote, compute_configurable_quote, compute_quote
 from .serializers import (
+    AssistantSerializer,
     BookingDetailSerializer,
+    BookingPublicSerializer,
     CheckoutSerializer,
+    ComponentCheckoutSerializer,
+    ComponentQuoteSerializer,
     ConfigurableCheckoutSerializer,
     CreateBookingSerializer,
+    HoldSerializer,
+    LeadSerializer,
+    TravelInfoSerializer,
 )
 from .services import (
     PolicyAcceptanceRequired,
@@ -136,6 +143,7 @@ class CreateBookingView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "currency": booking.currency,
             "status": booking.status,
@@ -232,6 +240,7 @@ class CheckoutView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "amount_due_today": str(
                 booking.deposit_required
@@ -323,6 +332,7 @@ class ConfigurableCheckoutView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "discount_amount": str(booking.discount_amount),
             "amount_due_today": str(
@@ -479,16 +489,17 @@ class AvailableAddonsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, reference):
-        from .services import addon_additions_open, available_addons
+        from .services import addon_additions_open, available_addons, available_component_addons
 
         booking = _OwnedBooking.get(request, reference)
         if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
         ok, reason, open_until = addon_additions_open(booking)
+        listing = available_component_addons if booking.mode else available_addons
         return Response({
             "can_add": ok, "reason": reason, "open_until": open_until,
             "currency": booking.currency,
-            "addons": available_addons(booking) if ok else [],
+            "addons": listing(booking) if ok else [],
         })
 
 
@@ -530,7 +541,9 @@ class BookingStatusView(APIView):
         operation_id="booking_status",
         operation_summary="Get booking status",
         operation_description=(
-            "Returns full booking detail including payment status. "
+            "Returns status and amounts to anyone with the reference; names, contact details, "
+            "guests and the payment ledger only to the owner, staff, or with `?t=<view_token>` "
+            "(returned by checkout and included in the guest's emails). "
             "Poll this after payment to confirm the booking is `confirmed`.\n\n"
             "Also use the returned `payment_reference` and `reference` to:\n"
             "- Re-open the verify endpoint if the user navigates back\n"
@@ -572,5 +585,323 @@ class BookingStatusView(APIView):
         if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = BookingDetailSerializer(booking)
+        user = request.user
+        full = (user.is_authenticated and (user.is_staff or booking.user_id == user.id)) \
+            or booking.view_token_valid(request.query_params.get("t", ""))
+        serializer = (BookingDetailSerializer if full else BookingPublicSerializer)(booking)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ── Component pricing (Change Request v2) ─────────────────────────────────────
+
+def _component_package(package_id):
+    from packages.models import TravelPackage
+    return TravelPackage.objects.filter(id=package_id, pricing_model=TravelPackage.PricingModel.COMPONENT).first()
+
+
+class ComponentQuoteView(APIView):
+    """POST /api/bookings/quote/ — the server total for a trip-builder
+    selection. The UI shows this; it never adds prices up itself."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "quote"
+
+    def post(self, request):
+        serializer = ComponentQuoteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        package = _component_package(data["package_id"])
+        if package is None:
+            return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            quote = compute_component_quote(
+                package, mode=data["mode"], travellers=data["travellers"],
+                rooms=data["rooms"], payment_plan=data["payment_plan"],
+                hold_token=data.get("hold_token", ""),
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(quote.as_dict())
+
+
+class HoldView(APIView):
+    """POST /api/bookings/holds/ — hold rooms while the guest checks out.
+    DELETE /api/bookings/holds/<token>/ — give them back."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "holds"
+
+    def post(self, request):
+        from django.utils import timezone
+
+        from .services import create_hold
+
+        serializer = HoldSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        package = _component_package(data["package_id"])
+        if package is None:
+            return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            token, held_until, units = create_hold(
+                package, data["stay_types"], replace_token=data.get("replace_token", ""),
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        return Response({
+            "token": token, "held_until": held_until, "server_now": timezone.now(),
+            "units": [{"stay_type": u.stay_type.code, "label": u.label} for u in units],
+        }, status=status.HTTP_201_CREATED)
+
+    def delete(self, request, token):
+        from .services import release_hold
+        release_hold(token)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ComponentCheckoutView(APIView):
+    """POST /api/bookings/checkout/component/ — hold → booking with one Core
+    ticket per traveller. Then POST /api/payments/initialize/ as usual."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "holds"
+
+    def post(self, request):
+        from .services import create_component_booking
+
+        serializer = ComponentCheckoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        package = _component_package(data["package_id"])
+        if package is None:
+            return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            quote = compute_component_quote(
+                package, mode=data["mode"], travellers=data["travellers"], rooms=data["rooms"],
+                payment_plan=data["payment_plan"], check_availability=False,
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        expected_total = data.get("expected_total")
+        if expected_total is not None and expected_total != quote.total:
+            return Response(
+                {"detail": "The price has changed since this page was loaded.", "quote": quote.as_dict()},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            booking = create_component_booking(
+                package=package, mode=data["mode"], travellers=data["travellers"], rooms=data["rooms"],
+                payment_plan=data["payment_plan"], hold_token=data.get("hold_token", ""),
+                contact={
+                    "first_name": data["first_name"], "last_name": data["last_name"], "email": data["email"],
+                    "phone": data.get("phone") or None, "country": data.get("country") or None,
+                    "special_requests": data.get("special_requests") or None,
+                },
+                accepted_policy_types=data["accepted_policies"],
+                marketing_consent=data["marketing_consent"], pay_separately=data["pay_separately"],
+                whatsapp_updates=data["whatsapp_updates"],
+                user=request.user if request.user.is_authenticated else None,
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except PolicyAcceptanceRequired as exc:
+            return Response(
+                {"detail": "All booking policies must be accepted.", "missing_policies": exc.missing_types},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({
+            "id": str(booking.id),
+            "reference": booking.reference,
+            "view_token": booking.view_token,
+            "total_amount": str(booking.total_amount),
+            "discount_amount": str(booking.discount_amount),
+            # The first payment: the deposit (instalments, or a group paying per
+            # person: organiser's share + room deposits), else the total.
+            "amount_due_today": str(booking.deposit_required or booking.total_amount),
+            "deposit_required": str(booking.deposit_required) if booking.deposit_required else None,
+            "currency": booking.currency,
+            "status": booking.status,
+            "quote": booking.quote_snapshot,
+            "message": "Booking created. Proceed to payment.",
+        }, status=status.HTTP_201_CREATED)
+
+
+class TravelInfoView(APIView):
+    """GET/PUT /api/bookings/<reference>/travel/ — owner-only post-booking
+    form. PUT {"travellers": [{"id": ..., "arrival_flight": ..., ...}]}."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, reference):
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"travellers": TravelInfoSerializer(booking.travellers.all(), many=True).data})
+
+    def put(self, request, reference):
+        from django.db import transaction
+        from django.utils import timezone
+
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        rows = request.data.get("travellers")
+        if not isinstance(rows, list):
+            return Response({"detail": "Send a list of travellers."}, status=status.HTTP_400_BAD_REQUEST)
+        travellers = {str(t.id): t for t in booking.travellers.all()}
+        with transaction.atomic():
+            for row in rows:
+                traveller = travellers.get(str(row.get("id")) if isinstance(row, dict) else None)
+                if traveller is None:
+                    return Response({"detail": "Unknown traveller."}, status=status.HTTP_400_BAD_REQUEST)
+                serializer = TravelInfoSerializer(traveller, data=row, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save(travel_info_submitted_at=timezone.now())
+        return Response({"travellers": TravelInfoSerializer(booking.travellers.all(), many=True).data})
+
+
+class BookingPreferencesView(APIView):
+    """PATCH /api/bookings/<reference>/preferences/ {marketing_consent?, photo_consent?, whatsapp_updates?}
+    — owner-only; consent can be withdrawn or given at any time."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, reference):
+        booking = _OwnedBooking.get(request, reference)
+        if not booking:
+            return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        fields = [f for f in ("marketing_consent", "photo_consent", "whatsapp_updates")
+                  if isinstance(request.data.get(f), bool)]
+        for f in fields:
+            setattr(booking, f, request.data[f])
+        if fields:
+            booking.save(update_fields=[*fields, "updated_at"])
+        return Response({"marketing_consent": booking.marketing_consent, "photo_consent": booking.photo_consent,
+                         "whatsapp_updates": booking.whatsapp_updates})
+
+
+class LeadCreateView(APIView):
+    """POST /api/leads/ — chat hand-off, contact form or saved quote."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
+
+    def post(self, request):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from payments.models import OpsConfig
+
+        serializer = LeadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        selection = data.pop("selection", None)
+        quote = {}
+        if selection:
+            package = _component_package(selection["package_id"])
+            if package is None:
+                return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                quote = compute_component_quote(
+                    package, mode=selection["mode"], travellers=selection["travellers"],
+                    rooms=selection["rooms"], payment_plan=selection["payment_plan"], check_availability=False,
+                ).as_dict()
+            except QuoteError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            data["package"] = package
+        lead = Lead.objects.create(
+            **data, quote=quote,
+            reply_due_at=timezone.now() + timedelta(hours=OpsConfig.get().lead_reply_hours),
+        )
+        if quote:
+            from payments.email import send_saved_quote
+            send_saved_quote(lead)  # never raises; the attempt is logged against the lead
+        return Response({"id": str(lead.id), "detail": "Thanks — our team will be in touch."},
+                        status=status.HTTP_201_CREATED)
+
+
+class AssistantView(APIView):
+    """POST /api/assistant/ — site chat. Stateless: the page sends the
+    conversation so far and gets the next reply. ``handoff`` set means the
+    page should offer the "send to the team" form (which creates the Lead)."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant"
+
+    def post(self, request):
+        from .assistant import reply
+
+        serializer = AssistantSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        text, handoff = reply([dict(m) for m in serializer.validated_data["messages"]])
+        return Response({"reply": text, "handoff": handoff})
+
+
+class SiteSettingsView(APIView):
+    """GET /api/site-settings/ — public contact details and hours. Blank
+    values mean "not confirmed yet": the site keeps its own fallback."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from payments.models import OpsConfig
+
+        c = OpsConfig.get()
+        return Response({
+            "contact_email": c.contact_email, "contact_phone": c.contact_phone,
+            "whatsapp_number": c.whatsapp_number, "emergency_phone": c.emergency_phone,
+            "staffed_hours": c.staffed_hours, "legal_name": c.legal_name,
+            "legal_address": c.legal_address, "hold_minutes": c.hold_minutes,
+            "donations_open": c.donations_enabled and bool(c.donation_subaccount),
+        })
+
+
+class TravellerShareView(APIView):
+    """GET /api/bookings/share/<traveller id>/ — what one group member owes,
+    for the "pay your share" link the organiser forwards. The traveller id
+    (a UUID) is the capability; pay with intent=traveller."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
+
+    def get(self, request, traveller_id):
+        from .models import BookingTraveller
+
+        t = BookingTraveller.objects.select_related("booking__package").filter(pk=traveller_id).first()
+        if t is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        b = t.booking
+        _, share, paid, outstanding = next(row for row in b.traveller_balances() if row[0].pk == t.pk)
+        return Response({
+            "booking_id": str(b.id), "reference": b.reference, "package_title": b.package.title,
+            "organiser": b.first_name, "status": b.status, "currency": b.currency,
+            "traveller_id": str(t.id), "full_name": t.full_name,
+            "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
+            "payable": outstanding > 0 and b.status in (Booking.Status.PENDING, Booking.Status.CONFIRMED)
+                       and not b.pending_cancellation,
+        })
+
+
+class LeadUnsubscribeView(APIView):
+    """POST /api/leads/unsubscribe/ {token} — the signed link in reminder
+    emails. Turns off marketing for that lead; booking emails are unaffected."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
+
+    def post(self, request):
+        from .crm import unsubscribe
+
+        lead = unsubscribe(str(request.data.get("token", ""))[:500])
+        if lead is None:
+            return Response({"detail": "This link isn't valid."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "You won't get any more reminders about this trip."})

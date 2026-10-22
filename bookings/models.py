@@ -5,6 +5,7 @@ import uuid
 
 # Refund/Installment Policy: hours a guest has to settle after the overdue notice.
 OVERDUE_CURE_HOURS = 72
+VIEW_TOKEN_SALT = "booking-view"
 
 
 class Booking(models.Model):
@@ -17,6 +18,11 @@ class Booking(models.Model):
     class PaymentPlan(models.TextChoices):
         FULL = "full", "Full Payment"
         INSTALLMENT = "installment", "Installment"
+
+    class Mode(models.TextChoices):
+        SINGLE = "single", "Single"
+        COUPLE = "couple", "Couple"
+        GROUP = "group", "Group"
 
     class CancellationReason(models.TextChoices):
         CUSTOMER = "customer", "Customer requested"
@@ -155,6 +161,37 @@ class Booking(models.Model):
         blank=True,
     )
 
+    # ── Component pricing (Change Request v2) ────────────────────────────────
+    mode = models.CharField(max_length=10, choices=Mode.choices, blank=True)
+    pay_separately = models.BooleanField(
+        default=False, help_text="Group booking: each member pays their own share under this reference.",
+    )
+    price_list_version = models.ForeignKey(
+        "packages.PriceListVersion", on_delete=models.PROTECT, null=True, blank=True, related_name="bookings",
+        help_text="Published price list this booking was priced from (component pricing).",
+    )
+    quote_snapshot = models.JSONField(
+        default=dict, blank=True,
+        help_text="Full component quote at booking time: per-traveller Core, rooms, experiences, discounts.",
+    )
+    marketing_consent = models.BooleanField(default=False)
+    whatsapp_updates = models.BooleanField(
+        default=False, help_text="Guest opted in to booking confirmations and receipts on WhatsApp.",
+    )
+    # Current photo/media consent. The PolicyAcceptance row is the evidence it
+    # was given; the guest can withdraw (or re-give) it later from My Booking.
+    photo_consent = models.BooleanField(default=False)
+
+    # ── Coordinator workflow ──────────────────────────────────────────────────
+    coordinator = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="coordinated_bookings", limit_choices_to={"is_staff": True},
+    )
+    coordinator_assigned_at = models.DateTimeField(null=True, blank=True)
+    lead_contacted_at = models.DateTimeField(null=True, blank=True)
+    contact_alerted_at = models.DateTimeField(null=True, blank=True, help_text="Staff alerted the 24-hour contact was missed.")
+    checklist = models.JSONField(default=dict, blank=True, help_text='e.g. {"travel_info": true, "flights": false}')
+
     # Idempotency markers for scheduled reminder emails, e.g. {"7d": "<iso ts>"}
     reminders_sent = models.JSONField(default=dict, blank=True)
 
@@ -177,7 +214,7 @@ class Booking(models.Model):
     class Meta:
         ordering = ["-created_at"]
         # Staff capabilities (see accounts/management/commands/setup_staff_groups.py):
-        # the admin AND the future staff portal both check exactly these.
+        # the admin's actions check exactly these.
         permissions = [
             ("view_special_requests", "Can view guests' special requests (may contain health data)"),
             ("mark_arrived", "Can mark a guest as arrived / tour started"),
@@ -266,6 +303,55 @@ class Booking(models.Model):
     def balance(self):
         """Outstanding amount in the booking currency (never negative)."""
         return max(self.total_amount - self.amount_paid + self.amount_refunded, 0)
+
+    @property
+    def view_token(self) -> str:
+        """Signed link token that unlocks the guest's names, contact details and
+        payments on the public status endpoint. Given only to the buyer (the
+        checkout response and their own emails); the reference alone shows
+        status and amounts. Bound to the lead's email, so transferring the
+        booking to someone else revokes the previous holder's links."""
+        from django.core import signing
+        return signing.dumps([self.reference, self.email.lower()], salt=VIEW_TOKEN_SALT)
+
+    def view_token_valid(self, token: str) -> bool:
+        from django.core import signing
+        try:
+            return bool(token) and signing.loads(token, salt=VIEW_TOKEN_SALT) == [self.reference, self.email.lower()]
+        except signing.BadSignature:
+            return False
+
+    def traveller_balances(self) -> list:
+        """Per-person payment status (component bookings): [(traveller,
+        share, paid, outstanding)]. Payments tagged to a traveller are theirs.
+        Untagged money (the organiser's) covers each traveller's checkout
+        portion first — whatever they later paid themselves — then what is
+        left of each share, in booking order.
+        ponytail: refunds are not attributed per person; staff handle those."""
+        from decimal import Decimal
+        from django.db.models import Sum
+        from payments.money import quantize
+
+        travellers = list(self.travellers.all())
+        tagged = dict(
+            self.payments.filter(status="success", traveller__isnull=False)
+            .values_list("traveller").annotate(total=Sum("amount"))
+        )
+        own = {t.pk: quantize(tagged.get(t.pk) or 0) for t in travellers}
+        untagged = max(self.amount_paid - sum(own.values(), Decimal("0")), Decimal("0"))
+        covered = {t.pk: Decimal("0") for t in travellers}
+        for t in travellers:  # 1. the checkout payment's portion for each guest
+            covered[t.pk] = min(t.checkout_portion, untagged)
+            untagged -= covered[t.pk]
+        for t in travellers:  # 2. anything more, towards remaining shares
+            take = min(max(t.share - own[t.pk] - covered[t.pk], Decimal("0")), untagged)
+            covered[t.pk] += take
+            untagged -= take
+        rows = []
+        for t in travellers:
+            paid = quantize(own[t.pk] + covered[t.pk])
+            rows.append((t, t.share, paid, max(quantize(t.share - paid), Decimal("0"))))
+        return rows
 
     @property
     def is_paid(self):
@@ -406,3 +492,144 @@ class PolicyAcceptance(models.Model):
 
     def __str__(self):
         return f"{self.email} accepted {self.document} for {self.booking.reference}"
+
+
+class BookingTraveller(models.Model):
+    """One Core ticket. A traveller is charged Core exactly once however often
+    they are moved between rooms; travel-form answers live on the same row."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name="travellers")
+    full_name = models.CharField(max_length=200)
+    is_lead = models.BooleanField(default=False)
+    unit = models.ForeignKey(
+        "packages.RoomUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="occupants",
+    )
+    experiences = models.JSONField(default=list, blank=True, help_text="Add-on codes chosen for this guest.")
+    position = models.PositiveSmallIntegerField(default=0, help_text="Order in the booking; 0 is the lead guest.")
+    share = models.DecimalField(max_digits=12, decimal_places=2, default=0,
+                                help_text="This guest's part of the booking total.")
+    checkout_portion = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0,
+        help_text="Part of this guest's share covered by the payment made at checkout.",
+    )
+
+    # ── Travel information (post-booking form) ────────────────────────────────
+    arrival_at = models.DateTimeField(null=True, blank=True)
+    arrival_flight = models.CharField(max_length=60, blank=True)
+    departure_at = models.DateTimeField(null=True, blank=True)
+    departure_flight = models.CharField(max_length=60, blank=True)
+    needs_transfer = models.BooleanField(default=False)
+    emergency_contact = models.CharField(max_length=200, blank=True)
+    emergency_phone = models.CharField(max_length=30, blank=True)
+    dietary = models.TextField(blank=True)
+    accessibility = models.TextField(blank=True)
+    travel_info_submitted_at = models.DateTimeField(null=True, blank=True)
+
+    # ── Event access (Change Request v4 §6): no badge or participation for an
+    # unpaid ticket; staff record exceptions and forfeits, nothing is automatic.
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    access_exception = models.BooleanField(
+        default=False, help_text="Allow check-in with a balance outstanding (record why below).",
+    )
+    access_note = models.CharField(max_length=300, blank=True, help_text="Who approved the exception, and why.")
+    forfeited_at = models.DateTimeField(
+        null=True, blank=True, help_text="Ticket forfeited under the booking terms (unpaid at event start).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["position", "created_at"]
+
+    def __str__(self):
+        return f"{self.full_name} ({self.booking.reference})"
+
+
+class Lead(models.Model):
+    """A sales enquiry: chat hand-off, saved quote, contact form, referral."""
+
+    class Source(models.TextChoices):
+        CHAT = "chat", "Chat"
+        SAVED_QUOTE = "saved_quote", "Saved quote"
+        CONTACT = "contact", "Contact form"
+        WHATSAPP = "whatsapp", "WhatsApp"
+        REFERRAL = "referral", "Referral"
+        CHECKOUT = "checkout", "Unfinished checkout"
+        OTHER = "other", "Other"
+
+    class Stage(models.TextChoices):
+        NEW = "new", "New"
+        CONTACTED = "contacted", "Contacted"
+        QUOTED = "quoted", "Quoted"
+        WON = "won", "Won"
+        LOST = "lost", "Lost"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    email = models.EmailField(blank=True, help_text="Blank for WhatsApp leads, which come with a phone number instead.")
+    phone = models.CharField(max_length=30, blank=True)
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.OTHER)
+    message = models.TextField(blank=True)
+    marketing_consent = models.BooleanField(default=False)
+    stage = models.CharField(max_length=10, choices=Stage.choices, default=Stage.NEW)
+    package = models.ForeignKey(
+        "packages.TravelPackage", on_delete=models.SET_NULL, null=True, blank=True, related_name="leads",
+    )
+    booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name="leads")
+    quote = models.JSONField(default=dict, blank=True, help_text="Server quote the guest saved, if any.")
+    referral_code = models.CharField(max_length=40, blank=True)
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="leads", limit_choices_to={"is_staff": True},
+    )
+    reply_due_at = models.DateTimeField(null=True, blank=True)
+    replied_at = models.DateTimeField(null=True, blank=True)
+    reply_alerted_at = models.DateTimeField(null=True, blank=True, help_text="Staff alerted the reply was late.")
+    reminders_sent = models.JSONField(
+        default=dict, blank=True, help_text="Consent-based quote reminders sent, by schedule hour.",
+    )
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} <{self.email}> [{self.stage}]"
+
+
+class ChatThread(models.Model):
+    """A WhatsApp conversation with the assistant. ``messages`` is the
+    text-only transcript the bot replays; ``bot_paused`` means staff own it."""
+
+    wa_id = models.CharField(max_length=30, unique=True, help_text="Guest's WhatsApp number, digits only.")
+    name = models.CharField(max_length=200, blank=True, help_text="WhatsApp profile name.")
+    messages = models.JSONField(default=list, blank=True)
+    seen_ids = models.JSONField(default=list, blank=True, help_text="Recent Meta message ids, so retries aren't answered twice.")
+    bot_paused = models.BooleanField(
+        default=False, help_text="On after a hand-off: the bot stays quiet and staff reply. Untick to hand back to the bot.",
+    )
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="chat_threads")
+    last_inbound_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_inbound_at"]
+
+    def __str__(self):
+        return f"{self.name or 'WhatsApp'} +{self.wa_id}"
+
+
+class EventTicket(BookingTraveller):
+    """Admin view of Core tickets for event-start check-in."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "event ticket"
+        verbose_name_plural = "event check-in"

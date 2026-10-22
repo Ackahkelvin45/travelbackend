@@ -121,7 +121,7 @@ class GalleryResponseSerializer(serializers.Serializer):
 class PackageFAQSerializer(serializers.ModelSerializer):
     class Meta:
         model = PackageFAQ
-        fields = ["id", "question", "answer", "order"]
+        fields = ["id", "topic", "question", "answer", "order"]
         read_only_fields = ["id"]
 
 
