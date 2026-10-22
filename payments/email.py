@@ -189,7 +189,6 @@ def _build_html(booking, payment) -> str:
     requests_note = _p("We've noted your special requests. Our team will confirm the arrangements with you directly.") \
         if booking.special_requests else ""
 
-    hours = getattr(_ops(), "coordinator_contact_hours", 24)
     body = (
         _h(f"See you in Ghana, {first_name}")
         + _p(f"Your booking for {html.escape(package.title)}, {dates}, is confirmed for "
@@ -201,7 +200,7 @@ def _build_html(booking, payment) -> str:
         + (_p(f"You accepted: {policy_links}. These versions form your booking contract.", small=True) if policy_links else "")
         + requests_note
     )
-    footer = f"Your coordinator will contact you within {hours} hours. Keep this email as your receipt."
+    footer = "Keep this email as your receipt."
     return _shell(f"You're booked! {booking.reference}", body, hero="booked.jpg", footer=footer)
 
 
