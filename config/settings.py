@@ -405,8 +405,9 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
 
 # ── Guest assistant (site chat + WhatsApp) ───────────────────────────────────
-# The Anthropic SDK reads ANTHROPIC_API_KEY from the environment itself.
-ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "claude-opus-5-5")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "deepseek-chat")
 # WhatsApp Cloud API (Meta app → WhatsApp → API setup). Unset = webhook rejects everything.
 WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")

@@ -1259,7 +1259,31 @@ class AssistantTests(TestCase):
     def test_assistant_failure_falls_back_to_a_person(self):
         from unittest import mock
         from .assistant import reply
-        with mock.patch("bookings.assistant.anthropic.Anthropic", side_effect=TypeError("no key")):
+        with override_settings(DEEPSEEK_API_KEY=""):
             text, handoff = reply([{"role": "user", "content": "Hi"}])
         self.assertIn("passing you to our team", text)
         self.assertIsNotNone(handoff)
+
+    @override_settings(DEEPSEEK_API_KEY="k")
+    def test_reply_parses_text_and_handoff_tool_call(self):
+        from unittest import mock
+        from .assistant import reply
+
+        def api(content, tool_calls=None):
+            res = mock.Mock()
+            res.json.return_value = {"choices": [{"finish_reason": "stop",
+                                                  "message": {"content": content, "tool_calls": tool_calls}}]}
+            return res
+
+        with mock.patch("bookings.assistant.requests.post", return_value=api("The trip is 6-11 January.")) as post:
+            self.assertEqual(reply([{"role": "user", "content": "Dates?"}]), ("The trip is 6-11 January.", None))
+        sent = post.call_args.kwargs["json"]["messages"]
+        self.assertEqual(sent[0]["role"], "system")
+        self.assertEqual(sent[1:], [{"role": "user", "content": "Dates?"}])
+
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "hand_off_to_human", "arguments": '{"summary": "Refund for AZ-1"}'}}
+        with mock.patch("bookings.assistant.requests.post", return_value=api(None, [call])):
+            text, handoff = reply([{"role": "user", "content": "Refund please"}])
+        self.assertEqual(handoff, "Refund for AZ-1")
+        self.assertIn("passing this to our team", text)

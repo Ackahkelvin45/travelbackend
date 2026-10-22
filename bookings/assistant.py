@@ -13,26 +13,24 @@ touches bookings; anything it can't answer goes to a person.
 import json
 import logging
 
-import anthropic
+import requests
 from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-HANDOFF_TOOL = {
+HANDOFF_TOOL = {"type": "function", "function": {
     "name": "hand_off_to_human",
     "description": "Pass the conversation to Azura's customer experience team.",
-    "strict": True,
-    "input_schema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "summary": {"type": "string", "description": "One line for staff: who the guest is and what they need."},
         },
         "required": ["summary"],
-        "additionalProperties": False,
     },
-}
+}}
 
 INSTRUCTIONS = """You are the Azura Travels assistant. You answer guests on the website chat and on WhatsApp. Azura runs curated trips in Ghana.
 
@@ -112,25 +110,39 @@ def reply(history):
     """``history`` is [{"role": "user"|"assistant", "content": str}, ...], ending
     with the guest's message. Returns (text, handoff_summary or None)."""
     try:
-        response = anthropic.Anthropic().beta.messages.create(
-            model=settings.ASSISTANT_MODEL,
-            max_tokens=2048,
-            system=[{"type": "text", "text": system_prompt(), "cache_control": {"type": "ephemeral"}}],
-            messages=history,
-            tools=[HANDOFF_TOOL],
-            output_config={"effort": "low"},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+        if not settings.DEEPSEEK_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set")
+        # DeepSeek's OpenAI-compatible chat API. The system prompt goes first so
+        # its automatic prefix cache covers the catalogue across requests.
+        r = requests.post(
+            f"{settings.DEEPSEEK_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
+            json={
+                "model": settings.ASSISTANT_MODEL,
+                "messages": [{"role": "system", "content": system_prompt()}, *history],
+                "tools": [HANDOFF_TOOL],
+                "max_tokens": 1024,
+            },
+            timeout=60,
         )
+        r.raise_for_status()
+        choice = r.json()["choices"][0]
     except Exception:  # API errors, missing key, bad catalogue data: a guest must never get silence
         logger.exception("Assistant call failed")
         return fallback_text(), "Assistant unavailable: guest needs a reply."
 
-    if response.stop_reason == "refusal":
+    if choice.get("finish_reason") == "content_filter":
         return fallback_text(), "Assistant declined: guest needs a reply."
-    text = "\n\n".join(b.text for b in response.content if b.type == "text").strip()
-    handoff = next((b.input["summary"] for b in response.content
-                    if b.type == "tool_use" and b.name == HANDOFF_TOOL["name"]), None)
+    message = choice["message"]
+    text = (message.get("content") or "").strip()
+    handoff = None
+    for call in message.get("tool_calls") or []:
+        if call["function"]["name"] == HANDOFF_TOOL["function"]["name"]:
+            try:
+                handoff = json.loads(call["function"]["arguments"]).get("summary") or ""
+            except (ValueError, AttributeError):
+                handoff = ""
+            handoff = handoff or "Guest asked for a person."
     if handoff is not None:
         hours = _contact().get("support_hours")
         text = (text + "\n\n" if text else "") + "I'm passing this to our team" + (
