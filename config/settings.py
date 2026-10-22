@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from datetime import timedelta
+from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.utils.translation import gettext_lazy as _
 import os
@@ -33,9 +34,8 @@ load_dotenv(BASE_DIR / _env_file)
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45",  # dev fallback only
+SECRET_KEY = os.environ.get("SECRET_KEY") or (
+    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45"  # dev fallback only
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -266,6 +266,22 @@ AUTOTASKS_ENABLED = "test" not in sys.argv
 
 # Trust the X-Forwarded-Proto header from the proxy (Nginx)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+if os.environ.get("DJANGO_ENV") == "production":
+    if DEBUG:
+        raise ImproperlyConfigured("DEBUG must be False in production (set DEBUG=False in .env.prod).")
+    if SECRET_KEY.startswith("django-insecure-"):
+        raise ImproperlyConfigured("SECRET_KEY is missing from .env.prod; refusing to sign sessions and tokens with the dev key.")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    # Off by default: TLS ends before Nginx (which listens on :80), so Django
+    # can't always tell a request was HTTPS and a redirect here could loop.
+    # Turn on once the proxy forwards X-Forwarded-Proto: https.
+    SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
+    SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
+    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = ("rest_framework.renderers.JSONRenderer",)
 
 ROOT_URLCONF = "config.urls"
 
