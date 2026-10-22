@@ -10,15 +10,23 @@ class InitializePaymentSerializer(serializers.Serializer):
         help_text="UUID of the Booking to pay for."
     )
     intent = serializers.ChoiceField(
-        choices=["balance", "deposit", "custom", "addon"],
+        choices=["balance", "deposit", "custom", "addon", "traveller"],
         default="balance",
         help_text=(
             "balance = pay everything outstanding (default). "
             "deposit = pay the outstanding part of the installment deposit. "
             "custom = pay `amount` (server-clamped to the outstanding balance). "
-            "addon = buy one more experience (`addon_code`); it joins the booking when paid."
+            "addon = buy one more experience (`addon_code`); it joins the booking when paid. "
+            "traveller = pay one group member's outstanding share (`traveller_id`)."
         ),
     )
+    traveller_id = serializers.UUIDField(required=False, help_text="Required for intent=traveller.")
+    traveller_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=30,
+        help_text="intent=addon on a trip booking: the guests the experience or transfer is for.",
+    )
+    adult = serializers.BooleanField(default=False, help_text="intent=addon: guests confirmed 18+ (adults-only items).")
+    payer_email = serializers.EmailField(required=False, help_text="Receipt email for a member paying their share.")
     addon_code = serializers.CharField(max_length=60, required=False,
                                        help_text="Required for intent=addon.")
     amount = serializers.DecimalField(
@@ -55,6 +63,8 @@ class InitializePaymentSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"amount": "A positive amount is required for a custom payment."}
                 )
+        if attrs.get("intent") == "traveller" and not attrs.get("traveller_id"):
+            raise serializers.ValidationError({"traveller_id": "Whose share?"})
         if attrs.get("intent") == "addon" and not attrs.get("addon_code"):
             raise serializers.ValidationError({"addon_code": "Which experience?"})
         if attrs.get("channel") == "momo":

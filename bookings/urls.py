@@ -12,6 +12,7 @@ from .views import (
     ComponentCheckoutView,
     ComponentQuoteView,
     HoldView,
+    TravellerShareView,
     TravelInfoView,
     BookingPreferencesView,
     CreateBookingView,
@@ -35,6 +36,7 @@ urlpatterns = [
     path("holds/", HoldView.as_view(), name="holds"),
     path("holds/<str:token>/", HoldView.as_view(), name="hold-release"),
     path("checkout/component/", ComponentCheckoutView.as_view(), name="checkout-component"),
+    path("share/<uuid:traveller_id>/", TravellerShareView.as_view(), name="traveller-share"),
 
     # GET — currently-published policy documents (accepted at checkout)
     path("policies/", CurrentPoliciesView.as_view(), name="policies"),

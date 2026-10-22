@@ -11,7 +11,7 @@ from unfold.contrib.filters.admin import BooleanRadioFilter, ChoicesDropdownFilt
 from unfold.decorators import display
 
 from config.unfold_theme import PAYMENT_STATUS_BADGE, REFUND_STATUS_BADGE
-from .models import FxRate, OpsConfig, Payment, Refund, ScheduledTask
+from .models import Donation, FxRate, OpsConfig, Payment, Refund, ScheduledTask
 from .receipts import compute_line_items, render_receipt_html
 
 
@@ -45,6 +45,8 @@ class PaymentAdmin(ModelAdmin):
         "currency",
     ]
     search_fields = ["paystack_reference", "booking__reference", "booking__email"]
+    actions = ["mark_reviewed", "export_csv"]
+    list_before_template = "admin/payments/ledger_summary.html"
     readonly_fields = [
         "payment_overview", "breakdown_table", "receipt_link",
         "gateway_summary", "gateway_response_pretty",
@@ -275,6 +277,40 @@ class PaymentAdmin(ModelAdmin):
         ]
         return custom + urls
 
+    def changelist_view(self, request, extra_context=None):
+        from django.db.models import Sum
+        collected = Payment.objects.filter(status=Payment.Status.SUCCESS).values("currency").annotate(t=Sum("amount"))
+        refunded = Refund.objects.filter(status=Refund.Status.PROCESSED).values("currency").annotate(t=Sum("amount"))
+        return super().changelist_view(request, {**(extra_context or {}),
+            "ledger": {"collected": collected, "refunded": refunded,
+                       "review": Payment.objects.filter(needs_review=True).count()}})
+
+    @admin.action(description="Mark reviewed (no money moves)")
+    def mark_reviewed(self, request, queryset):
+        """Clears the review flag after a person has checked the entry. Ledger
+        rows are never edited; corrections are new entries or refunds."""
+        from django.db.models import F, Value
+        from django.db.models.functions import Coalesce, Concat
+        n = queryset.filter(needs_review=True).update(
+            needs_review=False,
+            review_note=Concat(Coalesce(F("review_note"), Value("")), Value(f" [reviewed by {request.user.email}]")),
+        )
+        self.message_user(request, f"{n} payment(s) marked reviewed.")
+
+    @admin.action(description="Export selected to CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="payments.csv"'
+        w = csv.writer(response)
+        w.writerow(["Reference", "Booking", "Status", "Purpose", "Method", "Amount", "Currency",
+                    "Charged", "Charged currency", "Rate", "Paid at", "Needs review"])
+        for p in queryset.select_related("booking"):
+            w.writerow([p.paystack_reference, p.booking.reference, p.status, p.purpose, p.method, p.amount, p.currency,
+                        p.charged_amount or "", p.charged_currency or "", p.exchange_rate or "", p.paid_at or "", p.needs_review])
+        return response
+
     def receipt_view(self, request, pk):
         # Staff + model view permission required (admin_view already enforces
         # login/staff); object lookup is by UUID pk, not enumerable.
@@ -389,13 +425,86 @@ class FxRateAdmin(ModelAdmin):
 
 @admin.register(OpsConfig)
 class OpsConfigAdmin(ModelAdmin):
-    """Single-row operational settings. Secrets stay in the environment."""
+    """Single-row operational settings (canvas: DjSettings). Secrets stay in
+    the environment. Blank contact fields keep the site's bracketed fallback."""
 
-    fields = ["alert_email", "checkout_fee_notice", "updated_at"]
     readonly_fields = ["updated_at"]
+    fieldsets = (
+        ("Contact & hours", {
+            "classes": ["tab"],
+            "description": "Shown on the website. Leave a field blank until it is confirmed; the site never shows placeholders as real details.",
+            "fields": ("contact_email", "contact_phone", "whatsapp_number", "emergency_phone", "staffed_hours",
+                       "legal_name", "legal_address"),
+        }),
+        ("Checkout & CRM", {
+            "classes": ["tab"],
+            "fields": ("hold_minutes", "lead_reply_hours", "coordinator_contact_hours", "reminder_schedule_hours",
+                       "checkout_fee_notice"),
+        }),
+        ("WhatsApp", {
+            "classes": ["tab"],
+            "description": "Confirmations go only to guests who ticked the WhatsApp box at checkout. Meta must approve "
+                           "the template first (WhatsApp Manager → Message templates); suggested body: \"Hi {{1}}, "
+                           "payment received for Azura booking {{2}}. Paid: {{3}}. Balance: {{4}}. Receipt, tickets "
+                           "and itinerary: {{5}}\"",
+            "fields": ("whatsapp_confirmation_template", "whatsapp_template_language"),
+        }),
+        ("Donations", {
+            "classes": ["tab"],
+            "description": "Academy donations settle to their own Paystack subaccount and never mix with booking "
+                           "receipts. Keep them closed until that account is verified.",
+            "fields": ("donations_enabled", "donation_subaccount"),
+        }),
+        ("Alerts", {
+            "classes": ["tab"],
+            "description": "Payment mismatches, FX outages and other critical events.",
+            "fields": ("alert_email", "updated_at"),
+        }),
+    )
+
+    def changelist_view(self, request, extra_context=None):
+        """A singleton: the list page goes straight to the one settings form."""
+        from django.shortcuts import redirect
+        return redirect("admin:payments_opsconfig_change", OpsConfig.get().pk)
 
     def has_add_permission(self, request):
         return not OpsConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Donation)
+class DonationAdmin(ModelAdmin):
+    """Academy donation records (read-only: money arrives via Paystack only)."""
+    list_display = ["reference", "donor_name", "amount_display", "source", "status", "needs_review", "paid_at"]
+    list_filter = ["status", "source", "needs_review"]
+    search_fields = ["reference", "donor_name", "donor_email", "booking__reference"]
+    readonly_fields = [f.name for f in Donation._meta.fields]
+    actions = ["export_csv"]
+
+    @admin.display(description="Amount", ordering="amount")
+    def amount_display(self, obj):
+        return f"{obj.currency} {obj.amount:,.2f}"
+
+    @admin.action(description="Export CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="azura-donations.csv"'
+        w = csv.writer(response)
+        w.writerow(["Reference", "Date", "Donor", "Email", "USD", "GHS charged", "Source", "Booking", "Status"])
+        for d in queryset.select_related("booking"):
+            w.writerow([d.reference, d.paid_at or d.created_at, d.donor_name, d.donor_email, d.amount,
+                        d.charged_amount, d.get_source_display(), d.booking.reference if d.booking else "",
+                        d.get_status_display()])
+        return response
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     def has_delete_permission(self, request, obj=None):
         return False
@@ -405,6 +514,17 @@ class OpsConfigAdmin(ModelAdmin):
 class ScheduledTaskAdmin(ModelAdmin):
     list_display = ["name", "is_enabled", "last_run_at", "last_result_short"]
     list_editable = ["is_enabled"]
+    actions = ["run_now"]
+
+    @admin.action(description="Run now")
+    def run_now(self, request, queryset):
+        from django.utils import timezone
+        from .autotasks import TASKS, _execute
+        for task in queryset:
+            if task.name in TASKS:
+                ScheduledTask.objects.filter(pk=task.pk).update(last_run_at=timezone.now())
+                _execute(task.name)
+        self.message_user(request, f"Ran {queryset.count()} task(s). See 'Last result'.")
     readonly_fields = ["name", "last_run_at", "last_result"]
     fields = ["name", "is_enabled", "last_run_at", "last_result"]
 

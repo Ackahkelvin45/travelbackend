@@ -51,12 +51,26 @@ def _run_send_overdue_notices():
     return out.getvalue().strip()
 
 
+def _run_crm_followups():
+    from bookings.crm import run_followups
+    return run_followups()
+
+
+def _run_flush_expired_tokens():
+    from django.core.management import call_command
+    call_command("flushexpiredtokens")
+
+
 # name → (interval, runner). Intervals: FX hourly (matches the cache window),
 # reminders + overdue notices daily (both idempotent per booking).
 TASKS = {
     "refresh_fx_rates": (lambda: timedelta(seconds=getattr(settings, "FX_CACHE_SECONDS", 3600)), _run_refresh_fx_rates),
     "send_payment_reminders": (lambda: timedelta(hours=24), _run_send_payment_reminders),
     "send_overdue_notices": (lambda: timedelta(hours=24), _run_send_overdue_notices),
+    # Checkout leads, consent-based quote reminders and staff SLA alerts (hourly, idempotent).
+    "crm_followups": (lambda: timedelta(hours=1), _run_crm_followups),
+    # Revoked/expired login tokens pile up one row per login; clear them daily.
+    "flush_expired_tokens": (lambda: timedelta(hours=24), _run_flush_expired_tokens),
 }
 
 

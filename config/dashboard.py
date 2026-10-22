@@ -370,6 +370,7 @@ def dashboard_callback(request, context):
          "sub": f"{avg_rating}★ average" if avg_rating > 0 else None},
     ]
 
+    context.update(work_queue_context(request))
     context.update({
         "kpi_cards": kpi_cards,
         "kpi_bookings_this_month": bookings_this_month,
@@ -391,3 +392,110 @@ def dashboard_callback(request, context):
         "recent_bookings": recent_bookings,
     })
     return context
+
+
+def contact_overdue_ids():
+    """Confirmed bookings whose lead guest wasn't contacted within the SLA of first payment."""
+    from bookings.models import Booking
+    from payments.models import OpsConfig, Payment
+
+    cutoff = timezone.now() - timedelta(hours=OpsConfig.get().coordinator_contact_hours)
+    late = Payment.objects.filter(status=Payment.Status.SUCCESS, paid_at__lt=cutoff).values("booking_id")
+    return list(Booking.objects.filter(status=Booking.Status.CONFIRMED, lead_contacted_at__isnull=True,
+                                       pk__in=late).values_list("pk", flat=True))
+
+
+def work_queue_context(request):
+    """Change Request v2 dashboard: today's work, owner figures, rooms, uptake, health."""
+    from django.db.models import Count, Sum
+    from django.urls import reverse
+    from bookings.models import Booking, BookingTraveller, Lead
+    from packages.models import RoomUnit, StayType, TravelPackage
+    from payments.models import FxRate, OpsConfig, Payment, ScheduledTask
+
+    now = timezone.now()
+    today = timezone.localdate()
+    bookings_url = reverse("admin:bookings_booking_changelist")
+    confirmed = Booking.objects.filter(status=Booking.Status.CONFIRMED)
+    due_soon = [b for b in confirmed.select_related("package") if not b.is_paid
+                and b.effective_payment_deadline and b.effective_payment_deadline <= today + timedelta(days=14)]
+    queue = [
+        {"count": confirmed.filter(coordinator__isnull=True).count(), "title": "Paid bookings without a coordinator",
+         "note": "Assign someone to contact the lead guest", "tone": "danger", "href": f"{bookings_url}?queue=needs_coordinator"},
+        {"count": len(contact_overdue_ids()), "title": "Lead guest not contacted in 24 h",
+         "note": "Coordinator contact is overdue", "tone": "danger", "href": f"{bookings_url}?queue=contact_overdue"},
+        {"count": len(due_soon), "title": "Balances due within 14 days",
+         "note": "Reminders go out 14, 7 and 1 days before", "tone": "warning", "href": f"{bookings_url}?queue=balance_due"},
+        {"count": Lead.objects.filter(replied_at__isnull=True, reply_due_at__lt=now).exclude(stage__in=["won", "lost"]).count(),
+         "title": "Leads waiting past the reply target", "note": "Reply or mark replied", "tone": "warning",
+         "href": reverse("admin:bookings_lead_changelist") + "?reply=overdue"},
+        {"count": Payment.objects.filter(needs_review=True).count(), "title": "Payments needing review",
+         "note": "Mismatches and overpayments", "tone": "danger", "href": reverse("admin:payments_payment_changelist") + "?needs_review__exact=1"},
+        {"count": RoomUnit.objects.filter(booking__isnull=True, held_until__gt=now).count(), "title": "Rooms held at checkout",
+         "note": "Released automatically when the hold expires", "tone": "info", "href": reverse("admin:packages_roomunit_changelist") + "?state=held"},
+    ]
+
+    collected = Payment.objects.filter(status=Payment.Status.SUCCESS).values("currency").annotate(t=Sum("amount"))
+    rooms = []
+    for st in StayType.objects.order_by("kind", "order"):
+        units = list(st.units.all())
+        sold = sum(1 for u in units if u.booking_id and not u.held_until)
+        held = sum(1 for u in units if u.held_until and u.held_until > now)
+        rooms.append({"name": st.name, "sold": sold, "held": held, "total": len(units),
+                      "sold_pct": int(sold / len(units) * 100) if units else 0,
+                      "held_pct": int(held / len(units) * 100) if units else 0})
+
+    # JSON "contains" isn't portable to SQLite, so count chosen codes in Python.
+    chosen = list(BookingTraveller.objects.filter(booking__status__in=["confirmed", "completed"])
+                  .values_list("booking__package_id", "experiences"))
+    total_travellers = len(chosen)
+    uptake = []
+    for pkg in TravelPackage.objects.filter(pricing_model=TravelPackage.PricingModel.COMPONENT):
+        for a in pkg.addons.filter(is_active=True, unit="per_person"):
+            n = sum(1 for pkg_id, codes in chosen if pkg_id == pkg.pk and a.code in codes)
+            uptake.append({"name": a.name, "n": n, "pct": int(n / total_travellers * 100) if total_travellers else 0})
+
+    fx = FxRate.objects.order_by("-fetched_at").first()
+    fx_age = (now - fx.fetched_at) if fx else None
+    health = [{"name": "Exchange-rate feed", "ok": bool(fx_age and fx_age < timedelta(hours=24)),
+               "value": f"1 {fx.base} = {fx.rate:.4f} {fx.quote} · {int(fx_age.total_seconds() // 60)} min ago" if fx else "No rate yet"}]
+    for t in ScheduledTask.objects.all():
+        health.append({"name": t.name.replace("_", " ").capitalize(), "ok": t.is_enabled and not (t.last_result or "").lower().startswith("error"),
+                       "value": ("Paused" if not t.is_enabled else f"Last run {t.last_run_at:%d %b %H:%M}" if t.last_run_at else "Not run yet")})
+    health.append({"name": "Alert email", "ok": bool(OpsConfig.get().alert_email),
+                   "value": OpsConfig.get().alert_email or "Not set (using environment fallback)"})
+
+    flagship = TravelPackage.objects.filter(pricing_model=TravelPackage.PricingModel.COMPONENT, is_active=True).order_by("available_from").first()
+    return {
+        "greeting_name": request.user.first_name or "team",
+        "days_to_trip": (flagship.available_from - today).days if flagship and flagship.available_from else None,
+        "trip_title": flagship.title if flagship else None,
+        "work_queue": queue, "queue_total": sum(q["count"] for q in queue),
+        "owner_kpis": [
+            {"label": "Confirmed bookings", "value": confirmed.count() + Booking.objects.filter(status="completed").count()},
+            {"label": "Travellers", "value": total_travellers},
+            {"label": "Collected", "value": " · ".join(f"{c['currency']} {c['t']:,.2f}" for c in collected) or "—"},
+            {"label": "Rooms sold", "value": f"{sum(r['sold'] for r in rooms)} of {sum(r['total'] for r in rooms)}"},
+        ],
+        "room_inventory": rooms, "uptake": uptake, "health": health,
+    }
+
+
+# ── Sidebar badges (UNFOLD["SIDEBAR"]) — counts of work waiting; "" hides the badge ──
+
+def badge_bookings(request):
+    from bookings.models import Booking
+    n = Booking.objects.filter(status=Booking.Status.CONFIRMED, coordinator__isnull=True).count()
+    return str(n) if n else ""
+
+
+def badge_leads(request):
+    from bookings.models import Lead
+    n = Lead.objects.filter(replied_at__isnull=True, reply_due_at__lt=timezone.now()).exclude(stage__in=["won", "lost"]).count()
+    return str(n) if n else ""
+
+
+def badge_payments(request):
+    from payments.models import Payment
+    n = Payment.objects.filter(needs_review=True).count()
+    return str(n) if n else ""

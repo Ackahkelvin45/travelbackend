@@ -1,0 +1,56 @@
+{% extends "admin/base.html" %}
+{% block title %}Reports | {{ site_title }}{% endblock %}
+{% block content %}
+<div class="py-6">
+  <div class="az-section__head">
+    <div><h1 class="font-bold text-2xl text-important">Reports</h1>
+      <p class="text-sm text-subtle">{{ r.start|date:"j M Y" }} – {{ r.end|date:"j M Y" }}</p></div>
+    <form method="get" class="az-range">
+      {% for p in presets %}<a href="?from={{ p.from }}&to={{ p.to }}" class="az-pill{% if p.on %} az-pill--on{% endif %}">{{ p.label }}</a>{% endfor %}
+      <label>From <input type="date" name="from" value="{{ r.start|date:'Y-m-d' }}"></label>
+      <label>To <input type="date" name="to" value="{{ r.end|date:'Y-m-d' }}"></label>
+      <button type="submit" class="az-btn">Apply</button>
+      <a class="az-link" href="?from={{ r.start|date:'Y-m-d' }}&to={{ r.end|date:'Y-m-d' }}&export=csv">Export CSV</a>
+    </form>
+  </div>
+
+  <div class="az-summary">
+    {% for k in r.kpis %}<div class="az-kpi"><span>{{ k.label }}</span><strong>{{ k.value }}</strong><span>{{ k.note }}</span></div>{% endfor %}
+  </div>
+
+  <div class="az-grid3">
+    <section class="az-card">
+      <div class="az-section__head"><h2>Booking funnel</h2></div>
+      {% for f in r.funnel %}
+        <div class="az-roomrow"><div><strong>{{ f.label }}</strong></div>
+          <span class="az-stack" style="width:160px"><i class="sold" style="width:{% widthratio f.n r.funnel_max 100 %}%"></i></span><b>{{ f.n }}</b></div>
+      {% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Enquiry sources</h2><span>converted to bookings</span></div>
+      {% for s in r.sources %}
+        <div class="az-roomrow"><div><strong>{{ s.label }}</strong><span>{{ s.leads }} lead{{ s.leads|pluralize }} · {{ s.won }} booked</span></div><b>{{ s.rate }}%</b></div>
+      {% empty %}<p class="az-note">No enquiries in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Accommodation uptake</h2><span>paid travellers</span></div>
+      {% for s in r.stays %}
+        <div class="az-roomrow"><div><strong>{{ s.label }}</strong><span>{{ s.n }} traveller{{ s.n|pluralize }}</span></div>
+          <span class="az-stack"><i class="sold" style="width:{{ s.pct }}%"></i></span><b>{{ s.pct }}%</b></div>
+      {% empty %}<p class="az-note">No paid travellers in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Experience sales</h2><span>paid bookings</span></div>
+      {% for s in r.sales %}
+        <div class="az-roomrow"><div><strong>{{ s.label }}</strong><span>{{ s.count }} sold</span></div><b>USD {{ s.revenue|floatformat:"2g" }}</b></div>
+      {% empty %}<p class="az-note">No experience sales in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Referral codes</h2><span>attribution only · no customer discount</span></div>
+      {% for c in r.referrals %}
+        <div class="az-roomrow"><div><strong>{{ c.code }}</strong><span>{{ c.leads }} leads · {{ c.quotes }} quotes</span></div><b>{{ c.bookings }} booked</b></div>
+      {% empty %}<p class="az-note">No referral codes used in this range.</p>{% endfor %}
+    </section>
+  </div>
+</div>
+{% endblock %}

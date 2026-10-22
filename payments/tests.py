@@ -832,7 +832,9 @@ class FullLifecycleE2ETests(TestCase):
         with self.captureOnCommitCallbacks(execute=False):
             self._signed_webhook(r.data["reference"], Decimal("55500.00"))
 
-        r = self.client.get(f"/api/bookings/{reference}/")
+        from bookings.models import Booking
+        token = Booking.objects.get(reference=reference).view_token
+        r = self.client.get(f"/api/bookings/{reference}/?t={token}")
         self.assertEqual(r.data["payment_state"], "fully_paid")
         self.assertEqual(r.data["balance"], "0.00")
         self.assertEqual(len([p for p in r.data["payments"] if p["status"] == "success"]), 2)
@@ -1316,6 +1318,21 @@ class SecurityRegressionTests(TestCase):
     def _sign(self, body: bytes) -> str:
         return hmac_lib.new(b"sk_test_sec_secret", body, hashlib.sha512).hexdigest()
 
+    def test_reference_alone_never_shows_guest_details(self):
+        booking = make_booking()
+        url = f"/api/bookings/{booking.reference}/"
+        public = self.client.get(url).data
+        self.assertEqual(public["balance"], "1200.00")
+        for pii in ("first_name", "email", "phone", "travellers", "payments"):
+            self.assertNotIn(pii, public)
+        self.assertNotIn("email", self.client.get(url + "?t=forged").data)
+        self.assertEqual(self.client.get(url + f"?t={booking.view_token}").data["email"], booking.email)
+        # Transferring the booking revokes the old holder's links.
+        old = booking.view_token
+        booking.email = "new-lead@example.com"
+        booking.save()
+        self.assertNotIn("email", self.client.get(url + f"?t={old}").data)
+
     # ── Webhook forgery ──────────────────────────────────────────────────────
     def test_webhook_without_signature_is_rejected(self):
         booking = make_booking()
@@ -1492,9 +1509,9 @@ class ConfirmationEmailEscapingTests(TestCase):
         self.assertNotIn("<script>alert(1)</script>", html_out)
         self.assertNotIn("<img src=x onerror", html_out)
         self.assertNotIn('<a href="https://evil.example/phish"', html_out)
-        # … they are present only as escaped entities.
+        # … the greeting shows the first name only as escaped entities (the
+        # last name isn't rendered in the confirmation any more).
         self.assertIn("&lt;script&gt;", html_out)
-        self.assertIn("&lt;img src=x onerror", html_out)
 
 
 class PaymentBreakdownTests(TestCase):
@@ -1743,7 +1760,7 @@ class CancellationRequestTests(TestCase):
         self.assertEqual(p.status_code, 400)
         self.assertIn("under review", p.data["detail"])
         # API surfaces it
-        d = APIClient().get(f"/api/bookings/{booking.reference}/")
+        d = APIClient().get(f"/api/bookings/{booking.reference}/?t={booking.view_token}")
         self.assertEqual(d.data["cancellation_request"]["status"], "pending")
 
     def test_approval_refunds_as_of_request_time_not_approval_time(self, mail):
@@ -1879,163 +1896,6 @@ class StaffGroupTests(TestCase):
         self.assertIn("special_requests", fields_for(ops))
 
 
-# ── Staff portal API (slice 1: bookings) ─────────────────────────────────────
-
-@patch("payments.email.send_booking_confirmation")
-class StaffBookingApiTests(TestCase):
-    def setUp(self):
-        from django.contrib.auth.models import Group
-        from django.core.management import call_command
-        call_command("setup_staff_groups")
-        def staff(group, email):
-            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
-            u.groups.add(Group.objects.get(name=group))
-            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
-        self.viewer = staff("Azura Viewer", "v@test.com")
-        self.ops = staff("Azura Operations", "o@test.com")
-        self.guest = APIClient(); self.guest.force_authenticate(
-            User.objects.create_user(email="g@test.com", password="x", first_name="G", last_name="U"))
-        self.booking = make_booking(total="1200.00", status=Booking.Status.CONFIRMED)
-        self.booking.special_requests = "Vegetarian; uses a wheelchair"
-        self.booking.save()
-
-    def test_non_staff_is_locked_out(self, _m):
-        self.assertEqual(self.guest.get("/api/staff/bookings/").status_code, 403)
-        self.assertEqual(self.guest.get("/api/staff/me/").status_code, 403)
-
-    def test_me_lists_capabilities_by_level(self, _m):
-        v = self.viewer.get("/api/staff/me/").data
-        o = self.ops.get("/api/staff/me/").data
-        self.assertNotIn("bookings.mark_arrived", v["perms"])
-        self.assertIn("bookings.mark_arrived", o["perms"])
-        self.assertEqual(v["groups"], ["Azura Viewer"])
-
-    def test_list_searches_and_paginates(self, _m):
-        r = self.viewer.get("/api/staff/bookings/", {"q": self.booking.reference[-6:]})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["count"], 1)
-        self.assertEqual(r.data["results"][0]["reference"], self.booking.reference)
-        self.assertEqual(r.data["results"][0]["payment_state"], "unpaid")
-        self.assertEqual(self.viewer.get("/api/staff/bookings/", {"q": "nobody-here"}).data["count"], 0)
-
-    def test_overdue_filter(self, _m):
-        self.booking.package.final_payment_deadline = date.today() - timedelta(days=1)
-        self.booking.package.save()
-        r = self.viewer.get("/api/staff/bookings/", {"overdue": "1"})
-        self.assertEqual([b["reference"] for b in r.data["results"]], [self.booking.reference])
-        self.assertTrue(r.data["results"][0]["is_overdue"])
-
-    def test_special_requests_only_with_permission(self, _m):
-        url = f"/api/staff/bookings/{self.booking.reference}/"
-        self.assertNotIn("special_requests", self.viewer.get(url).data)
-        self.assertEqual(self.ops.get(url).data["special_requests"], "Vegetarian; uses a wheelchair")
-
-    def test_offline_payment_goes_through_the_ledger(self, _m):
-        url = f"/api/staff/bookings/{self.booking.reference}/offline-payment/"
-        self.assertEqual(self.viewer.post(url, {"amount": "200"}, format="json").status_code, 403)
-        r = self.ops.post(url, {"amount": "200.00", "method": "bank_transfer", "note": "GCB slip 1234"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data["amount_paid"], "200.00")
-        self.assertEqual(r.data["balance"], "1000.00")
-        p = self.booking.payments.get()
-        self.assertEqual(p.method, "bank_transfer"); self.assertIn("recorded by o@test.com", p.note)
-        # can't overpay
-        bad = self.ops.post(url, {"amount": "5000"}, format="json")
-        self.assertEqual(bad.status_code, 400)
-
-    def test_extend_deadline_requires_reason(self, _m):
-        url = f"/api/staff/bookings/{self.booking.reference}/extend-deadline/"
-        new = (date.today() + timedelta(days=10)).isoformat()
-        self.assertEqual(self.ops.post(url, {"date": new}, format="json").status_code, 400)
-        r = self.ops.post(url, {"date": new, "reason": "Salary delayed, agreed by phone"}, format="json")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["payment_deadline"], date.fromisoformat(new))
-        self.assertIn("o@test.com", r.data["payment_deadline_override_reason"])
-        self.assertEqual(self.viewer.post(url, {"date": new, "reason": "x"}, format="json").status_code, 403)
-
-    def test_mark_arrived_is_idempotent_and_gated(self, _m):
-        url = f"/api/staff/bookings/{self.booking.reference}/mark-arrived/"
-        self.assertEqual(self.viewer.post(url).status_code, 403)
-        first = self.ops.post(url).data["arrived_at"]
-        second = self.ops.post(url).data["arrived_at"]
-        self.assertIsNotNone(first); self.assertEqual(first, second)
-
-
-# ── Staff portal API (slices 2+3: cancellations, refunds) ───────────────────
-
-@patch("payments.email._send")
-class StaffCancellationAndRefundApiTests(TestCase):
-    def setUp(self):
-        from django.contrib.auth.models import Group
-        from django.core.management import call_command
-        call_command("setup_staff_groups")
-        def staff(group, email):
-            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
-            u.groups.add(Group.objects.get(name=group))
-            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
-        self.viewer = staff("Azura Viewer", "v2@test.com")
-        self.ops = staff("Azura Operations", "o2@test.com")
-        self.fin = staff("Azura Finance", "f2@test.com")
-
-    def _request(self, days=45):
-        from bookings.services import request_cancellation
-        booking = make_refundable_booking(["1000.00"], days_to_departure=days)
-        return booking, request_cancellation(booking, reason="Can't travel")
-
-    def test_queue_lists_pending_with_quote(self, _m):
-        booking, req = self._request()
-        r = self.viewer.get("/api/staff/cancellations/")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual([x["id"] for x in r.data], [str(req.id)])
-        self.assertEqual(r.data[0]["refund_total"], "600.00")
-        self.assertEqual(r.data[0]["booking"]["reference"], booking.reference)
-
-    def test_viewer_cannot_resolve_operations_can(self, mail):
-        booking, req = self._request()
-        self.assertEqual(self.viewer.post(f"/api/staff/cancellations/{req.id}/approve/", {}, format="json").status_code, 403)
-        r = self.ops.post(f"/api/staff/cancellations/{req.id}/approve/", {"note": "Approved as per policy"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data["status"], "approved")
-        booking.refresh_from_db()
-        self.assertEqual(booking.status, Booking.Status.CANCELLED)
-        self.assertEqual(booking.refunds.count(), 1)                       # leg now waiting for Finance
-        # already resolved → 400, queue empty
-        self.assertEqual(self.ops.post(f"/api/staff/cancellations/{req.id}/reject/", {}, format="json").status_code, 400)
-        self.assertEqual(self.viewer.get("/api/staff/cancellations/").data, [])
-
-    def test_reject_keeps_booking(self, _m):
-        booking, req = self._request()
-        r = self.ops.post(f"/api/staff/cancellations/{req.id}/reject/", {"note": "Outside policy"}, format="json")
-        self.assertEqual(r.data["status"], "rejected")
-        booking.refresh_from_db()
-        self.assertEqual(booking.status, Booking.Status.CONFIRMED)
-
-    def test_refund_queue_and_processing(self, mail):
-        booking, req = self._request()
-        self.ops.post(f"/api/staff/cancellations/{req.id}/approve/", {}, format="json")
-        leg_id = self.fin.get("/api/staff/refunds/").data[0]["id"]
-        self.assertEqual(self.fin.get("/api/staff/refunds/").data[0]["amount"], "600.00")
-        # Operations can see but not pay out
-        self.assertEqual(self.ops.get("/api/staff/refunds/").status_code, 200)
-        self.assertEqual(self.ops.post(f"/api/staff/refunds/{leg_id}/process/", {"external_reference": "x"}, format="json").status_code, 403)
-        # Finance must give a reference
-        self.assertEqual(self.fin.post(f"/api/staff/refunds/{leg_id}/process/", {}, format="json").status_code, 400)
-        mail.reset_mock()
-        # the guest email is sent on commit — run commit hooks inside the test transaction
-        with self.captureOnCommitCallbacks(execute=True):
-            r = self.fin.post(f"/api/staff/refunds/{leg_id}/process/", {"external_reference": "PSK-RF-123", "note": "Done in dashboard"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data["status"], "processed")
-        self.assertEqual(r.data["external_reference"], "PSK-RF-123")
-        booking.refresh_from_db()
-        self.assertEqual(booking.amount_refunded, Decimal("600.00"))
-        # guest told: amount + reference
-        self.assertEqual(mail.call_count, 1)
-        self.assertIn("PSK-RF-123", mail.call_args[0][2])
-        self.assertEqual(self.fin.get("/api/staff/refunds/").data, [])       # nothing pending
-        self.assertEqual(len(self.fin.get("/api/staff/refunds/", {"status": "processed"}).data), 1)
-
-
 # ── Policy gaps: expiry, capacity, disputes, delivery log, failed email, staff cancel, misc ─
 
 import json as _json
@@ -2107,7 +1967,7 @@ class DisputeTests(TestCase):
     def test_payments_expose_disputed_flag(self, _sig, _alert):
         booking = make_refundable_booking(["1000.00"])
         self._hook("charge.dispute.create", booking.payments.get().paystack_reference)
-        r = APIClient().get(f"/api/bookings/{booking.reference}/")
+        r = APIClient().get(f"/api/bookings/{booking.reference}/?t={booking.view_token}")
         self.assertTrue(r.data["payments"][0]["disputed"])
 
 
@@ -2173,46 +2033,23 @@ class EmailDeliveryLogTests(TestCase):
 @patch("payments.email._send")
 @patch("payments.email.deliver")
 class StaffCancelAndMiscTests(TestCase):
-    def setUp(self):
-        from django.contrib.auth.models import Group
-        from django.core.management import call_command
-        call_command("setup_staff_groups")
-        def staff(group, email):
-            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
-            u.groups.add(Group.objects.get(name=group))
-            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
-        self.viewer = staff("Azura Viewer", "v3@test.com")
-        self.ops = staff("Azura Operations", "o3@test.com")
-        self.fin = staff("Azura Finance", "f3@test.com")
-
-    def test_organizer_cancel_refunds_in_full_and_is_finance_only(self, *_):
+    def test_organizer_cancel_refunds_in_full(self, *_):
+        from bookings.services import cancel_booking
         booking = make_refundable_booking(["1000.00"], days_to_departure=5)      # guest band would be 0%
-        url = f"/api/staff/bookings/{booking.reference}/cancel/"
-        self.assertEqual(self.ops.post(url, {"mode": "organizer"}, format="json").status_code, 403)
-        self.assertEqual(self.fin.post(url, {"mode": "nonsense"}, format="json").status_code, 400)
-        r = self.fin.post(url, {"mode": "organizer", "note": "Tour called off"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
+        cancel_booking(booking, reason=Booking.CancellationReason.ORGANIZER,
+                       refund_reason="Organizer cancellation — full refund")
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
         self.assertEqual(booking.cancellation_reason, Booking.CancellationReason.ORGANIZER)
         self.assertEqual(sum(l.amount for l in booking.refunds.all()), Decimal("1000.00"))
 
     def test_guest_mode_cancel_uses_bands(self, *_):
+        from bookings.services import cancel_booking
         booking = make_refundable_booking(["1000.00"], days_to_departure=5)
-        r = self.fin.post(f"/api/staff/bookings/{booking.reference}/cancel/", {"mode": "guest"}, format="json")
-        self.assertEqual(r.status_code, 200)
+        cancel_booking(booking, reason=Booking.CancellationReason.ADMIN)
         booking.refresh_from_db()
         self.assertEqual(booking.status, Booking.Status.CANCELLED)
         self.assertEqual(booking.refunds.count(), 0)                                # 0% → nothing owed
-
-    def test_email_history_endpoint(self, *_):
-        from payments.models import EmailLog
-        booking = make_booking()
-        EmailLog.objects.create(booking=booking, kind="receipt", to_email=booking.email, subject="S", status="sent", provider_id="re_1")
-        r = self.viewer.get(f"/api/staff/bookings/{booking.reference}/emails/")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data[0]["kind"], "receipt")
-        self.assertEqual(APIClient().get(f"/api/staff/bookings/{booking.reference}/emails/").status_code, 401)
 
     def test_first_installment_payment_cannot_be_below_deposit(self, *_):
         booking = make_booking()
@@ -2257,16 +2094,8 @@ class NewsletterUnsubscribeTests(TestCase):
 
 @patch("payments.email.deliver")
 class TravellerChangeTests(TestCase):
-    def setUp(self):
-        from django.contrib.auth.models import Group
-        from django.core.management import call_command
-        call_command("setup_staff_groups")
-        def staff(group, email):
-            u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
-            u.groups.add(Group.objects.get(name=group))
-            c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
-        self.viewer = staff("Azura Viewer", "v4@test.com")
-        self.ops = staff("Azura Operations", "o4@test.com")
+    """Terms Part A: lead contact corrections and replacements (services.change_lead_contact,
+    used by the admin's "Change lead contact")."""
 
     def _booking(self, days=60):
         b = make_booking(status=Booking.Status.CONFIRMED)
@@ -2275,13 +2104,14 @@ class TravellerChangeTests(TestCase):
         b.save()
         return b
 
+    def change(self, b, **kw):
+        from bookings.services import change_lead_contact
+        change_lead_contact(b, by_email="o4@test.com", **kw)
+        b.refresh_from_db()
+
     def test_correction_keeps_account_and_records_history(self, mail):
         b = self._booking()
-        url = f"/api/staff/bookings/{b.reference}/traveller/"
-        self.assertEqual(self.viewer.post(url, {"kind": "correction", "first_name": "Kwame", "last_name": "Mensa"}, format="json").status_code, 403)
-        r = self.ops.post(url, {"kind": "correction", "first_name": "Kwame", "last_name": "Mensa"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        b.refresh_from_db()
+        self.change(b, kind="correction", first_name="Kwame", last_name="Mensa")
         self.assertEqual((b.first_name, b.last_name), ("Kwame", "Mensa"))
         self.assertIsNotNone(b.user)                                  # same person — account stays
         change = b.traveller_changes[0]
@@ -2292,29 +2122,40 @@ class TravellerChangeTests(TestCase):
     def test_replacement_detaches_old_account_and_emails_both(self, mail):
         b = self._booking()
         paid_before = b.amount_paid
-        r = self.ops.post(f"/api/staff/bookings/{b.reference}/traveller/",
-                          {"kind": "replacement", "first_name": "Ama", "last_name": "Owusu", "email": "ama@test.com"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        b.refresh_from_db()
+        self.change(b, kind="replacement", first_name="Ama", last_name="Owusu", email="ama@test.com")
         self.assertEqual(b.email, "ama@test.com")
         self.assertIsNone(b.user)                                     # ownership never follows an email change
         self.assertEqual(b.amount_paid, paid_before)                  # money stays with the booking
-        self.assertEqual(mail.call_count, 2)
-        recipients = {c[0][1] for c in mail.call_args_list}
-        self.assertEqual(recipients, {"ama@test.com", "kwame@example.com"})
+        self.assertEqual({c[0][1] for c in mail.call_args_list}, {"ama@test.com", "kwame@example.com"})
 
     def test_replacement_inside_14_days_needs_a_review_note(self, _m):
+        from bookings.services import IllegalTransition
         b = self._booking(days=10)
-        url = f"/api/staff/bookings/{b.reference}/traveller/"
         body = {"kind": "replacement", "first_name": "Ama", "last_name": "Owusu", "email": "ama@test.com"}
-        self.assertEqual(self.ops.post(url, body, format="json").status_code, 400)
-        self.assertEqual(self.ops.post(url, {**body, "note": "Approved by manager, hotel confirmed"}, format="json").status_code, 200)
+        with self.assertRaises(IllegalTransition):
+            self.change(b, **body)
+        self.change(b, **body, note="Approved by manager, hotel confirmed")
+        self.assertEqual(b.email, "ama@test.com")
 
     def test_no_change_is_rejected(self, _m):
+        from bookings.services import IllegalTransition
         b = self._booking()
-        r = self.ops.post(f"/api/staff/bookings/{b.reference}/traveller/",
-                          {"kind": "correction", "first_name": b.first_name, "last_name": b.last_name}, format="json")
-        self.assertEqual(r.status_code, 400)
+        with self.assertRaises(IllegalTransition):
+            self.change(b, kind="correction", first_name=b.first_name, last_name=b.last_name)
+
+    def test_admin_action_needs_change_permission(self, _m):
+        from django.contrib.auth.models import Group
+        from django.core.management import call_command
+        call_command("setup_staff_groups")
+        b = self._booking()
+        viewer = User.objects.create_user(email="v4@test.com", password="x", first_name="S", last_name="T", is_staff=True)
+        viewer.groups.add(Group.objects.get(name="Azura Viewer"))
+        self.client.force_login(viewer)
+        res = self.client.post(f"/admin/bookings/booking/{b.pk}/change-contact/",
+                               {"kind": "correction", "first_name": "X", "last_name": "Y"})
+        self.assertNotEqual(res.status_code, 302)
+        b.refresh_from_db()
+        self.assertNotEqual(b.first_name, "X")
 
 
 # ── Add-on cancellation: 50% fee (owner decision) ───────────────────────────
@@ -2363,21 +2204,26 @@ class AddonCancellationTests(TestCase):
         with self.assertRaises(IllegalTransition):                       # can't cancel the fee itself
             remove_addon(b, code="enzo_vip_cancellation_fee", by_email="x")
 
-    def test_endpoint_is_finance_only(self, _m):
+    def test_admin_removal_is_finance_only(self, _m):
         from django.contrib.auth.models import Group
         from django.core.management import call_command
         call_command("setup_staff_groups")
         def staff(group, email):
             u = User.objects.create_user(email=email, password="x", first_name="S", last_name="T", is_staff=True)
-            u.groups.add(Group.objects.get(name=group)); c = APIClient(); c.force_authenticate(User.objects.get(pk=u.pk)); return c
+            u.groups.add(Group.objects.get(name=group))
+            return u
         ops, fin = staff("Azura Operations", "o5@test.com"), staff("Azura Finance", "f5@test.com")
         b = self._booking("1200.00")
-        url = f"/api/staff/bookings/{b.reference}/remove-addon/"
-        self.assertEqual(ops.post(url, {"code": "enzo_vip"}, format="json").status_code, 403)
-        r = fin.post(url, {"code": "enzo_vip", "note": "Guest asked by phone"}, format="json")
-        self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data["total_amount"], "1100.00")
-        self.assertEqual(r.data["addon_changes"][0]["note"], "Guest asked by phone")
+        url = f"/admin/bookings/booking/{b.pk}/remove-addon/"
+        self.client.force_login(ops)
+        self.client.post(url, {"code": "enzo_vip"})
+        b.refresh_from_db()
+        self.assertEqual(b.total_amount, Decimal("1200.00"))           # Operations can't
+        self.client.force_login(fin)
+        self.assertEqual(self.client.post(url, {"code": "enzo_vip", "note": "Guest asked by phone"}).status_code, 302)
+        b.refresh_from_db()
+        self.assertEqual(b.total_amount, Decimal("1100.00"))
+        self.assertEqual(b.addon_changes[0]["note"], "Guest asked by phone")
 
 
 # ── Adding an experience after booking (owner: yes, until 7 days before) ────

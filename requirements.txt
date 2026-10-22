@@ -1,12 +1,12 @@
 asgiref==3.11.1
 certifi==2026.4.22
 charset-normalizer==3.4.7
-django==6.0.4
 django-cors-headers==4.9.0
 django-filter==25.2
 django-unfold==0.97.0
-djangorestframework==3.17.1
+django==6.0.4
 djangorestframework-simplejwt==5.5.1
+djangorestframework==3.17.1
 drf-yasg==1.21.15
 gunicorn==25.3.0
 idna==3.13
