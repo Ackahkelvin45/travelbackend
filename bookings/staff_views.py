@@ -469,70 +469,26 @@ class StaffCancelBookingView(_StaffAction):
 
 # ── Name correction / traveller replacement (Terms Part A) ───────────────────
 
-TRANSFER_CUTOFF_DAYS = 14
-
-
 class StaffTravellerChangeView(_StaffAction):
     """POST {kind: "correction" | "replacement", first_name, last_name, email?, phone?, note?}
-
-    correction  → same person, fixed spelling. Free.
-    replacement → a different person takes the place. Free; allowed up to
-                  TRANSFER_CUTOFF_DAYS before departure — later requests need
-                  individual review, so a note is required. If the email
-                  changes, the booking is detached from the old account (ownership
-                  never follows an email change automatically) and the new
-                  traveller is emailed a fresh link to claim it.
-    Both identities, who approved and when are appended to traveller_changes.
-    """
+    — rules in services.change_lead_contact."""
     required_perm = "bookings.change_booking"
 
     def post(self, request, reference):
+        from .services import IllegalTransition, change_lead_contact
+
         booking, err = self.booking_or_404(reference)
         if err:
             return err
-        if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
-            return Response({"detail": f"A {booking.status} booking cannot be changed."}, status=400)
-
-        kind = request.data.get("kind")
-        if kind not in ("correction", "replacement"):
-            return Response({"detail": "kind must be 'correction' or 'replacement'."}, status=400)
-        first = str(request.data.get("first_name", "")).strip()[:100]
-        last = str(request.data.get("last_name", "")).strip()[:100]
-        if not first or not last:
-            return Response({"detail": "First and last name are required."}, status=400)
-        email = str(request.data.get("email", "") or booking.email).strip().lower()[:254]
-        phone = str(request.data.get("phone", "") or booking.phone or "").strip()[:20]
-        note = str(request.data.get("note", "")).strip()[:500]
-
-        days = (booking.travel_date - date.today()).days
-        if kind == "replacement" and days < TRANSFER_CUTOFF_DAYS and not note:
-            return Response(
-                {"detail": f"Fewer than {TRANSFER_CUTOFF_DAYS} days to departure — replacements now need individual "
-                           "review. Add a note explaining the approval."},
-                status=400,
+        try:
+            change_lead_contact(
+                booking, kind=request.data.get("kind"), first_name=str(request.data.get("first_name", "")),
+                last_name=str(request.data.get("last_name", "")), email=str(request.data.get("email", "") or ""),
+                phone=str(request.data.get("phone", "") or ""), note=str(request.data.get("note", "")),
+                by_email=request.user.email,
             )
-
-        previous = {"first_name": booking.first_name, "last_name": booking.last_name,
-                    "email": booking.email, "phone": booking.phone}
-        new = {"first_name": first, "last_name": last, "email": email, "phone": phone or None}
-        if previous == new:
-            return Response({"detail": "Nothing changed."}, status=400)
-
-        email_changed = email != booking.email.lower()
-        booking.first_name, booking.last_name, booking.email, booking.phone = first, last, email, phone or None
-        fields = ["first_name", "last_name", "email", "phone", "traveller_changes", "updated_at"]
-        if email_changed and booking.user_id:
-            booking.user = None            # the old account must not keep the new traveller's booking
-            fields.append("user")
-        booking.traveller_changes = [*(booking.traveller_changes or []), {
-            "kind": kind, "from": previous, "to": new, "note": note,
-            "at": timezone.now().isoformat(), "by": request.user.email,
-            "days_to_departure": days,
-        }]
-        booking.save(update_fields=fields)
-
-        from payments.email import send_traveller_updated
-        send_traveller_updated(booking, previous, kind)
+        except IllegalTransition as exc:
+            return Response({"detail": str(exc)}, status=400)
         return self.detail(request, booking)
 
 

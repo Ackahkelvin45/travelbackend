@@ -550,8 +550,9 @@ def reject_cancellation(req, *, by_user, note: str = "") -> "CancellationRequest
 ADDON_CANCELLATION_FEE_PERCENT = Decimal("50")
 
 
-def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
-    """Cancel one add-on on a confirmed/pending booking.
+def remove_addon(booking, *, code: str, by_email: str, note: str = "", traveller=None) -> dict:
+    """Cancel one add-on on a confirmed/pending booking — for one guest when
+    `traveller` is given (trip bookings, where a line covers several guests).
 
     The add-on line is replaced by a non-refundable "cancellation fee" line
     worth ADDON_CANCELLATION_FEE_PERCENT of it, so the bundle discount is left
@@ -573,14 +574,17 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     line = next((l for l in lines if l.get("code") == code), None)
     if line is None:
         raise IllegalTransition("That add-on is not on this booking.")
-    charge = quantize(Decimal(str(line.get("line_total", "0"))))
+    if traveller is not None and code not in traveller.experiences:
+        raise IllegalTransition(f"{traveller.full_name} doesn't have that add-on.")
+    charge = quantize(Decimal(str(line.get("unit_price" if traveller else "line_total", "0"))))
     if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") in ("per_unit", "per_vehicle"):
         raise IllegalTransition("That item cannot be cancelled.")
 
     fee = quantize(charge * ADDON_CANCELLATION_FEE_PERCENT / Decimal("100"))
+    who = f" — {traveller.full_name}" if traveller else ""
     fee_line = {
         "code": f"{code}_cancellation_fee",
-        "name": f"Cancellation fee — {line.get('name', code)} ({ADDON_CANCELLATION_FEE_PERCENT:.0f}%)",
+        "name": f"Cancellation fee — {line.get('name', code)}{who} ({ADDON_CANCELLATION_FEE_PERCENT:.0f}%)",
         "unit": "per_booking", "unit_price": str(fee), "quantity": 1, "line_total": str(fee),
         "refundable": False,
     }
@@ -597,11 +601,22 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     with transaction.atomic():
         booking = Booking.objects.select_for_update().get(pk=booking.pk)
         old_total = quantize(booking.total_amount)
-        booking.addons = [l for l in lines if l.get("code") != code] + ([fallback] if fallback else []) + [fee_line]
+        if traveller is not None:
+            # One guest's place on a per-person line; their share drops by what they no longer owe.
+            rest = {**line, "quantity": line["quantity"] - 1,
+                    "line_total": str(quantize(Decimal(str(line["line_total"])) - charge))}
+            booking.addons = [rest if l is line else l for l in lines if l is not line or rest["quantity"] > 0] + [fee_line]
+            traveller.experiences = [c for c in traveller.experiences if c != code]
+            traveller.share = quantize(traveller.share - charge + fee)
+            traveller.checkout_portion = min(traveller.checkout_portion, traveller.share)
+            traveller.save(update_fields=["experiences", "share", "checkout_portion"])
+        else:
+            booking.addons = [l for l in lines if l.get("code") != code] + ([fallback] if fallback else []) + [fee_line]
         booking.total_amount = quantize(old_total - charge + fee)
         overpaid = quantize(booking.amount_paid - booking.amount_refunded - booking.total_amount)
         booking.addon_changes = [*(booking.addon_changes or []), {
             "code": code, "name": line.get("name"), "charge": str(charge), "fee": str(fee),
+            "guest": traveller.full_name if traveller else "",
             "refund": str(max(overpaid, Decimal("0"))), "old_total": str(old_total),
             "new_total": str(booking.total_amount), "note": note,
             "at": timezone.now().isoformat(), "by": by_email,
@@ -806,3 +821,55 @@ def forfeit_ticket(traveller) -> None:
     if not traveller.forfeited_at:
         traveller.forfeited_at = timezone.now()
         traveller.save(update_fields=["forfeited_at"])
+
+
+TRANSFER_CUTOFF_DAYS = 14
+
+
+def change_lead_contact(booking, *, kind: str, first_name: str, last_name: str, email: str = "", phone: str = "",
+                        note: str = "", by_email: str) -> None:
+    """Terms Part A, staff only.
+
+    correction  → same person, fixed spelling. Free.
+    replacement → a different person takes the place. Free up to
+                  TRANSFER_CUTOFF_DAYS before departure; later ones need a note
+                  recording the approval. If the email changes, the booking is
+                  detached from the old account (ownership never follows an
+                  email change) and the new traveller is emailed to claim it.
+    Both identities, who approved and when go into traveller_changes.
+    Raises IllegalTransition."""
+    from datetime import date
+    from django.utils import timezone
+    from payments.email import send_traveller_updated
+
+    if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+        raise IllegalTransition(f"A {booking.status} booking cannot be changed.")
+    if kind not in ("correction", "replacement"):
+        raise IllegalTransition("Choose a correction or a replacement.")
+    first, last = first_name.strip()[:100], last_name.strip()[:100]
+    if not first or not last:
+        raise IllegalTransition("First and last name are required.")
+    email = (email or booking.email).strip().lower()[:254]
+    phone = (phone or booking.phone or "").strip()[:20]
+    note = note.strip()[:500]
+    days = (booking.travel_date - date.today()).days
+    if kind == "replacement" and days < TRANSFER_CUTOFF_DAYS and not note:
+        raise IllegalTransition(f"Fewer than {TRANSFER_CUTOFF_DAYS} days to departure: replacements need individual "
+                                "review. Add a note explaining the approval.")
+    previous = {"first_name": booking.first_name, "last_name": booking.last_name,
+                "email": booking.email, "phone": booking.phone}
+    new = {"first_name": first, "last_name": last, "email": email, "phone": phone or None}
+    if previous == new:
+        raise IllegalTransition("Nothing changed.")
+
+    fields = ["first_name", "last_name", "email", "phone", "traveller_changes", "updated_at"]
+    if email != booking.email.lower() and booking.user_id:
+        booking.user = None  # the old account must not keep the new traveller's booking
+        fields.append("user")
+    booking.first_name, booking.last_name, booking.email, booking.phone = first, last, email, phone or None
+    booking.traveller_changes = [*(booking.traveller_changes or []), {
+        "kind": kind, "from": previous, "to": new, "note": note,
+        "at": timezone.now().isoformat(), "by": by_email, "days_to_departure": days,
+    }]
+    booking.save(update_fields=fields)
+    send_traveller_updated(booking, previous, kind)

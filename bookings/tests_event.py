@@ -137,3 +137,41 @@ class AfterBookingTests(TestCase):
         owed = {t.full_name: o for t, _, _, o in booking.traveller_balances()}
         self.assertEqual(owed[member.full_name], Decimal("0.00"))
         self.assertEqual(owed[lead.full_name], lead.share - Decimal("1182.33"))
+
+    # ── Staff tools moved from /staff into the admin (Phase 6) ────────────────
+
+    def test_admin_change_contact_remove_addon_and_email_log(self):
+        staff = get_user_model().objects.create_superuser(email="ops@example.com", password="x-Strong-pass-1",
+                                                          first_name="A", last_name="D")
+        self.client.force_login(staff)
+        booking = self.booked(pay="4397.00")
+        url = f"/admin/bookings/booking/{booking.pk}"
+        with mock.patch("payments.email.deliver", return_value=True):
+            for path in ("change-contact", "remove-addon"):
+                self.assertEqual(self.client.get(f"{url}/{path}/").status_code, 200)
+            res = self.client.post(f"{url}/change-contact/", {
+                "kind": "correction", "first_name": "Amma", "last_name": "Owusu", "email": "ama@example.com"})
+            self.assertEqual(res.status_code, 302)
+            booking.refresh_from_db()
+            self.assertEqual((booking.first_name, booking.traveller_changes[-1]["kind"]), ("Amma", "correction"))
+
+            # Two guests take the massage, then one cancels: only their place goes, 50% fee kept.
+            for t in booking.travellers.order_by("position")[:2]:
+                t.experiences = ["waterfall_massage"]
+                t.share += 100
+                t.save()
+            Booking.objects.filter(pk=booking.pk).update(
+                total_amount=booking.total_amount + 200,
+                addons=[*booking.addons, {"code": "waterfall_massage", "name": "Waterfall Massage", "unit": "per_person",
+                                          "unit_price": "100.00", "quantity": 2, "line_total": "200.00", "refundable": True}])
+            kojo = booking.travellers.get(position=1)
+            res = self.client.post(f"{url}/remove-addon/", {"code": f"{kojo.pk}:waterfall_massage", "note": "asked by phone"})
+            self.assertEqual(res.status_code, 302)
+        booking.refresh_from_db()
+        kojo.refresh_from_db()
+        line = next(l for l in booking.addons if l["code"] == "waterfall_massage")
+        self.assertEqual((line["quantity"], line["line_total"]), (1, "100.00"))
+        self.assertNotIn("waterfall_massage", kojo.experiences)
+        self.assertEqual(booking.total_amount, Decimal("4547.00"))  # 4,597 − 100 + 50 fee
+        self.assertEqual(sum(t.share for t in booking.travellers.all()), booking.total_amount)
+        self.assertContains(self.client.get(f"{url}/change/"), "Emails sent")

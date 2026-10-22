@@ -6,7 +6,7 @@ from unfold.decorators import action, display
 from unfold.widgets import UnfoldAdminTextareaWidget
 
 from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_STAGE_BADGE, PAYMENT_STATE_BADGE
-from payments.models import Payment
+from payments.models import EmailLog, Payment
 from payments.services import record_offline_payment
 from .models import (
     Booking, BookingTraveller, CancellationRequest, ChatThread, EventTicket, Lead, PolicyAcceptance, PolicyDocument,
@@ -60,6 +60,24 @@ class PolicyAcceptanceInline(TabularInline):
     extra = 0
     fields = ["document", "email", "ip_address", "accepted_at"]
     readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class EmailLogInline(TabularInline):
+    """What we sent this guest and whether the provider accepted it."""
+    model = EmailLog
+    fk_name = "booking"
+    extra = 0
+    tab = True
+    verbose_name_plural = "Emails sent"
+    fields = ["created_at", "kind", "to_email", "subject", "status", "error"]
+    readonly_fields = fields
+    ordering = ["-created_at"]
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -240,7 +258,8 @@ class BookingAdmin(ModelAdmin):
     form = BookingAdminForm
     actions = ["assign_coordinator", "send_balance_reminders", "export_csv",
                "mark_arrived", "cancel_with_refund", "cancel_as_organizer", "mark_completed"]
-    actions_detail = ["detail_send_reminder", "detail_resend_confirmation", "detail_mark_contacted"]
+    actions_detail = ["detail_send_reminder", "detail_resend_confirmation", "detail_mark_contacted",
+                      "detail_change_contact", "detail_remove_addon"]
     list_display = ["reference_cell", "lead_cell", "stay_cell", "total_cell", "paid_cell",
                     "due_cell", "coordinator_cell", "stage_badge"]
     list_filter = [
@@ -270,7 +289,7 @@ class BookingAdmin(ModelAdmin):
         "coordinator_assigned_at", "lead_contacted_at", "contact_sla",
     ]
     ordering = ["-created_at"]
-    inlines = [TravellerInline, PaymentInline, CancellationRequestInline, PolicyAcceptanceInline]
+    inlines = [TravellerInline, PaymentInline, CancellationRequestInline, PolicyAcceptanceInline, EmailLogInline]
     fieldsets = (
         ("Overview", {
             "classes": ["tab"],
@@ -593,6 +612,61 @@ class BookingAdmin(ModelAdmin):
         booking.save(update_fields=["lead_contacted_at", "checklist", "updated_at"])
         self.message_user(request, "Contact recorded.", messages.SUCCESS)
         return self._back(object_id)
+
+    def _form_page(self, request, booking, template, title, **ctx):
+        from django.template.response import TemplateResponse
+        return TemplateResponse(request, template, {
+            **self.admin_site.each_context(request), "title": title, "booking": booking, "opts": self.model._meta,
+            **ctx,
+        })
+
+    @action(description="Change lead contact", url_path="change-contact", permissions=["bookings.change_booking"])
+    def detail_change_contact(self, request, object_id):
+        """Correction (same person) or replacement (someone else takes the place), logged and emailed."""
+        from django.contrib import messages
+        from .services import TRANSFER_CUTOFF_DAYS, IllegalTransition, change_lead_contact
+        booking = Booking.objects.get(pk=object_id)
+        if request.method == "POST":
+            try:
+                change_lead_contact(booking, kind=request.POST.get("kind", ""), first_name=request.POST.get("first_name", ""),
+                                    last_name=request.POST.get("last_name", ""), email=request.POST.get("email", ""),
+                                    phone=request.POST.get("phone", ""), note=request.POST.get("note", ""),
+                                    by_email=request.user.email)
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                self.message_user(request, "Lead contact updated and the guest emailed.", messages.SUCCESS)
+                return self._back(object_id)
+        return self._form_page(request, booking, "admin/bookings/change_contact.html", "Change lead contact",
+                               cutoff=TRANSFER_CUTOFF_DAYS, form=request.POST)
+
+    @action(description="Remove an add-on", url_path="remove-addon", permissions=["bookings.cancel_booking"])
+    def detail_remove_addon(self, request, object_id):
+        """Cancel one experience or transfer; 50% of its charge is kept as a fee (booking terms)."""
+        from django.contrib import messages
+        from .services import IllegalTransition, remove_addon
+        booking = Booking.objects.get(pk=object_id)
+        lines = [l for l in (booking.addons or []) if l.get("unit") not in ("per_unit", "per_vehicle")
+                 and not str(l.get("code", "")).endswith("_cancellation_fee") and float(l.get("line_total", 0)) > 0]
+        # Trip bookings: one choice per guest holding the add-on ("<traveller id>:<code>").
+        names = {l["code"]: l for l in lines}
+        choices = [{"value": f"{t.pk}:{c}", "label": f"{names[c]['name']} · {t.full_name}", "price": names[c]["unit_price"]}
+                   for t in booking.travellers.all() for c in t.experiences if c in names] if booking.mode else []
+        if request.method == "POST":
+            traveller, code = None, request.POST.get("code", "")
+            if booking.mode and ":" in code:
+                tid, code = code.split(":", 1)
+                traveller = booking.travellers.filter(pk=tid).first()
+            try:
+                remove_addon(booking, code=code, by_email=request.user.email, traveller=traveller,
+                             note=request.POST.get("note", "")[:300])
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                self.message_user(request, "Add-on removed; 50% kept as the cancellation fee.", messages.SUCCESS)
+                return self._back(object_id)
+        return self._form_page(request, booking, "admin/bookings/remove_addon.html", "Remove an add-on",
+                               lines=lines, choices=choices)
 
     def save_formset(self, request, form, formset, change):
         """Payments: route new rows through the offline-payment service.
