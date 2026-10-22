@@ -418,7 +418,7 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
     body = (_h("Pick up where you left off" if reminder else f"Your Ghana trip is saved, {html.escape(lead.name)}")
             + _p(f"Here's the quote you saved for {trip}.")
             + _summary(rows)
-            + _button(_url(f"/tour/{q.get('package_id', '')}#book"), "Resume my booking")
+            + _button(_url(f"/tour/{q.get('package_id', '')}/build"), "Resume my booking")
             + _p("Prices and room availability can change until you book. Rooms are held only during checkout.", small=True))
     footer = ""
     if reminder:
