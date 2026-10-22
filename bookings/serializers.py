@@ -55,6 +55,7 @@ class CreateBookingSerializer(serializers.ModelSerializer):
             "travel_date",
             "special_requests",
         ]
+        extra_kwargs = {"num_guests": {"min_value": 1, "max_value": 100}}
 
     def validate(self, attrs):
         package_id = attrs.pop("package_id")
@@ -365,7 +366,7 @@ class ConfigurableCheckoutSerializer(serializers.Serializer):
     server-computed; expected_total guards a stale cart (409 + fresh quote)."""
 
     package_id = serializers.UUIDField()
-    num_guests = serializers.IntegerField(min_value=1, default=1)
+    num_guests = serializers.IntegerField(min_value=1, max_value=100, default=1)
     selected_addon_codes = serializers.ListField(
         child=serializers.CharField(), default=list,
         help_text="Add-on codes the customer chose, e.g. ['hotel_mid', 'enzo_vip'].",

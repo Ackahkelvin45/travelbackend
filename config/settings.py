@@ -235,6 +235,8 @@ REST_FRAMEWORK = {
         # Live password-rule check from the signup form — generous for typing,
         # capped so it can't be abused as a password-guessing oracle.
         'password_check': '60/min',
+        # Anonymous review posting: spam cap.
+        'reviews': '5/hour',
     },
 }
 

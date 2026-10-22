@@ -3,6 +3,7 @@ from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 
 from packages.models import TravelPackage
 from .models import Review
@@ -37,6 +38,11 @@ _review_response = openapi.Schema(
 class PackageReviewListCreateView(generics.ListCreateAPIView):
     serializer_class = ReviewSerializer
     permission_classes = [AllowAny]
+    throttle_scope = "reviews"
+
+    def get_throttles(self):
+        # Only posting is limited; reading reviews stays free.
+        return [ScopedRateThrottle()] if self.request.method == "POST" else []
 
     @swagger_auto_schema(
         operation_summary="List reviews for a package",
