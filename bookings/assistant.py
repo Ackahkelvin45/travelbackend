@@ -8,10 +8,20 @@ the website renders, rebuilt per request. Nothing is hard-coded here, so a
 price change in admin reaches the bot immediately, and anything switched off
 (on_sale=false, disabled add-ons) never appears. It never takes payments or
 touches bookings; anything it can't answer goes to a person.
+
+Grounding, in three layers:
+  1. Knowledge: only the facts block (catalogue, day-by-day programme, FAQs,
+     published policies, confirmed contact details) built fresh per request.
+  2. Instructions: answer only from it, rank the sources, never compute totals.
+  3. Fact check: before a reply leaves, every price, percentage, link, email
+     and phone number in it must appear in the facts. Anything else is held
+     back and the guest is handed to a person instead of shown a guess.
 """
 
 import json
 import logging
+import re
+from decimal import Decimal, InvalidOperation
 
 import requests
 from django.conf import settings
@@ -34,7 +44,11 @@ HANDOFF_TOOL = {"type": "function", "function": {
 
 INSTRUCTIONS = """You are the Azura Travels assistant. You answer guests on the website chat and on WhatsApp. Azura runs curated trips in Ghana.
 
-Answer only from the catalogue and contact details below. They are live and approved: prices, dates, rooms, what is included, availability and FAQs. If something is not covered, or the text is a placeholder in square brackets such as [TO BE CONFIRMED], say it hasn't been confirmed yet and offer to pass the question to the team. Never estimate or invent prices, dates, policies, refunds, visa rules or availability.
+Answer only from the facts below. They are live and approved: prices, dates, rooms, the day-by-day programme, what is included, availability, FAQs, the published policies and the confirmed contact details. If something is not covered, or the text is a placeholder in square brackets such as [TO BE CONFIRMED], say it hasn't been confirmed yet and offer to pass the question to the team. Never estimate or invent prices, dates, policies, refunds, visa rules, availability, venues or who will attend. Don't use general knowledge about Ghana or travel to fill gaps.
+
+Which source wins: for prices, dates, deadlines, rooms and the programme, the packages section is the truth. Policies explain the rules (how refunds, instalments, cancellations and changes work); if a policy's dates or contact details differ from the packages or contact sections, use those sections, and if you're unsure, hand off. Give contact details only from the contact section; if one isn't listed, say it hasn't been confirmed yet.
+
+Quote prices exactly as listed. Don't add up totals, shares or discounts yourself: the trip builder on the package page gives the exact total for the guest's group.
 
 Prices are in the currency listed (USD). Stays and experiences with on_sale false or units_available 0 can't be booked right now. Availability changes, so never promise or hold a room. Booking and payment happen only through the website checkout: share the package link. You cannot take payments, look up or change existing bookings, or issue refunds.
 
@@ -77,7 +91,10 @@ def _catalogue():
             "included": p.whats_included,
             "excluded": p.whats_excluded,
             "duration_days": p.duration_days,
-            "itinerary": [f"Day {i.day}: {i.title}" for i in p.itineraries.all()],
+            "programme": [
+                {"day": i.day, "date": i.title, "what_happens": i.description, "notes": i.notes}
+                for i in p.itineraries.all()
+            ],
             "faqs": [{"q": f.question, "a": f.answer} for f in p.faqs.all()],
             "pricing": pricing,
         })
@@ -95,9 +112,77 @@ def _contact():
     }.items() if v}
 
 
-def system_prompt():
-    facts = json.dumps({"contact": _contact(), "packages": _catalogue()}, default=str, sort_keys=True)
-    return f"{INSTRUCTIONS}\n\n<facts>\n{facts}\n</facts>"
+def _policies():
+    """The published policy documents guests accept at checkout."""
+    from .models import PolicyDocument
+
+    return [{"title": d.title, "text": d.body}
+            for d in PolicyDocument.objects.filter(is_current=True, published_at__isnull=False).order_by("type")]
+
+
+def facts_json():
+    return json.dumps({"contact": _contact(), "packages": _catalogue(), "policies": _policies()},
+                      default=str, sort_keys=True)
+
+
+def system_prompt(facts=None):
+    return f"{INSTRUCTIONS}\n\n<facts>\n{facts or facts_json()}\n</facts>"
+
+
+# ── Fact check ────────────────────────────────────────────────────────────────
+_AMOUNT = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
+_MONEY = re.compile(rf"(?:\$|USD|GHS|GH₵|₵)\s?({_AMOUNT})|({_AMOUNT})\s?(?:USD|GHS|dollars|cedis)\b", re.I)
+# Money in the facts: the catalogue's decimal strings ("899.00") plus amounts written with a currency.
+_FACT_MONEY = re.compile(r"(?<![\d.])(\d+\.\d{2})(?![\d])")
+# Percentages in the facts: "50%" in text and the catalogue's *percent* fields.
+_FACT_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s?%|percent[a-z_]*\"?:\s*\"?(\d+(?:\.\d+)?)", re.I)
+_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+_URL = re.compile(r"https?://[^\s)>\]]+", re.I)
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PHONE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+
+
+def _num(raw):
+    try:
+        return Decimal(raw.replace(",", "")).normalize()
+    except InvalidOperation:
+        return None
+
+
+def unsupported(text, facts):
+    """Prices, percentages, links, emails and phone numbers in ``text`` that
+    the facts don't back up. Empty list = nothing invented."""
+    known_money = {_num(m) for m in _FACT_MONEY.findall(facts)} | {_num(a or b) for a, b in _MONEY.findall(facts)}
+    known_percents = {_num(a or b) for a, b in _FACT_PERCENT.findall(facts)}
+    # Contact details count only from the confirmed contact settings, never
+    # from policy text (the v1.0 policies still carry sample numbers).
+    contact = _contact()
+    contact_text = " ".join(contact.values()).lower()
+    known_digits = {re.sub(r"\D", "", m) for m in _PHONE.findall(contact_text)}
+    site = settings.FRONTEND_URL.rstrip("/").lower()
+    whatsapp = re.sub(r"\D", "", contact.get("whatsapp", ""))
+    allowed_links = (site,) + ((f"https://wa.me/{whatsapp}",) if whatsapp else ())
+    problems = []
+    for url in _URL.findall(text):
+        url = url.rstrip(".,;:!?").lower()
+        if not url.startswith(allowed_links):
+            problems.append(f"link {url}")
+    for email in _EMAIL.findall(text):
+        if email.lower() not in contact_text:
+            problems.append(f"email {email}")
+    # Links and emails are checked; drop them so IDs inside them aren't misread as prices or phone numbers.
+    text = _EMAIL.sub(" ", _URL.sub(" ", text))
+    for a, b in _MONEY.findall(text):
+        if _num(a or b) not in known_money:
+            problems.append(f"price {a or b}")
+    for pct in _PERCENT.findall(text):
+        if _num(pct) not in known_percents:
+            problems.append(f"{pct}%")
+    for phone in _PHONE.findall(text):
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) >= 9 and digits not in known_digits:
+            problems.append(f"phone {phone.strip()}")
+    return problems
 
 
 def fallback_text():
@@ -114,14 +199,17 @@ def reply(history):
             raise RuntimeError("DEEPSEEK_API_KEY is not set")
         # DeepSeek's OpenAI-compatible chat API. The system prompt goes first so
         # its automatic prefix cache covers the catalogue across requests.
+        facts = facts_json()
         r = requests.post(
             f"{settings.DEEPSEEK_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
             json={
                 "model": settings.ASSISTANT_MODEL,
-                "messages": [{"role": "system", "content": system_prompt()}, *history],
+                "messages": [{"role": "system", "content": system_prompt(facts)}, *history],
                 "tools": [HANDOFF_TOOL],
                 "max_tokens": 1024,
+                # Most predictable output: factual answers, not creative ones.
+                "temperature": 0,
             },
             timeout=60,
         )
@@ -143,6 +231,13 @@ def reply(history):
             except (ValueError, AttributeError):
                 handoff = ""
             handoff = handoff or "Guest asked for a person."
+    problems = unsupported(text, facts)
+    if problems:
+        # Something in the draft isn't in the facts: hold it back rather than risk a wrong answer.
+        logger.warning("Assistant reply held back (not in facts: %s): %r", ", ".join(problems), text)
+        question = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
+        text = "I don't want to give you a wrong answer on that."
+        handoff = handoff or f"Assistant couldn't answer from approved facts: {question[:200]}"
     if handoff is not None:
         hours = _contact().get("support_hours")
         text = (text + "\n\n" if text else "") + "I'm passing this to our team" + (

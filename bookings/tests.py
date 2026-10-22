@@ -1287,3 +1287,50 @@ class AssistantTests(TestCase):
             text, handoff = reply([{"role": "user", "content": "Refund please"}])
         self.assertEqual(handoff, "Refund for AZ-1")
         self.assertIn("passing this to our team", text)
+
+    def test_knowledge_includes_programme_and_published_policies(self):
+        from django.utils import timezone
+        from packages.models import Itinerary
+        from .assistant import system_prompt
+        from .models import PolicyDocument
+        Itinerary.objects.create(package=self.pkg, day=1, title="Wed 6 Jan", description="Welcome dinner with Michael.")
+        PolicyDocument.objects.create(type="refund", version="1.0", title="Refund Policy", body="50% refund up to 60 days.",
+                                      is_current=True, published_at=timezone.now())
+        PolicyDocument.objects.create(type="terms", version="0.9", title="Draft Terms", body="Unpublished draft.")
+        prompt = system_prompt()
+        self.assertIn("Welcome dinner with Michael.", prompt)
+        self.assertIn("50% refund up to 60 days.", prompt)
+        self.assertNotIn("Unpublished draft.", prompt)
+
+    def test_fact_check_catches_anything_not_in_the_facts(self):
+        from payments.models import OpsConfig
+        from .assistant import facts_json, unsupported
+        OpsConfig.objects.update_or_create(pk=OpsConfig.get().pk, defaults={
+            "contact_email": "hello@azuratravels.live", "whatsapp_number": "+233 20 111 2222"})
+        facts = facts_json() + ' "Refund: 50% up to 60 days. Call +233 24 123 4567 (sample)."'
+        with override_settings(FRONTEND_URL="https://azuratravels.live"):
+            ok = (f"The Core ticket is USD 899.00, or $899. 50% back up to 60 days. Book at "
+                  f"https://azuratravels.live/tour/{self.pkg.id} or WhatsApp https://wa.me/233201112222. "
+                  "Email hello@azuratravels.live or message +233 20 111 2222. Trip runs 6-11 January 2027.")
+            self.assertEqual(unsupported(ok, facts), [])
+            bad = ("For two of you it's $1,798, with 30% off. See https://example.com/deal, "
+                   "email info@azura.com or call +233 24 123 4567.")
+            self.assertEqual(unsupported(bad, facts), [
+                "link https://example.com/deal", "email info@azura.com", "price 1,798", "30%", "phone +233 24 123 4567"])
+            # IDs inside site links are never mistaken for phone numbers or prices.
+            self.assertEqual(unsupported("See https://azuratravels.live/pay/12345678-1234-5678-9012-345678901234.", facts), [])
+
+    @override_settings(DEEPSEEK_API_KEY="k")
+    def test_reply_with_invented_facts_is_held_back_and_handed_off(self):
+        from unittest import mock
+        from .assistant import reply
+        res = mock.Mock()
+        res.json.return_value = {"choices": [{"finish_reason": "stop", "message": {
+            "content": "Sure! Two guests come to $1,500 with our 20% couples discount.", "tool_calls": None}}]}
+        with mock.patch("bookings.assistant.requests.post", return_value=res) as post:
+            text, handoff = reply([{"role": "user", "content": "How much for two?"}])
+        self.assertEqual(post.call_args.kwargs["json"]["temperature"], 0)
+        self.assertNotIn("1,500", text)
+        self.assertIn("I don't want to give you a wrong answer", text)
+        self.assertIn("passing this to our team", text)
+        self.assertIn("How much for two?", handoff)
