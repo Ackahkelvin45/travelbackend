@@ -11,6 +11,8 @@ import resend
 from django.conf import settings
 from django.core import signing
 
+from payments.email import _button, _h, _p, _shell
+
 logger = logging.getLogger(__name__)
 
 _VERIFY_SALT = "email-verify"
@@ -30,38 +32,16 @@ def read_verification_token(token: str):
         return None
 
 
-def _shell(title: str, body_html: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>{html.escape(title)}</title></head>
-<body style="margin:0;padding:0;background:#f0ece4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0ece4;padding:40px 0;"><tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;">
-  <tr><td style="background:#1a1a2e;padding:28px 40px;text-align:center;">
-    <h1 style="color:#d4a843;margin:0;font-size:24px;letter-spacing:3px;text-transform:uppercase;">Azura Travels</h1>
-  </td></tr>
-  <tr><td style="padding:32px 40px;">{body_html}</td></tr>
-  <tr><td style="padding:16px 40px;background:#faf8f5;color:#7a7a88;font-size:11px;">
-    &copy; Azura Travels &middot; azuratravels.live
-  </td></tr>
-</table></td></tr></table></body></html>"""
-
-
 def send_verification_email(user, verify_url: str) -> None:
     if not settings.RESEND_API_KEY:
         logger.error("RESEND_API_KEY is not set. Cannot send verification email to %s.", user.email)
         return
     resend.api_key = settings.RESEND_API_KEY
     name = html.escape(user.first_name or "there")
-    body = f"""
-      <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Confirm your email, {name}</p>
-      <p style="margin:0 0 20px;color:#555;font-size:14px;line-height:1.6;">
-        Thanks for creating an Azura Travels account. Please confirm this email
-        address to finish setting up your account.
-      </p>
-      <a href="{html.escape(verify_url)}" style="display:inline-block;padding:14px 24px;background:#d4a843;color:#1a1a2e;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Verify my email</a>
-      <p style="margin:22px 0 0;color:#999;font-size:12px;line-height:1.6;">
-        This link expires in 7 days. If you didn't create this account, you can ignore this email.
-      </p>"""
+    body = (_h(f"Confirm your email, {name}")
+            + _p("Thanks for creating an Azura Travels account. Please confirm this email address to finish setting up your account.")
+            + _button(verify_url, "Verify my email")
+            + _p("This link expires in 7 days. If you didn't create this account, you can ignore this email.", small=True))
     try:
         email = resend.Emails.send({
             "from": settings.RESEND_FROM_EMAIL,
@@ -81,16 +61,10 @@ def send_welcome_email(user) -> None:
     resend.api_key = settings.RESEND_API_KEY
     name = html.escape(user.first_name or "there")
     dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
-    body = f"""
-      <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Welcome aboard, {name}! &#127881;</p>
-      <p style="margin:0 0 20px;color:#555;font-size:14px;line-height:1.6;">
-        Your email is verified and your Azura Travels account is ready. Browse our
-        curated tours, book with installments, and track everything from your dashboard.
-      </p>
-      <a href="{html.escape(dashboard_url)}" style="display:inline-block;padding:14px 24px;background:#1a1a2e;color:#d4a843;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Go to your dashboard</a>
-      <p style="margin:22px 0 0;color:#999;font-size:12px;line-height:1.6;">
-        Questions? Just reply to this email — we're happy to help.
-      </p>"""
+    body = (_h(f"Akwaaba, {name}")
+            + _p("Your email is verified and your Azura Travels account is ready. Your bookings, payments and travel "
+                 "information are all in your dashboard.")
+            + _button(dashboard_url, "Go to my dashboard"))
     try:
         email = resend.Emails.send({
             "from": settings.RESEND_FROM_EMAIL,

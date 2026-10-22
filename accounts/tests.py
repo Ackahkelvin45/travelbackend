@@ -120,3 +120,25 @@ class SignupVerificationTests(TestCase):
         client.patch("/api/auth/me/", {"email_verified": False}, format="json")
         # Ignored: still True from the (server-side) verification above.
         self.assertTrue(User.objects.get(email="newuser@test.com").email_verified)
+
+
+class TokenRevocationTests(TestCase):
+    """Refresh tokens rotate (the used one is revoked) and logout revokes."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        User.objects.create_user(email="rev@test.com", password="Str0ng!pass", email_verified=True)
+        self.c = APIClient()
+        self.refresh = self.c.post("/api/auth/token/", {"email": "rev@test.com", "password": "Str0ng!pass"},
+                                   format="json").data["refresh"]
+
+    def test_refresh_rotates_and_logout_revokes(self):
+        r = self.c.post("/api/auth/token/refresh/", {"refresh": self.refresh}, format="json")
+        self.assertEqual(r.status_code, 200)
+        new = r.data["refresh"]
+        self.assertNotEqual(new, self.refresh)
+        # The used refresh token is dead: a stolen copy can't be replayed.
+        self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": self.refresh}, format="json").status_code, 401)
+        self.assertEqual(self.c.post("/api/auth/token/blacklist/", {"refresh": new}, format="json").status_code, 200)
+        self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": new}, format="json").status_code, 401)

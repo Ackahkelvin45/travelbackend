@@ -55,6 +55,7 @@ class CreateBookingSerializer(serializers.ModelSerializer):
             "travel_date",
             "special_requests",
         ]
+        extra_kwargs = {"num_guests": {"min_value": 1, "max_value": 100}}
 
     def validate(self, attrs):
         package_id = attrs.pop("package_id")
@@ -177,6 +178,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "id",
             "reference",
             "mode",
+            "pay_separately",
+            "whatsapp_updates",
             "coordinator_name",
             "lead_contacted_at",
             "travellers",
@@ -239,13 +242,15 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         names = {a.code: a.name for a in obj.package.addons.all()}
         return [
             {
+                "id": str(t.id),
                 "full_name": t.full_name,
                 "is_lead": t.is_lead,
                 "unit": t.unit.label if t.unit else None,
                 "experiences": [names.get(c, c) for c in t.experiences],
                 "travel_info_submitted": t.travel_info_submitted_at is not None,
+                "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
             }
-            for t in obj.travellers.select_related("unit")
+            for t, share, paid, outstanding in obj.traveller_balances()
         ]
 
     def get_coordinator_name(self, obj):
@@ -312,6 +317,20 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         ]
 
 
+class BookingPublicSerializer(BookingDetailSerializer):
+    """What anyone holding just the reference sees: status and money, no names,
+    contact details, guest list or payment ledger (those need ownership or the
+    booking's view token)."""
+
+    class Meta(BookingDetailSerializer.Meta):
+        fields = [
+            "id", "reference", "mode", "pay_separately", "package_title", "package_id", "num_guests",
+            "travel_date", "total_amount", "amount_paid", "balance", "payment_state", "payment_plan",
+            "deposit_required", "payment_deadline", "currency", "status", "payment_status", "line_items",
+        ]
+        read_only_fields = fields
+
+
 class CheckoutSerializer(serializers.Serializer):
     """
     POST /api/bookings/checkout/ — the option-based (flagship tour) create
@@ -347,7 +366,7 @@ class ConfigurableCheckoutSerializer(serializers.Serializer):
     server-computed; expected_total guards a stale cart (409 + fresh quote)."""
 
     package_id = serializers.UUIDField()
-    num_guests = serializers.IntegerField(min_value=1, default=1)
+    num_guests = serializers.IntegerField(min_value=1, max_value=100, default=1)
     selected_addon_codes = serializers.ListField(
         child=serializers.CharField(), default=list,
         help_text="Add-on codes the customer chose, e.g. ['hotel_mid', 'enzo_vip'].",
@@ -366,11 +385,12 @@ class ConfigurableCheckoutSerializer(serializers.Serializer):
     )
 
 
-# ── Component pricing (Change Request v2) ─────────────────────────────────────
+# ── Component pricing (Change Request v4) ─────────────────────────────────────
 
 class _TravellerInput(serializers.Serializer):
     name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     experiences = serializers.ListField(child=serializers.CharField(max_length=60), default=list, max_length=20)
+    adult = serializers.BooleanField(default=False, help_text="Guest confirms they are 18 or over (adults-only items).")
 
 
 class _RoomInput(serializers.Serializer):
@@ -408,6 +428,8 @@ class ComponentCheckoutSerializer(ComponentQuoteSerializer):
     special_requests = serializers.CharField(required=False, allow_blank=True, max_length=2000)
     accepted_policies = serializers.ListField(child=serializers.CharField(), default=list)
     marketing_consent = serializers.BooleanField(default=False)
+    pay_separately = serializers.BooleanField(default=False, help_text="Group: each member pays their own share.")
+    whatsapp_updates = serializers.BooleanField(default=False, help_text="Opt in to confirmations on WhatsApp.")
     expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
 
 
@@ -431,8 +453,24 @@ class LeadSerializer(serializers.ModelSerializer):
         model = Lead
         fields = ["name", "email", "phone", "source", "message", "marketing_consent", "package",
                   "referral_code", "selection"]
+        # Optional on the model (WhatsApp leads), still required from the site.
+        extra_kwargs = {"email": {"required": True, "allow_blank": False}}
 
     def validate_source(self, value):
         if value not in (Lead.Source.CHAT, Lead.Source.SAVED_QUOTE, Lead.Source.CONTACT):
             raise serializers.ValidationError("Unsupported source.")
+        return value
+
+
+class AssistantTurnSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=["user", "assistant"])
+    content = serializers.CharField(max_length=2000)
+
+
+class AssistantSerializer(serializers.Serializer):
+    messages = AssistantTurnSerializer(many=True, min_length=1, max_length=30)
+
+    def validate_messages(self, value):
+        if value[0]["role"] != "user" or value[-1]["role"] != "user":
+            raise serializers.ValidationError("The conversation must start and end with the guest.")
         return value

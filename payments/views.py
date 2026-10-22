@@ -165,10 +165,20 @@ class InitializePaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # No unpaid room holds: an unconfirmed booking's rooms are held only
+        # for each payment attempt's checkout window.
+        from bookings.pricing import QuoteError
+        from bookings.services import renew_room_hold
+        try:
+            renew_room_hold(booking)
+        except QuoteError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+
         # ── Server-computed amount, whatever the intent ──────────────────────
         balance = booking.balance
         if intent == "deposit":
-            if booking.payment_plan != Booking.PaymentPlan.INSTALLMENT or not booking.deposit_required:
+            if (booking.payment_plan != Booking.PaymentPlan.INSTALLMENT and not booking.pay_separately) \
+                    or not booking.deposit_required:
                 return Response({"detail": "This booking has no deposit plan."},
                                 status=status.HTTP_400_BAD_REQUEST)
             outstanding_deposit = quantize(booking.deposit_required) - booking.amount_paid
@@ -181,25 +191,42 @@ class InitializePaymentView(APIView):
             amount = min(quantize(serializer.validated_data["amount"]), balance)
             # Installment Policy: the FIRST payment must at least meet the deposit
             # (later top-ups can be any amount).
-            if (booking.payment_plan == Booking.PaymentPlan.INSTALLMENT and booking.amount_paid == 0
+            if ((booking.payment_plan == Booking.PaymentPlan.INSTALLMENT or booking.pay_separately)
+                    and booking.amount_paid == 0
                     and booking.deposit_required and amount < min(quantize(booking.deposit_required), balance)):
                 return Response(
                     {"detail": f"The first payment must be at least {booking.currency} {quantize(booking.deposit_required)}."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         elif intent == "addon":
-            from bookings.services import IllegalTransition, quote_addon_addition
+            from bookings.services import IllegalTransition, quote_addon_addition, quote_component_addon
             try:
-                addon_line = quote_addon_addition(booking, serializer.validated_data["addon_code"])
+                addon_line = (
+                    quote_component_addon(booking, serializer.validated_data["addon_code"],
+                                          serializer.validated_data.get("traveller_ids") or [],
+                                          serializer.validated_data["adult"])
+                    if booking.mode else quote_addon_addition(booking, serializer.validated_data["addon_code"])
+                )
             except IllegalTransition as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             amount = quantize(addon_line["line_total"])
+        elif intent == "traveller":
+            row = next((r for r in booking.traveller_balances()
+                        if r[0].pk == serializer.validated_data["traveller_id"]), None)
+            if row is None:
+                return Response({"detail": "That guest is not on this booking."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            traveller, outstanding = row[0], row[3]
+            if outstanding <= 0:
+                return Response({"detail": f"{traveller.full_name}'s share is already paid."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            amount = min(outstanding, balance)
         else:
             amount = balance
 
         if intent == "addon":
             purpose = Payment.Purpose.ADDON
-        elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT:
+        elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT or booking.pay_separately:
             purpose = (
                 Payment.Purpose.DEPOSIT
                 if booking.amount_paid < (booking.deposit_required or 0)
@@ -255,6 +282,8 @@ class InitializePaymentView(APIView):
             exchange_rate=exchange_rate,
             purpose=purpose,
             addon_code=serializer.validated_data.get("addon_code", "") if intent == "addon" else "",
+            traveller=traveller if intent == "traveller" else None,
+            addon_travellers=addon_line.get("travellers", []) if intent == "addon" else [],
         )
 
         gateway_amount = to_subunits(charged_amount if charged_amount is not None else amount)
@@ -265,6 +294,7 @@ class InitializePaymentView(APIView):
             "package": booking.package.title,
         }
         payment_prompt = None
+        payer_email = (serializer.validated_data.get("payer_email") if intent == "traveller" else None) or booking.email
 
         try:
             if channel == "momo" and momo_provider in DIRECT_MOMO_PROVIDERS:
@@ -272,7 +302,7 @@ class InitializePaymentView(APIView):
                 # buyer's phone. No redirect, no popup — the frontend shows the
                 # prompt copy and polls /payments/status/.
                 paystack_data = charge_mobile_money(
-                    email=booking.email,
+                    email=payer_email,
                     amount_kobo=gateway_amount,
                     reference=payment.paystack_reference,
                     currency=gateway_currency,
@@ -298,7 +328,7 @@ class InitializePaymentView(APIView):
                     "card": ["card"],
                 }[channel]
                 paystack_data = initialize_transaction(
-                    email=booking.email,
+                    email=payer_email,
                     amount_kobo=gateway_amount,
                     reference=payment.paystack_reference,
                     currency=gateway_currency,
@@ -344,6 +374,17 @@ class InitializePaymentView(APIView):
 
 # ── 1b. Payment channels ─────────────────────────────────────────────────────
 
+PAYMENT_CHANNELS = [
+    {"code": "momo", "label": "Mobile Money",
+     "providers": [
+         {"code": "mtn", "label": "MTN Mobile Money", "direct": True},
+         {"code": "atl", "label": "AT Money (AirtelTigo)", "direct": True},
+         {"code": "vod", "label": "Telecel Cash", "direct": False},
+     ]},
+    {"code": "card", "label": "Card (Visa / Mastercard)", "providers": []},
+]
+
+
 class PaymentChannelsView(APIView):
     """The payment methods the checkout offers, server-controlled so routing
     changes (e.g. a network moving between direct-charge and hosted) never
@@ -353,17 +394,7 @@ class PaymentChannelsView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({
-            "channels": [
-                {"code": "momo", "label": "Mobile Money",
-                 "providers": [
-                     {"code": "mtn", "label": "MTN Mobile Money", "direct": True},
-                     {"code": "atl", "label": "AT Money (AirtelTigo)", "direct": True},
-                     {"code": "vod", "label": "Telecel Cash", "direct": False},
-                 ]},
-                {"code": "card", "label": "Card (Visa / Mastercard)", "providers": []},
-            ],
-        })
+        return Response({"channels": PAYMENT_CHANNELS})
 
 
 # ── 2. Verify ─────────────────────────────────────────────────────────────────
@@ -557,6 +588,19 @@ class PaystackWebhookView(APIView):
             return Response(status=status.HTTP_200_OK)
 
         if event_type not in ("charge.success", "charge.failed") or not reference:
+            return Response(status=status.HTTP_200_OK)
+
+        if reference.startswith("DON-"):  # Academy donation: its own records, never a booking payment
+            from .donations import apply_donation
+            from .models import Donation
+            donation = Donation.objects.filter(reference=reference).first()
+            if donation and event_type == "charge.success":
+                verified = verify_transaction(reference)
+                if verified.get("status") == "success":
+                    apply_donation(donation, verified)
+            elif donation:
+                Donation.objects.filter(pk=donation.pk, status=Donation.Status.PENDING).update(
+                    status=Donation.Status.FAILED)
             return Response(status=status.HTTP_200_OK)
 
         try:

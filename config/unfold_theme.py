@@ -116,3 +116,21 @@ BOOKING_STATUS_CHART_COLORS = {
     "cancelled": SEMANTIC["danger"],
     "completed": SEMANTIC["info"],
 }
+
+# Booking work stage (derived in the bookings list, Change Request v2 admin)
+BOOKING_STAGE_BADGE = {
+    "coordinator": "danger",
+    "deposit": "info",
+    "paid": "success",
+    "pending": "warning",
+    "cancelled": "danger",
+    "completed": "info",
+}
+
+LEAD_STAGE_BADGE = {
+    "new": "info",
+    "contacted": "primary",
+    "quoted": "warning",
+    "won": "success",
+    "lost": "danger",
+}

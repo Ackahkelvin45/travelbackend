@@ -1,0 +1,20 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Move allocation</h1>
+  <p class="text-subtle">The booking and its guests move together to a free unit of the same type. The price does not change.</p>
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="action" value="move_allocation">
+    {% for unit, free in rows %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ unit.pk }}">
+      <label class="az-field">{{ unit.label }} · {{ unit.booking.reference }}
+        <select name="target_{{ unit.pk }}">
+          <option value="">Leave where it is</option>
+          {% for t in free %}<option value="{{ t.pk }}">{{ t.label }}</option>{% empty %}<option value="" disabled>No free {{ unit.stay_type.name }} units</option>{% endfor %}
+        </select>
+      </label>
+    {% endfor %}
+    <div class="az-actions"><button type="submit" name="apply" value="1" class="az-btn">Move</button><a href="." class="az-link">Cancel</a></div>
+  </form>
+</div>
+{% endblock %}

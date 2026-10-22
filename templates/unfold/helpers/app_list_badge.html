@@ -1,0 +1,2 @@
+{# Override: hide a sidebar badge whose callback returns "" (no work waiting). #}
+{% if item.badge_callback %}{% with text=item.badge_callback|stringformat:"s" %}{% if text %}{% include "admin/partials/badge_span.html" %}{% endif %}{% endwith %}{% elif item.badge %}{% include "admin/partials/badge_span.html" with text=item.badge %}{% endif %}

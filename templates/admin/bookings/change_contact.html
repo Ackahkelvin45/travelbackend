@@ -1,0 +1,23 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Change lead contact · {{ booking.reference }}</h1>
+  <p class="text-subtle">Now: {{ booking.full_name }} · {{ booking.email }}{% if booking.phone %} · {{ booking.phone }}{% endif %}</p>
+  <form method="post">{% csrf_token %}
+    <fieldset class="az-field">
+      <label><input type="radio" name="kind" value="correction" {% if form.kind != "replacement" %}checked{% endif %}> Correction: same person, spelling fixed</label>
+      <label><input type="radio" name="kind" value="replacement" {% if form.kind == "replacement" %}checked{% endif %}> Replacement: someone else takes the place</label>
+    </fieldset>
+    <label class="az-field">First name <input name="first_name" required value="{{ form.first_name|default:booking.first_name }}"></label>
+    <label class="az-field">Last name <input name="last_name" required value="{{ form.last_name|default:booking.last_name }}"></label>
+    <label class="az-field">Email <input type="email" name="email" value="{{ form.email|default:booking.email }}"></label>
+    <label class="az-field">Phone <input name="phone" value="{{ form.phone|default:booking.phone|default:'' }}"></label>
+    <label class="az-field">Note <textarea name="note" rows="3" placeholder="Required for replacements within {{ cutoff }} days of departure: who approved it and why.">{{ form.note }}</textarea></label>
+    <p class="text-subtle">Changing the email detaches the booking from the old account; the new guest is emailed to claim it. Both identities are kept in the booking's change log.</p>
+    <div class="az-actions">
+      <button type="submit" class="az-btn">Save change</button>
+      <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

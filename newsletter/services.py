@@ -1,3 +1,4 @@
+import html
 import logging
 
 import resend
@@ -11,51 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 def _build_announcement_html(package: TravelPackage) -> str:
-    destination_names = ", ".join(package.destinations.values_list("name", flat=True)) or "Multiple destinations"
-    package_url = f"https://azuratravels.live/packages/{package.slug}"
-    duration = f"{package.duration_days} day{'s' if package.duration_days != 1 else ''}"
-    price_from = f"{package.currency} {package.price_shared}"
+    from payments.email import _button, _h, _p, _shell, _summary, _trip_dates, _url
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>New Package: {package.title}</title>
-</head>
-<body style="margin:0;padding:0;background:#f7f5ef;font-family:Arial,sans-serif;color:#1a1a2e;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 0;background:#f7f5ef;">
-    <tr>
-      <td align="center">
-        <table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">
-          <tr>
-            <td style="padding:28px 32px;background:#1a1a2e;color:#ffffff;">
-              <h1 style="margin:0;font-size:24px;line-height:1.3;">New Package Just Dropped</h1>
-              <p style="margin:8px 0 0;font-size:14px;color:#d9d9e7;">Azura Travels Newsletter</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:28px 32px;">
-              <h2 style="margin:0 0 10px;font-size:22px;color:#1a1a2e;">{package.title}</h2>
-              <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#555;">{package.description}</p>
-              <p style="margin:0 0 8px;font-size:14px;"><strong>Destination:</strong> {destination_names}</p>
-              <p style="margin:0 0 8px;font-size:14px;"><strong>Duration:</strong> {duration}</p>
-              <p style="margin:0 0 24px;font-size:14px;"><strong>From:</strong> {price_from}</p>
-              <a href="{package_url}" style="display:inline-block;padding:12px 18px;background:#bd8f3a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">View Package</a>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 32px;background:#faf8f5;color:#7a7a88;font-size:12px;">
-              You are receiving this because you subscribed to travel updates.
-              <a href="{{UNSUBSCRIBE_URL}}" style="color:#7a7a88;text-decoration:underline;margin-left:6px;">Unsubscribe</a>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
+    rows = [("Duration", f"{package.duration_days} day{'s' if package.duration_days != 1 else ''}", "")]
+    if package.available_from:
+        rows.append(("Dates", _trip_dates(package.available_from, package.available_to), ""))
+    if package.from_price:
+        rows.append(("From", f"{package.currency} {package.from_price}", "strong"))
+    body = (_h(html.escape(package.title))
+            + _p(html.escape(package.description))
+            + _summary(rows)
+            + _button(_url(f"/tour/{package.id}"), "View the trip"))
+    footer = ('You are receiving this because you subscribed to Azura Travels updates. '
+              '<a href="{{UNSUBSCRIBE_URL}}" style="color:#6B7280;">Unsubscribe</a>.')
+    return _shell(f"New: {package.title}", body, hero="saved.jpg", footer=footer)
 
 
 UNSUBSCRIBE_SALT = "newsletter-unsubscribe"

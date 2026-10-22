@@ -1,0 +1,10 @@
+<div class="az-rooms">
+  {% for r in room_rows %}
+  <a class="az-roomcard" href="?stay_type__id__exact={{ r.stay.pk }}">
+    <strong>{{ r.stay.name }}</strong>
+    <span>{{ r.total }} unit{{ r.total|pluralize }} · {% if r.stay.on_sale %}on sale{% else %}not on sale{% endif %}</span>
+    <span class="az-chips"><i class="sold">{{ r.sold }} sold</i><i class="held">{{ r.held }} held</i><i class="free">{{ r.free }} free</i>{% if r.blocked %}<i class="blocked">{{ r.blocked }} blocked</i>{% endif %}</span>
+  </a>
+  {% endfor %}
+</div>
+<p class="az-note">Units are allocated for the whole Accra stay (6–7 and 8–11 January). The Crown Forest night on 7 January is included in Core and is not a unit here. To stop selling a stay type, switch it off sale in its package's Stays tab, then publish the price list.</p>
