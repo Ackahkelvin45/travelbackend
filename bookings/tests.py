@@ -1302,6 +1302,26 @@ class AssistantTests(TestCase):
         self.assertIn("50% refund up to 60 days.", prompt)
         self.assertNotIn("Unpublished draft.", prompt)
 
+    def test_knowledge_explains_how_booking_works_from_live_settings(self):
+        import json
+        from payments.models import OpsConfig
+        from .assistant import facts_json
+        OpsConfig.objects.update_or_create(pk=OpsConfig.get().pk, defaults={"hold_minutes": 20})
+        rules = json.loads(facts_json())["how_booking_works"]
+        self.assertIn("MTN Mobile Money", rules["payment_methods"])
+        self.assertIn("Card (Visa / Mastercard)", rules["payment_methods"])
+        self.assertIn("20 minutes", rules["rooms_during_checkout"])
+        self.assertIn("7 days", rules["adding_experiences_later"])
+        self.assertIn("14 days", rules["name_changes_and_replacements"])
+        # Switched-off features are not mentioned at all.
+        self.assertNotIn("whatsapp_updates", rules)
+        self.assertNotIn("academy_donations", rules)
+        OpsConfig.objects.update_or_create(pk=OpsConfig.get().pk, defaults={
+            "whatsapp_confirmation_template": "payment_received", "donations_enabled": True, "donation_subaccount": "ACCT_x"})
+        rules = json.loads(facts_json())["how_booking_works"]
+        self.assertIn("whatsapp_updates", rules)
+        self.assertIn("academy_donations", rules)
+
     def test_fact_check_catches_anything_not_in_the_facts(self):
         from payments.models import OpsConfig
         from .assistant import facts_json, unsupported

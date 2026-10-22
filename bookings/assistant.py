@@ -11,7 +11,9 @@ touches bookings; anything it can't answer goes to a person.
 
 Grounding, in three layers:
   1. Knowledge: only the facts block (catalogue, day-by-day programme, FAQs,
-     published policies, confirmed contact details) built fresh per request.
+     how booking works, published policies, confirmed contact details) built
+     fresh per request. Staff extend it by adding FAQs in the admin: the FAQ
+     page and the assistant read the same entries.
   2. Instructions: answer only from it, rank the sources, never compute totals.
   3. Fact check: before a reply leaves, every price, percentage, link, email
      and phone number in it must appear in the facts. Anything else is held
@@ -44,7 +46,7 @@ HANDOFF_TOOL = {"type": "function", "function": {
 
 INSTRUCTIONS = """You are the Azura Travels assistant. You answer guests on the website chat and on WhatsApp. Azura runs curated trips in Ghana.
 
-Answer only from the facts below. They are live and approved: prices, dates, rooms, the day-by-day programme, what is included, availability, FAQs, the published policies and the confirmed contact details. If something is not covered, or the text is a placeholder in square brackets such as [TO BE CONFIRMED], say it hasn't been confirmed yet and offer to pass the question to the team. Never estimate or invent prices, dates, policies, refunds, visa rules, availability, venues or who will attend. Don't use general knowledge about Ghana or travel to fill gaps.
+Answer only from the facts below. They are live and approved: prices, dates, rooms, the day-by-day programme, what is included, availability, FAQs, how booking works (payment methods, checkout, what guests get afterwards, changes), the published policies and the confirmed contact details. If something is not covered, or the text is a placeholder in square brackets such as [TO BE CONFIRMED], say it hasn't been confirmed yet and offer to pass the question to the team. Never estimate or invent prices, dates, policies, refunds, visa rules, availability, venues or who will attend. Don't use general knowledge about Ghana or travel to fill gaps.
 
 Which source wins: for prices, dates, deadlines, rooms and the programme, the packages section is the truth. Policies explain the rules (how refunds, instalments, cancellations and changes work); if a policy's dates or contact details differ from the packages or contact sections, use those sections, and if you're unsure, hand off. Give contact details only from the contact section; if one isn't listed, say it hasn't been confirmed yet.
 
@@ -120,9 +122,50 @@ def _policies():
             for d in PolicyDocument.objects.filter(is_current=True, published_at__isnull=False).order_by("type")]
 
 
+def _how_booking_works():
+    """How the site actually behaves, read from the settings and rules the code
+    enforces (never restated by hand, so it can't drift from the checkout)."""
+    from payments.donations import donations_open
+    from payments.models import OpsConfig
+    from payments.views import PAYMENT_CHANNELS
+
+    from .services import ADDON_ADD_CUTOFF_DAYS, TRANSFER_CUTOFF_DAYS
+
+    ops = OpsConfig.get()
+    my_booking = f"{settings.FRONTEND_URL.rstrip('/')}/dashboard"
+    # "MTN Mobile Money", ..., "Card (Visa / Mastercard)"
+    methods = [p["label"] for c in PAYMENT_CHANNELS for p in c["providers"]] + \
+              [c["label"] for c in PAYMENT_CHANNELS if not c["providers"]]
+    rules = {
+        "payment_methods": methods,
+        "payment_currency": "Prices are set in USD. Card and Mobile Money payments go through Paystack and are "
+                            "charged in Ghana cedis (GHS); the exact cedi amount is shown before paying.",
+        "rooms_during_checkout": f"Chosen rooms are held for {ops.hold_minutes} minutes while the guest checks out. "
+                                 "A room is only secured once payment is made.",
+        "my_booking_link": my_booking,
+        "after_booking": "A confirmation email with the receipt and ticket. My Booking (my_booking_link) shows tickets, the payment "
+                         "ledger and balance, and lets the guest pay the balance, complete the travel information "
+                         "form (flights, airport transfer, emergency contact, dietary and accessibility needs) and "
+                         "add experiences. Guests booking without an account get an emailed link to attach the "
+                         "booking to one.",
+        "adding_experiences_later": f"Experiences can be added from My Booking ({my_booking}) until "
+                                    f"{ADDON_ADD_CUTOFF_DAYS} days before departure.",
+        "name_changes_and_replacements": "Name corrections and replacing a traveller are done by the team, with no "
+                                         f"charge. Replacements less than {TRANSFER_CUTOFF_DAYS} days before "
+                                         "departure need individual approval. Payments stay with the booking.",
+    }
+    if ops.whatsapp_confirmation_template:
+        rules["whatsapp_updates"] = ("Guests can opt in at checkout, or later in My Booking, to receive payment "
+                                     "confirmations on WhatsApp.")
+    if donations_open():
+        rules["academy_donations"] = ("Guests can make an optional donation to the Michael Blackson Academy, paid "
+                                      "separately to the Academy's own account.")
+    return rules
+
+
 def facts_json():
-    return json.dumps({"contact": _contact(), "packages": _catalogue(), "policies": _policies()},
-                      default=str, sort_keys=True)
+    return json.dumps({"contact": _contact(), "packages": _catalogue(), "how_booking_works": _how_booking_works(),
+                       "policies": _policies()}, default=str, sort_keys=True)
 
 
 def system_prompt(facts=None):

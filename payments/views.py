@@ -374,6 +374,17 @@ class InitializePaymentView(APIView):
 
 # ── 1b. Payment channels ─────────────────────────────────────────────────────
 
+PAYMENT_CHANNELS = [
+    {"code": "momo", "label": "Mobile Money",
+     "providers": [
+         {"code": "mtn", "label": "MTN Mobile Money", "direct": True},
+         {"code": "atl", "label": "AT Money (AirtelTigo)", "direct": True},
+         {"code": "vod", "label": "Telecel Cash", "direct": False},
+     ]},
+    {"code": "card", "label": "Card (Visa / Mastercard)", "providers": []},
+]
+
+
 class PaymentChannelsView(APIView):
     """The payment methods the checkout offers, server-controlled so routing
     changes (e.g. a network moving between direct-charge and hosted) never
@@ -383,17 +394,7 @@ class PaymentChannelsView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response({
-            "channels": [
-                {"code": "momo", "label": "Mobile Money",
-                 "providers": [
-                     {"code": "mtn", "label": "MTN Mobile Money", "direct": True},
-                     {"code": "atl", "label": "AT Money (AirtelTigo)", "direct": True},
-                     {"code": "vod", "label": "Telecel Cash", "direct": False},
-                 ]},
-                {"code": "card", "label": "Card (Visa / Mastercard)", "providers": []},
-            ],
-        })
+        return Response({"channels": PAYMENT_CHANNELS})
 
 
 # ── 2. Verify ─────────────────────────────────────────────────────────────────
