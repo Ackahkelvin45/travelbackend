@@ -43,14 +43,19 @@ def _balance_box(booking):
   </td></tr></table>"""
 
 
+def _days_to_due(booking, days_left, trip):
+    """Days until the balance deadline (trip markers count to the event start)."""
+    due = booking.effective_payment_deadline
+    if trip and due and booking.package.available_from:
+        return days_left - (booking.package.available_from - due).days
+    return days_left
+
+
 def reminder_subject(booking, days_left, trip):
-    when = "today" if days_left <= 0 else "tomorrow" if days_left == 1 else f"in {days_left} days"
-    if trip:
-        start = booking.package.available_from
-        lead = "Final reminder: your" if days_left <= 1 else "Your"
-        return (f"{lead} balance is due before {start.day} {start:%b} – "
-                f"{booking.reference} | Azura Travels")
-    return f"Your balance is due {when} – {booking.reference} | Azura Travels"
+    """Canvas: "Your balance is due in 14 days"."""
+    d = _days_to_due(booking, days_left, trip)
+    when = "today" if d <= 0 else "tomorrow" if d == 1 else f"in {d} days"
+    return f"{'Final reminder: your' if trip and days_left <= 1 else 'Your'} balance is due {when}"
 
 
 def _build_trip_reminder_html(booking, days_left):
@@ -58,15 +63,17 @@ def _build_trip_reminder_html(booking, days_left):
     guests can't take part, so the email lists each guest still owing."""
     from payments.email import _button, _h, _money, _p, _shell, _summary, _trip_dates, _url
 
-    start = _trip_dates(booking.package.available_from)
+    due = booking.effective_payment_deadline
     owing = [(t, owed) for t, _, _, owed in booking.traveller_balances() if owed > 0]
     rows = [(html.escape(t.full_name), _money(booking.currency, owed), "") for t, owed in owing]
     if booking.pay_separately:
         rows = [(f'{name} · <a href="{_url(f"/pay/{t.id}")}" style="color:#8A6420;">pay link</a>', amount, s)
                 for (t, _), (name, amount, s) in zip(owing, rows)]
     body = (
-        _h(f"Your trip starts {'tomorrow' if days_left <= 1 else f'in {days_left} days'}, {html.escape(booking.first_name)}")
-        + _p(f"Your remaining balance for booking <strong>{booking.reference}</strong> is due before the first activity on <strong>{start}</strong>.")
+        _h(f"A quick reminder, {html.escape(booking.first_name)}")
+        + _p(f"Your remaining balance for booking <strong>{booking.reference}</strong> is due on "
+             + (f"<strong>{due.day} {due:%B %Y}</strong>, before the first activity on {_trip_dates(booking.package.available_from)}."
+                if due else f"<strong>{_trip_dates(booking.package.available_from)}</strong>."))
         + _balance_box(booking)
         + (_summary(rows) if rows else "")
         + _button(_url(f"/booking/{booking.reference}/pay"), "Pay balance")

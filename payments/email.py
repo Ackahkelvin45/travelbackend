@@ -159,10 +159,9 @@ def _build_html(booking, payment) -> str:
     cta = _button(_url(claim + "&then=travel"), "Complete travel information") if booking.mode \
         else _button(_url(claim), "Open my booking")
 
-    summary = [("Booking reference", f"<strong>{html.escape(booking.reference)}</strong>", ""),
-               ("Lead traveller", f"{first_name} {html.escape(booking.last_name)}", ""),
-               ("Total", _money(cur, booking.total_amount), "strong"),
-               ("Paid", _money(cur, booking.amount_paid), "strong")]
+    # Canvas rows: Total / Paid today / Balance due (the reference is in the subject).
+    summary = [("Total", _money(cur, booking.total_amount), "strong"),
+               ("Paid today", _money(cur, payment.amount if payment else booking.amount_paid), "strong")]
     if booking.balance > 0:
         deadline = booking.effective_payment_deadline
         label = f"Balance due {deadline.day} {deadline:%B %Y}" if deadline else "Balance"
@@ -191,8 +190,7 @@ def _build_html(booking, payment) -> str:
 
     body = (
         _h(f"See you in Ghana, {first_name}")
-        + _p(f"Your booking for {html.escape(package.title)}, {dates}, is confirmed for "
-             f"{guests} traveller{'s' if guests != 1 else ''}.")
+        + _p(f"Your booking for {dates} is confirmed for {guests} traveller{'s' if guests != 1 else ''}.")
         + _summary(summary)
         + cta
         + '<p style="margin:0 0 8px;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:1px;">What you booked</p>'
@@ -402,30 +400,31 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
     if not q:
         return False
     c = q.get("currency", "USD")
-    rows = [("Core experience × " + str(q.get("num_guests", 1)), _money(c, q.get("core_total", "0")), "")]
-    for key, label in (("rooms_total", "Accra stay"), ("experiences_total", "Experiences"), ("transfers_total", "Airport transfers")):
-        if Decimal(q.get(key, "0")):
-            rows.append((label, _money(c, q[key]), ""))
+    # Canvas: one line naming what was chosen, with the total ("2 Core tickets + 1-bed Airbnb").
+    n = int(q.get("num_guests", 1))
+    parts = [f"{n} Core ticket{'s' if n != 1 else ''}"]
+    parts += [r.get("name", "Accra stay") for r in q.get("rooms") or []]
+    if Decimal(q.get("experiences_total", "0")):
+        parts.append("experiences")
+    if Decimal(q.get("transfers_total", "0")):
+        parts.append("airport transfer")
+    rows = [(html.escape(" + ".join(parts)), _money(c, q.get("total", "0")), "strong")]
     if Decimal(q.get("discount_total", "0")):
-        rows.append((f'Includes {html.escape(q.get("discount_name") or "group saving")} (accommodation)',
+        rows.append((f'Includes {html.escape(q.get("discount_name") or "group saving")}',
                      "−" + _money(c, q["discount_total"]), "saving"))
-    rows += [("Total", _money(c, q.get("total", "0")), "strong"),
-             ("Average per person", _money(c, q.get("average_per_person", "0")), "")]
 
     package = TravelPackage.objects.filter(pk=q.get("package_id") or None).first()
-    trip = (f"{html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
+    trip = (f"the {html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
             if package else "your Ghana trip")
-    body = (_h("Pick up where you left off" if reminder else f"Your Ghana trip is saved, {html.escape(lead.name)}")
+    body = (_h("Pick up where you left off")
             + _p(f"Here's the quote you saved for {trip}.")
             + _summary(rows)
             + _button(_url(f"/tour/{q.get('package_id', '')}/build"), "Resume my booking")
             + _p("Prices and room availability can change until you book. Rooms are held only during checkout.", small=True))
-    footer = ""
-    if reminder:
-        from bookings.crm import unsubscribe_url
-        footer = (f"You're receiving this because you asked us to keep you updated. "
-                  f'<a href="{unsubscribe_url(lead)}" style="color:#6B7280;">Unsubscribe</a>. We stop these emails once you book.')
-    subject = "Your Ghana trip is still waiting | Azura Travels" if reminder else "Your Ghana trip is saved | Azura Travels"
+    from bookings.crm import unsubscribe_url
+    footer = (f"You're receiving this because you asked us to keep you updated. "
+              f'<a href="{unsubscribe_url(lead)}" style="color:#8A6420;">Unsubscribe</a>. We stop these emails once you book.')
+    subject = "Your Ghana trip is still waiting" if reminder else "Your Ghana trip is saved"
     return deliver("quote_reminder" if reminder else "saved_quote", lead.email, subject,
                    _shell("Your Ghana trip is saved", body, hero="saved.jpg", footer=footer), lead=lead)
 

@@ -1509,9 +1509,9 @@ class ConfirmationEmailEscapingTests(TestCase):
         self.assertNotIn("<script>alert(1)</script>", html_out)
         self.assertNotIn("<img src=x onerror", html_out)
         self.assertNotIn('<a href="https://evil.example/phish"', html_out)
-        # … they are present only as escaped entities.
+        # … the greeting shows the first name only as escaped entities (the
+        # last name isn't rendered in the confirmation any more).
         self.assertIn("&lt;script&gt;", html_out)
-        self.assertIn("&lt;img src=x onerror", html_out)
 
 
 class PaymentBreakdownTests(TestCase):
