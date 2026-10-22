@@ -301,26 +301,35 @@ class Booking(models.Model):
 
     def traveller_balances(self) -> list:
         """Per-person payment status (component bookings): [(traveller,
-        share, paid, outstanding)]. Payments tagged to a traveller are theirs;
-        untagged money (the organiser's) first covers each traveller's
-        checkout portion, then remaining shares in booking order.
+        share, paid, outstanding)]. Payments tagged to a traveller are theirs.
+        Untagged money (the organiser's) covers each traveller's checkout
+        portion first — whatever they later paid themselves — then what is
+        left of each share, in booking order.
         ponytail: refunds are not attributed per person; staff handle those."""
         from decimal import Decimal
         from django.db.models import Sum
+        from payments.money import quantize
 
         travellers = list(self.travellers.all())
         tagged = dict(
             self.payments.filter(status="success", traveller__isnull=False)
             .values_list("traveller").annotate(total=Sum("amount"))
         )
-        paid = {t.pk: tagged.get(t.pk) or Decimal("0") for t in travellers}
-        untagged = max(self.amount_paid - sum(paid.values(), Decimal("0")), Decimal("0"))
-        for limit in (lambda t: t.checkout_portion, lambda t: t.share):
-            for t in travellers:
-                take = min(max(limit(t) - paid[t.pk], Decimal("0")), untagged)
-                paid[t.pk] += take
-                untagged -= take
-        return [(t, t.share, paid[t.pk], max(t.share - paid[t.pk], Decimal("0"))) for t in travellers]
+        own = {t.pk: quantize(tagged.get(t.pk) or 0) for t in travellers}
+        untagged = max(self.amount_paid - sum(own.values(), Decimal("0")), Decimal("0"))
+        covered = {t.pk: Decimal("0") for t in travellers}
+        for t in travellers:  # 1. the checkout payment's portion for each guest
+            covered[t.pk] = min(t.checkout_portion, untagged)
+            untagged -= covered[t.pk]
+        for t in travellers:  # 2. anything more, towards remaining shares
+            take = min(max(t.share - own[t.pk] - covered[t.pk], Decimal("0")), untagged)
+            covered[t.pk] += take
+            untagged -= take
+        rows = []
+        for t in travellers:
+            paid = quantize(own[t.pk] + covered[t.pk])
+            rows.append((t, t.share, paid, max(quantize(t.share - paid), Decimal("0"))))
+        return rows
 
     @property
     def is_paid(self):
@@ -495,6 +504,20 @@ class BookingTraveller(models.Model):
     accessibility = models.TextField(blank=True)
     travel_info_submitted_at = models.DateTimeField(null=True, blank=True)
 
+    # ── Event access (Change Request v4 §6): no badge or participation for an
+    # unpaid ticket; staff record exceptions and forfeits, nothing is automatic.
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    access_exception = models.BooleanField(
+        default=False, help_text="Allow check-in with a balance outstanding (record why below).",
+    )
+    access_note = models.CharField(max_length=300, blank=True, help_text="Who approved the exception, and why.")
+    forfeited_at = models.DateTimeField(
+        null=True, blank=True, help_text="Ticket forfeited under the booking terms (unpaid at event start).",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -575,3 +598,12 @@ class ChatThread(models.Model):
 
     def __str__(self):
         return f"{self.name or 'WhatsApp'} +{self.wa_id}"
+
+
+class EventTicket(BookingTraveller):
+    """Admin view of Core tickets for event-start check-in."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "event ticket"
+        verbose_name_plural = "event check-in"

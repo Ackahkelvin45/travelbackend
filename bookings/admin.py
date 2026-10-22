@@ -9,7 +9,7 @@ from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_
 from payments.models import Payment
 from payments.services import record_offline_payment
 from .models import (
-    Booking, BookingTraveller, CancellationRequest, ChatThread, Lead, PolicyAcceptance, PolicyDocument,
+    Booking, BookingTraveller, CancellationRequest, ChatThread, EventTicket, Lead, PolicyAcceptance, PolicyDocument,
 )
 
 
@@ -960,3 +960,123 @@ class ChatThreadAdmin(ModelAdmin):
                 if "bot_paused" not in form.changed_data:
                     obj.bot_paused = True  # a staff reply takes the thread over
             super().save_model(request, obj, form, change)
+
+
+class AccessFilter(admin.SimpleListFilter):
+    title = "access"
+    parameter_name = "access"
+
+    def lookups(self, request, model_admin):
+        return [("unpaid", "Unpaid (no access)"), ("cleared", "Cleared to check in"),
+                ("checked_in", "Checked in"), ("forfeited", "Forfeited")]
+
+    def queryset(self, request, queryset):
+        from .services import ticket_outstanding
+        v = self.value()
+        if v == "checked_in":
+            return queryset.filter(checked_in_at__isnull=False)
+        if v == "forfeited":
+            return queryset.filter(forfeited_at__isnull=False)
+        if v in ("unpaid", "cleared"):
+            # ponytail: balances are computed per ticket in Python; fine for one event's few hundred guests.
+            open_ = queryset.filter(checked_in_at__isnull=True, forfeited_at__isnull=True)
+            unpaid = [t.pk for t in open_ if ticket_outstanding(t) > 0 and not t.access_exception]
+            return open_.filter(pk__in=unpaid) if v == "unpaid" else open_.exclude(pk__in=unpaid)
+        return queryset
+
+
+@admin.register(EventTicket)
+class EventTicketAdmin(ModelAdmin):
+    """Event-start check-in (Change Request v4 §6): one row per Core ticket.
+    Unpaid guests get no badge or participation; staff take payment, record an
+    exception, or mark the ticket forfeited. Nothing is cancelled automatically."""
+
+    list_display = ["ticket", "full_name", "booking_link", "room", "access", "owed"]
+    list_filter = [AccessFilter, ("booking__package", RelatedDropdownFilter)]
+    list_filter_submit = True
+    search_fields = ["full_name", "booking__reference", "booking__email", "booking__last_name"]
+    fields = ["full_name", "booking_link", "room", "owed", "access", "access_exception", "access_note",
+              "checked_in_at", "checked_in_by", "forfeited_at"]
+    readonly_fields = ["full_name", "booking_link", "room", "owed", "access", "checked_in_at", "checked_in_by",
+                       "forfeited_at"]
+    actions = ["check_in", "forfeit"]
+    actions_detail = ["detail_check_in"]
+
+    def get_queryset(self, request):
+        return (super().get_queryset(request)
+                .filter(booking__status__in=[Booking.Status.CONFIRMED, Booking.Status.COMPLETED])
+                .exclude(booking__mode="")
+                .select_related("booking", "unit", "checked_in_by")
+                .order_by("booking__reference", "position"))
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @display(description="Ticket")
+    def ticket(self, obj):
+        return f"{obj.booking.reference}-T{obj.position + 1}"
+
+    @display(description="Booking")
+    def booking_link(self, obj):
+        from django.urls import reverse
+        from django.utils.html import format_html
+        return format_html('<a href="{}">{}</a>', reverse("admin:bookings_booking_change", args=[obj.booking_id]),
+                           obj.booking.reference)
+
+    @display(description="Room")
+    def room(self, obj):
+        return obj.unit.label if obj.unit else "Own stay"
+
+    @display(description="Owed")
+    def owed(self, obj):
+        from .services import ticket_outstanding
+        owed = ticket_outstanding(obj)
+        return f"{obj.booking.currency} {owed:,.2f}" if owed > 0 else "Paid"
+
+    @display(description="Access", label={"Checked in": "success", "Cleared": "info", "Exception": "warning",
+                                          "Unpaid: no access": "danger", "Forfeited": "danger"})
+    def access(self, obj):
+        from .services import ticket_outstanding
+        if obj.forfeited_at:
+            return "Forfeited"
+        if obj.checked_in_at:
+            return "Checked in"
+        if ticket_outstanding(obj) <= 0:
+            return "Cleared"
+        return "Exception" if obj.access_exception else "Unpaid: no access"
+
+    def _run(self, request, queryset, fn, done):
+        from django.contrib import messages
+        from .services import IllegalTransition
+        ok, refused = 0, []
+        for t in queryset:
+            try:
+                fn(t)
+                ok += 1
+            except IllegalTransition as exc:
+                refused.append(str(exc))
+        if ok:
+            self.message_user(request, f"{ok} ticket{'s' if ok != 1 else ''} {done}.", messages.SUCCESS)
+        for reason in refused[:10]:
+            self.message_user(request, reason, messages.WARNING)
+
+    @admin.action(description="Check in selected guests")
+    def check_in(self, request, queryset):
+        from .services import check_in_ticket
+        self._run(request, queryset, lambda t: check_in_ticket(t, by=request.user), "checked in")
+
+    @admin.action(description="Mark forfeited (unpaid at event start)")
+    def forfeit(self, request, queryset):
+        from .services import forfeit_ticket
+        self._run(request, queryset, forfeit_ticket, "marked forfeited")
+
+    @action(description="Check in", url_path="check-in")
+    def detail_check_in(self, request, object_id):
+        from django.shortcuts import redirect
+        from .services import check_in_ticket
+        self._run(request, EventTicket.objects.filter(pk=object_id), lambda t: check_in_ticket(t, by=request.user),
+                  "checked in")
+        return redirect("admin:bookings_eventticket_change", object_id)

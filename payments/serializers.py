@@ -21,6 +21,11 @@ class InitializePaymentSerializer(serializers.Serializer):
         ),
     )
     traveller_id = serializers.UUIDField(required=False, help_text="Required for intent=traveller.")
+    traveller_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=30,
+        help_text="intent=addon on a trip booking: the guests the experience or transfer is for.",
+    )
+    adult = serializers.BooleanField(default=False, help_text="intent=addon: guests confirmed 18+ (adults-only items).")
     payer_email = serializers.EmailField(required=False, help_text="Receipt email for a member paying their share.")
     addon_code = serializers.CharField(max_length=60, required=False,
                                        help_text="Required for intent=addon.")

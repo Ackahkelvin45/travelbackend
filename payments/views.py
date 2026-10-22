@@ -199,9 +199,14 @@ class InitializePaymentView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         elif intent == "addon":
-            from bookings.services import IllegalTransition, quote_addon_addition
+            from bookings.services import IllegalTransition, quote_addon_addition, quote_component_addon
             try:
-                addon_line = quote_addon_addition(booking, serializer.validated_data["addon_code"])
+                addon_line = (
+                    quote_component_addon(booking, serializer.validated_data["addon_code"],
+                                          serializer.validated_data.get("traveller_ids") or [],
+                                          serializer.validated_data["adult"])
+                    if booking.mode else quote_addon_addition(booking, serializer.validated_data["addon_code"])
+                )
             except IllegalTransition as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             amount = quantize(addon_line["line_total"])
@@ -278,6 +283,7 @@ class InitializePaymentView(APIView):
             purpose=purpose,
             addon_code=serializer.validated_data.get("addon_code", "") if intent == "addon" else "",
             traveller=traveller if intent == "traveller" else None,
+            addon_travellers=addon_line.get("travellers", []) if intent == "addon" else [],
         )
 
         gateway_amount = to_subunits(charged_amount if charged_amount is not None else amount)

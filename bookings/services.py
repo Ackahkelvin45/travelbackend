@@ -666,6 +666,53 @@ def available_addons(booking) -> list:
     return out
 
 
+def available_component_addons(booking) -> list:
+    """Experiences and transfers a component booking can still add, at live
+    prices, each with the guests eligible for it (Change Request v4 §6, §8:
+    paid when purchased through the guest dashboard)."""
+    from payments.money import quantize
+    from .pricing import live_catalog
+
+    catalog = live_catalog(booking.package).experiences
+    transfer_codes = {c for c, a in catalog.items() if a.unit == "per_vehicle"}
+    travellers = list(booking.travellers.all())
+    out = []
+    for a in catalog.values():
+        eligible = [
+            str(t.id) for t in travellers
+            if a.code not in t.experiences and (not a.requires_stay or t.unit_id)
+            and not (a.code in transfer_codes and transfer_codes & set(t.experiences))  # one transfer per guest
+        ]
+        if eligible:
+            out.append({"code": a.code, "name": a.name, "description": a.description or None, "unit": a.unit,
+                        "unit_price": str(quantize(a.price)), "adults_only": a.adults_only,
+                        "vehicle_capacity": a.vehicle_capacity, "refundable": a.refundable,
+                        "eligible_travellers": eligible})
+    return out
+
+
+def quote_component_addon(booking, code: str, traveller_ids: list, adult: bool = False) -> dict:
+    """Price one add-on for chosen guests: per guest, or per vehicle shared by
+    the guests in this purchase. Raises IllegalTransition."""
+    import math
+    from payments.money import quantize
+
+    ok, reason, _ = addon_additions_open(booking)
+    if not ok:
+        raise IllegalTransition(reason)
+    option = next((o for o in available_component_addons(booking) if o["code"] == code), None)
+    ids = list(dict.fromkeys(str(i) for i in traveller_ids or []))
+    if option is None or not ids or not set(ids) <= set(option["eligible_travellers"]):
+        raise IllegalTransition("That can't be added for those guests.")
+    if option["adults_only"] and not adult:
+        raise IllegalTransition(f"{option['name']} is for guests aged 18 or over — please confirm.")
+    price = Decimal(option["unit_price"])
+    qty = math.ceil(len(ids) / max(option["vehicle_capacity"], 1)) if option["unit"] == "per_vehicle" else len(ids)
+    return {"code": code, "name": option["name"], "unit": option["unit"], "unit_price": option["unit_price"],
+            "quantity": qty, "line_total": str(quantize(price * qty)), "refundable": option["refundable"],
+            "travellers": ids}
+
+
 def quote_addon_addition(booking, code: str) -> dict:
     ok, reason, _ = addon_additions_open(booking)
     if not ok:
@@ -676,12 +723,45 @@ def quote_addon_addition(booking, code: str) -> dict:
     return line
 
 
+def _apply_component_addon(booking, payment) -> bool:
+    """Component booking: the paid add-on joins each chosen guest; their share
+    and covered portion grow by their part, so per-person balances stay right."""
+    from payments.money import quantize
+    from .pricing import split_evenly
+
+    travellers = list(booking.travellers.filter(pk__in=payment.addon_travellers).order_by("position"))
+    travellers = [t for t in travellers if payment.addon_code not in t.experiences]
+    if not travellers:
+        return False
+    addon = booking.package.addons.filter(code=payment.addon_code).first()
+    per_vehicle = addon is not None and addon.unit == addon.Unit.PER_VEHICLE
+    lines = list(booking.addons or [])
+    line = next((l for l in lines if l.get("code") == payment.addon_code), None)
+    if line is None:
+        line = {"code": payment.addon_code, "name": addon.name if addon else payment.addon_code,
+                "unit": addon.unit if addon else "per_person", "unit_price": str(addon.price if addon else payment.amount),
+                "quantity": 0, "line_total": "0.00", "refundable": addon.refundable if addon else True}
+        lines.append(line)
+    line["quantity"] += -(-len(travellers) // max(addon.vehicle_capacity, 1)) if per_vehicle else len(travellers)
+    line["line_total"] = str(quantize(Decimal(line["line_total"]) + payment.amount))
+    for t, part in zip(travellers, split_evenly(payment.amount, len(travellers))):
+        t.experiences = [*t.experiences, payment.addon_code]
+        t.share += part
+        t.checkout_portion += part
+        t.save(update_fields=["experiences", "share", "checkout_portion"])
+    booking.addons = lines
+    booking.total_amount = quantize(booking.total_amount + payment.amount)
+    return True
+
+
 def apply_paid_addon(booking, payment) -> bool:
     """Called under the booking lock once an ADDON payment succeeded: put the
     line on the booking and raise the total by exactly what was paid, so the
     balance is unchanged and the payment is never seen as an over-payment."""
     from payments.money import quantize
     code = payment.addon_code
+    if code and payment.addon_travellers:
+        return _apply_component_addon(booking, payment)
     if not code or any(l.get("code") == code for l in (booking.addons or [])):
         return False
     addon = booking.package.addons.filter(code=code).first()
@@ -691,3 +771,41 @@ def apply_paid_addon(booking, payment) -> bool:
     booking.addons = [*(booking.addons or []), line]
     booking.total_amount = quantize(booking.total_amount + payment.amount)
     return True
+
+
+def ticket_outstanding(traveller) -> Decimal:
+    """What this guest still owes (their share, per Booking.traveller_balances)."""
+    return next(r[3] for r in traveller.booking.traveller_balances() if r[0].pk == traveller.pk)
+
+
+def check_in_ticket(traveller, *, by) -> None:
+    """Event access (Change Request v4 §6): a guest checks in only when their
+    share is paid, or staff recorded an exception. Raises IllegalTransition."""
+    from django.utils import timezone
+
+    if traveller.forfeited_at:
+        raise IllegalTransition(f"{traveller.full_name}'s ticket was forfeited.")
+    if traveller.booking.status not in (Booking.Status.CONFIRMED, Booking.Status.COMPLETED):
+        raise IllegalTransition(f"Booking {traveller.booking.reference} is {traveller.booking.status}.")
+    owed = ticket_outstanding(traveller)
+    if owed > 0 and not traveller.access_exception:
+        raise IllegalTransition(
+            f"{traveller.full_name} owes {traveller.booking.currency} {owed:,.2f}: take payment or record an exception."
+        )
+    if not traveller.checked_in_at:
+        traveller.checked_in_at, traveller.checked_in_by = timezone.now(), by
+        traveller.save(update_fields=["checked_in_at", "checked_in_by"])
+
+
+def forfeit_ticket(traveller) -> None:
+    """Record a ticket as forfeited for non-payment at event start. Moves no
+    money and cancels nothing else; refunds follow the policy via staff."""
+    from django.utils import timezone
+
+    if traveller.checked_in_at:
+        raise IllegalTransition(f"{traveller.full_name} is already checked in.")
+    if traveller.access_exception or ticket_outstanding(traveller) <= 0:
+        raise IllegalTransition(f"{traveller.full_name} is paid or has an exception.")
+    if not traveller.forfeited_at:
+        traveller.forfeited_at = timezone.now()
+        traveller.save(update_fields=["forfeited_at"])

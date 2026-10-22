@@ -98,6 +98,8 @@ class Payment(models.Model):
     # Purpose=ADDON: the add-on this payment buys. The line joins the booking
     # only when the payment succeeds (see apply_successful_payment).
     addon_code = models.CharField(max_length=60, blank=True)
+    # Component bookings: the guests an ADDON payment buys for (traveller ids).
+    addon_travellers = models.JSONField(default=list, blank=True)
     # Group bookings paid per person: whose share this payment is.
     traveller = models.ForeignKey(
         "bookings.BookingTraveller", on_delete=models.SET_NULL, null=True, blank=True, related_name="payments",

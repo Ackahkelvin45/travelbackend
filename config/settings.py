@@ -162,11 +162,13 @@ UNFOLD = {
             _nav("Bookings", [
                 ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
                 ("Room allocation", "bed", "/admin/packages/roomunit/", None),
+                ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
                 ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
             ]),
             _nav("Money", [
                 ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
                 ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
+                ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
                 ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
             ]),
             _nav("Catalogue", [

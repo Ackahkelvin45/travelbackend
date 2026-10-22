@@ -485,16 +485,17 @@ class AvailableAddonsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, reference):
-        from .services import addon_additions_open, available_addons
+        from .services import addon_additions_open, available_addons, available_component_addons
 
         booking = _OwnedBooking.get(request, reference)
         if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
         ok, reason, open_until = addon_additions_open(booking)
+        listing = available_component_addons if booking.mode else available_addons
         return Response({
             "can_add": ok, "reason": reason, "open_until": open_until,
             "currency": booking.currency,
-            "addons": available_addons(booking) if ok else [],
+            "addons": listing(booking) if ok else [],
         })
 
 
@@ -707,7 +708,9 @@ class ComponentCheckoutView(APIView):
             "reference": booking.reference,
             "total_amount": str(booking.total_amount),
             "discount_amount": str(booking.discount_amount),
-            "amount_due_today": booking.quote_snapshot["amount_due_today"],
+            # The first payment: the deposit (instalments, or a group paying per
+            # person: organiser's share + room deposits), else the total.
+            "amount_due_today": str(booking.deposit_required or booking.total_amount),
             "deposit_required": str(booking.deposit_required) if booking.deposit_required else None,
             "currency": booking.currency,
             "status": booking.status,
