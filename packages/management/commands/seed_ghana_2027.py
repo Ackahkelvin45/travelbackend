@@ -20,15 +20,25 @@ so run it once when switching over.
 """
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
+from django.core.files import File
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from packages.models import (
-    Itinerary, PackageAddon, PackageAddonGroup, PackageDiscountRule, PackageFAQ, RoomUnit, StayType, TravelPackage,
+    Itinerary, PackageAddon, PackageAddonGroup, PackageDiscountRule, PackageFAQ, PackageImage, RoomUnit, StayType,
+    TravelPackage,
 )
 
 SLUG = "michael-blackson-ghana-experience"
+# Starter photos (supplied by the client), attached only while the package has none:
+# once staff upload their own in the admin, the seed leaves them alone.
+SEED_MEDIA = Path(__file__).resolve().parents[2] / "seed_media"
+PHOTOS = [
+    ("michael-blackson-academy-students.jpg", "Michael Blackson with students at the Michael Blackson Academy"),
+    ("michael-blackson-academy-celebration.jpg", "Michael Blackson cutting the Academy's celebration cake"),
+]
 # Not in the final change request (v4, 14 Oct 2026): the original option-based
 # flagship (its Marriott/premium tiers are to be removed) and the August day
 # tours. Switched off, never deleted; re-enable in the admin if Azura confirms
@@ -204,4 +214,10 @@ class Command(BaseCommand):
         PackageFAQ.objects.bulk_create(
             PackageFAQ(package=pkg, topic=topic, question=q, answer=a, order=i) for i, (topic, q, a) in enumerate(FAQS)
         )
+        if not pkg.images.exists():
+            for order, (name, caption) in enumerate(PHOTOS):
+                with open(SEED_MEDIA / name, "rb") as f:
+                    PackageImage.objects.create(package=pkg, image=File(f, name=name), caption=caption,
+                                                is_cover=order == 0, order=order)
+            self.stdout.write(f"Added {len(PHOTOS)} starter photos.")
         self.stdout.write(f"Content replaced: {len(PROGRAMME)} programme days, {len(FAQS)} FAQs.")
