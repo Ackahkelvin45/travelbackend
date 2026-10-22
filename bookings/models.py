@@ -210,7 +210,7 @@ class Booking(models.Model):
     class Meta:
         ordering = ["-created_at"]
         # Staff capabilities (see accounts/management/commands/setup_staff_groups.py):
-        # the admin AND the future staff portal both check exactly these.
+        # the admin's actions check exactly these.
         permissions = [
             ("view_special_requests", "Can view guests' special requests (may contain health data)"),
             ("mark_arrived", "Can mark a guest as arrived / tour started"),
