@@ -370,7 +370,7 @@ def send_balance_reminder(booking) -> bool:
     deadline-less bookings are skipped; returns whether an email went out."""
     from django.utils import timezone
 
-    from bookings.management.commands.send_payment_reminders import _build_reminder_html
+    from bookings.management.commands.send_payment_reminders import _build_reminder_html, reminder_subject
     from payments.email import deliver
 
     deadline = booking.effective_payment_deadline
@@ -378,7 +378,7 @@ def send_balance_reminder(booking) -> bool:
         return False
     days_left = max((deadline - timezone.localdate()).days, 0)
     return deliver("reminder_manual", booking.email,
-                   f"Balance due {deadline.strftime('%b %d')} – {booking.reference} | Azura Travels",
+                   reminder_subject(booking, days_left, trip=False),
                    _build_reminder_html(booking, days_left), booking=booking)
 
 

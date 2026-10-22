@@ -15,8 +15,6 @@ Deployment: one host cron line (or a supercronic sidecar), e.g.
 import html
 import logging
 
-import resend
-from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -28,74 +26,70 @@ REMINDER_MARKS = [14, 7, 1]  # days before deadline (Installment Policy)
 TRIP_REMINDER_MARKS = [30, 14, 7, 1]  # days before the first event day (v4 §6)
 
 
+def _balance_box(booking):
+    """Canvas: Emails · balance reminder — amount due and a paid progress bar."""
+    from payments.email import _money
+
+    total = booking.total_amount or 0
+    pct = max(1, min(99, int(booking.amount_paid * 100 / total))) if total else 1
+    return f"""<table width="100%" cellpadding="0" cellspacing="0" style="background:#FAF5EB;border:1px solid #F3E7CF;border-radius:10px;margin:0 0 18px;">
+  <tr><td style="padding:16px;">
+    <p style="margin:0 0 4px;font-size:12px;color:#6B4E1A;">Balance due</p>
+    <p style="margin:0 0 10px;font-family:Montserrat,Arial,sans-serif;font-size:24px;font-weight:700;color:#060504;">{_money(booking.currency, booking.balance)}</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#EADBC0;border-radius:999px;"><tr>
+      <td width="{pct}%" style="background:#BD8F3A;height:8px;border-radius:999px;font-size:0;line-height:0;">&nbsp;</td><td style="font-size:0;line-height:0;">&nbsp;</td>
+    </tr></table>
+    <p style="margin:8px 0 0;font-size:12px;color:#374151;">Paid {_money(booking.currency, booking.amount_paid)} of {_money(booking.currency, total)}</p>
+  </td></tr></table>"""
+
+
+def reminder_subject(booking, days_left, trip):
+    when = "today" if days_left <= 0 else "tomorrow" if days_left == 1 else f"in {days_left} days"
+    if trip:
+        start = booking.package.available_from
+        lead = "Final reminder: your" if days_left <= 1 else "Your"
+        return (f"{lead} balance is due before {start.day} {start:%b} – "
+                f"{booking.reference} | Azura Travels")
+    return f"Your balance is due {when} – {booking.reference} | Azura Travels"
+
+
 def _build_trip_reminder_html(booking, days_left):
     """Trip bookings: everything is due before the first activity; unpaid
     guests can't take part, so the email lists each guest still owing."""
-    start = booking.package.available_from.strftime("%A %d %B %Y")
-    pay_url = f"{settings.FRONTEND_URL.rstrip('/')}/booking/{booking.reference}/pay"
-    final = days_left <= 1
+    from payments.email import _button, _h, _money, _p, _shell, _summary, _trip_dates, _url
+
+    start = _trip_dates(booking.package.available_from)
     owing = [(t, owed) for t, _, _, owed in booking.traveller_balances() if owed > 0]
-    rows = "".join(
-        f'<tr><td style="padding:4px 0;font-size:13px;">{html.escape(t.full_name)}</td>'
-        f'<td align="right" style="padding:4px 0;font-size:13px;">{booking.currency} {owed:,.2f}</td></tr>'
-        for t, owed in owing
+    rows = [(html.escape(t.full_name), _money(booking.currency, owed), "") for t, owed in owing]
+    if booking.pay_separately:
+        rows = [(f'{name} · <a href="{_url(f"/pay/{t.id}")}" style="color:#8A6420;">pay link</a>', amount, s)
+                for (t, _), (name, amount, s) in zip(owing, rows)]
+    body = (
+        _h(f"Your trip starts {'tomorrow' if days_left <= 1 else f'in {days_left} days'}, {html.escape(booking.first_name)}")
+        + _p(f"Your remaining balance for booking <strong>{booking.reference}</strong> is due before the first activity on <strong>{start}</strong>.")
+        + _balance_box(booking)
+        + (_summary(rows) if rows else "")
+        + _button(_url(f"/booking/{booking.reference}/pay"), "Pay balance")
+        + _p("Guests with an unpaid balance at the start of the event can't receive a badge or join activities, and unpaid "
+             "bookings are forfeited under the booking terms you accepted.", small=True)
     )
-    links = "".join(
-        f'<li style="margin:0 0 4px;"><a href="{settings.FRONTEND_URL.rstrip("/")}/pay/{t.id}">{html.escape(t.full_name)}\'s pay link</a></li>'
-        for t, _ in owing
-    ) if booking.pay_separately else ""
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Balance reminder – {booking.reference}</title></head>
-<body style="margin:0;padding:0;background:#f0ece4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0ece4;padding:40px 0;"><tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;">
-  <tr><td style="background:#1a1a2e;padding:28px 40px;text-align:center;">
-    <h1 style="color:#d4a843;margin:0;font-size:24px;letter-spacing:3px;text-transform:uppercase;">Azura Travels</h1>
-  </td></tr>
-  <tr><td style="padding:32px 40px;">
-    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(booking.first_name)}, {"your trip starts tomorrow" if final else f"your trip starts in {days_left} days"}</p>
-    <p style="margin:0 0 14px;color:#555;font-size:14px;line-height:1.6;">
-      Booking <strong>{booking.reference}</strong> has <strong>{booking.currency} {booking.balance:,.2f}</strong> outstanding.
-      Everything must be paid before the first activity on <strong>{start}</strong>.
-    </p>
-    <table cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 14px;">{rows}</table>
-    {f'<ul style="margin:0 0 14px;padding-left:18px;font-size:13px;">{links}</ul>' if links else ""}
-    <p style="margin:0 0 24px;color:#555;font-size:13px;line-height:1.6;">
-      Guests with an unpaid balance at the start of the event can't receive a badge or join activities, and unpaid
-      bookings are forfeited under the booking terms you accepted. Contact us if you need help.
-    </p>
-    <a href="{pay_url}" style="display:inline-block;padding:14px 24px;background:#d4a843;color:#1a1a2e;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Pay now</a>
-  </td></tr>
-</table></td></tr></table></body></html>"""
+    return _shell(f"Balance reminder – {booking.reference}", body, footer="Already paid? You can ignore this message.")
 
 
 def _build_reminder_html(booking, days_left):
-    deadline = booking.effective_payment_deadline.strftime("%B %d, %Y")
-    dashboard_url = f"{settings.FRONTEND_URL.rstrip('/')}/booking/{booking.reference}/pay"  # public pay page — no login needed
-    urgency = "final reminder" if days_left <= 1 else "reminder"
-    return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Payment {urgency} – {booking.reference}</title></head>
-<body style="margin:0;padding:0;background:#f0ece4;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0ece4;padding:40px 0;"><tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;">
-  <tr><td style="background:#1a1a2e;padding:28px 40px;text-align:center;">
-    <h1 style="color:#d4a843;margin:0;font-size:24px;letter-spacing:3px;text-transform:uppercase;">Azura Travels</h1>
-  </td></tr>
-  <tr><td style="padding:32px 40px;">
-    <p style="margin:0 0 12px;color:#1a1a2e;font-size:18px;font-weight:800;">Hi {html.escape(booking.first_name)}, your balance is due soon</p>
-    <p style="margin:0 0 18px;color:#555;font-size:14px;line-height:1.6;">
-      Your booking <strong>{booking.reference}</strong> has an outstanding balance of
-      <strong>{booking.currency} {booking.balance}</strong>, due by <strong>{deadline}</strong>
-      ({days_left} day{"s" if days_left != 1 else ""} away).
-    </p>
-    <p style="margin:0 0 24px;color:#555;font-size:13px;line-height:1.6;">
-      Extra payments before the deadline are welcome any time. If the balance is still
-      outstanding after the deadline we will contact you before anything changes, under
-      the booking terms and refund policy you accepted at booking.
-    </p>
-    <a href="{dashboard_url}" style="display:inline-block;padding:14px 24px;background:#d4a843;color:#1a1a2e;text-decoration:none;border-radius:999px;font-weight:800;font-size:14px;">Pay your balance</a>
-  </td></tr>
-</table></td></tr></table></body></html>"""
+    from payments.email import _button, _h, _p, _shell, _url
+
+    deadline = booking.effective_payment_deadline
+    body = (
+        _h(f"A quick reminder, {html.escape(booking.first_name)}")
+        + _p(f"Your remaining balance for booking <strong>{booking.reference}</strong> is due on "
+             f"<strong>{deadline.day} {deadline:%B %Y}</strong>.")
+        + _balance_box(booking)
+        + _button(_url(f"/booking/{booking.reference}/pay"), "Pay balance")  # public pay page — no login needed
+        + _p("Extra payments before the deadline are welcome any time. If the balance is still outstanding after the "
+             "deadline we will contact you before anything changes, under the booking terms you accepted.", small=True)
+    )
+    return _shell(f"Balance reminder – {booking.reference}", body, footer="Already paid? You can ignore this message.")
 
 
 class Command(BaseCommand):
@@ -128,9 +122,7 @@ class Command(BaseCommand):
                 continue
 
             from payments.email import deliver
-            subject = (f"{'Final reminder: ' if marker == 1 else ''}balance due before {anchor.strftime('%d %b')} – "
-                       f"{booking.reference} | Azura Travels") if trip else \
-                f"Balance due {anchor.strftime('%b %d')} – {booking.reference} | Azura Travels"
+            subject = reminder_subject(booking, days_left, trip)
             body = _build_trip_reminder_html(booking, days_left) if trip else _build_reminder_html(booking, days_left)
             if not deliver(f"reminder_{key}", booking.email, subject, body, booking=booking):
                 continue

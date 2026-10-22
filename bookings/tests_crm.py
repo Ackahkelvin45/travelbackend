@@ -54,7 +54,7 @@ class CrmFollowupTests(TestCase):
             self.assertEqual(quote_reminders(now + timedelta(hours=1)), 0)    # not due yet
             self.assertEqual(quote_reminders(now + timedelta(hours=25)), 1)   # 24 h reminder
             self.assertEqual(quote_reminders(now + timedelta(hours=30)), 0)   # already sent
-            self.assertIn("Stop these emails", deliver.call_args.args[3])
+            self.assertIn("Unsubscribe", deliver.call_args.args[3])
 
             p = Payment.objects.create(booking=booking, paystack_reference="T-1", amount=booking.total_amount,
                                        currency="USD")

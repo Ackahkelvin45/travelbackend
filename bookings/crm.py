@@ -105,11 +105,11 @@ def quote_reminders(now=None) -> int:
 
 
 def _alert(to: list, subject: str, lines: list) -> bool:
-    from payments.email import _shell, deliver
+    from payments.email import _h, _p, _shell, deliver
 
-    body = (f'<p style="margin:0 0 12px;font-size:16px;font-weight:800;color:#1a1a2e;">{html.escape(subject)}</p>'
-            + "".join(f'<p style="margin:0 0 8px;font-size:13px;">{html.escape(l)}</p>' for l in lines if l)
-            + '<p style="margin:16px 0 0;font-size:12px;color:#888;">Follow up in the Azura admin.</p>')
+    body = (_h(html.escape(subject))
+            + "".join(_p(html.escape(l)) for l in lines if l)
+            + _p("Follow up in the Azura admin.", small=True))
     ok = False
     for email in dict.fromkeys(e for e in to if e):
         ok = deliver("staff_alert", email, f"[Azura] {subject}", _shell(subject, body)) or ok
