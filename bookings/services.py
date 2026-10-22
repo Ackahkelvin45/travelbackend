@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from .models import Booking, BookingTraveller, Lead, PolicyAcceptance, PolicyDocument
+from .models import Booking, BookingTraveller, PolicyAcceptance, PolicyDocument
 from .pricing import (
     QuoteError, assert_capacity, compute_component_quote, compute_configurable_quote, compute_quote,
 )
@@ -221,6 +221,29 @@ def create_hold(package, stay_codes: list, *, replace_token: str = ""):
     return token, held_until, claimed
 
 
+def renew_room_hold(booking) -> None:
+    """Before each payment attempt on an unconfirmed booking, hold its rooms
+    for another checkout window. Rooms resold after a lapsed window cannot be
+    renewed: the guest chooses again (QuoteError)."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from packages.models import RoomUnit
+    from payments.models import OpsConfig
+
+    expected = len((booking.quote_snapshot or {}).get("rooms", []))
+    if not expected or booking.status != Booking.Status.PENDING:
+        return
+    with transaction.atomic():
+        units = list(RoomUnit.objects.select_for_update().filter(booking=booking, blocked=False))
+        if len(units) < expected:
+            raise QuoteError("Your room is no longer available — please start a new booking to choose again.")
+        RoomUnit.objects.filter(pk__in=[u.pk for u in units]).update(
+            held_until=timezone.now() + timedelta(minutes=OpsConfig.get().hold_minutes),
+        )
+
+
 def release_hold(token: str) -> int:
     """Give back a checkout hold that has not become a booking."""
     from packages.models import RoomUnit
@@ -232,17 +255,18 @@ def release_hold(token: str) -> int:
 def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
-    user=None, ip_address: str | None = None,
+    pay_separately: bool = False, whatsapp_updates: bool = False, user=None, ip_address: str | None = None,
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
-    BookingTraveller (= one Core ticket) per guest. The units stay held for
-    the unpaid-booking window and become sold on the first payment."""
+    BookingTraveller (= one Core ticket) per guest. The units stay held only
+    for the checkout window (no unpaid room holds, Change Request v4 §6) and
+    become sold once the required payment is verified."""
     from datetime import timedelta
 
-    from django.conf import settings
     from django.utils import timezone
 
     from packages.models import RoomUnit
+    from payments.models import OpsConfig
 
     quote = compute_component_quote(
         package, mode=mode, travellers=travellers, rooms=rooms,
@@ -251,6 +275,17 @@ def create_component_booking(
     assert_capacity(package, quote.num_guests)
     if mode == Booking.Mode.COUPLE and not all((t.get("name") or "").strip() for t in travellers):
         raise QuoteError("Please give both guests' names.")
+    if pay_separately and mode != Booking.Mode.GROUP:
+        raise QuoteError("Paying separately is for group bookings.")
+
+    # What the checkout payment covers: everything due now, or — when members
+    # pay separately — the organiser's own part plus every room deposit, so
+    # rooms are secured by the first payment (Change Request v4 §4, §6).
+    portions = [
+        Decimal(t["due_now"]) if (i == 0 or not pay_separately) else Decimal(t["room_deposit"])
+        for i, t in enumerate(quote.travellers)
+    ]
+    deposit_required = sum(portions, Decimal("0")) if (pay_separately or quote.deposit_required) else None
 
     documents = required_policy_documents()
     accepted = set(accepted_policy_types)
@@ -292,13 +327,14 @@ def create_component_booking(
             quote_snapshot=quote.as_dict(),
             price_list_version=quote.price_list_version,
             refund_tiers_snapshot=package.refund_tiers,
-            deposit_required=quote.deposit_required,
+            deposit_required=deposit_required, pay_separately=pay_separately,
+            whatsapp_updates=whatsapp_updates and bool(contact.get("phone")),
         )
-        ttl = timedelta(hours=getattr(settings, "PENDING_BOOKING_TTL_HOURS", 24))
+        held_until = now + timedelta(minutes=OpsConfig.get().hold_minutes)
         unit_of = {}
         for room in quote.rooms:
             unit = by_code[room["stay_type"]].pop()
-            unit.booking, unit.hold_token, unit.held_until = booking, "", booking.created_at + ttl
+            unit.booking, unit.hold_token, unit.held_until = booking, "", held_until
             unit.save(update_fields=["booking", "hold_token", "held_until"])
             room["unit"] = unit.label
             for i in room["occupants"]:
@@ -308,9 +344,11 @@ def create_component_booking(
 
         BookingTraveller.objects.bulk_create([
             BookingTraveller(
-                booking=booking, is_lead=(i == 0), unit=unit_of.get(i),
+                booking=booking, is_lead=(i == 0), unit=unit_of.get(i), position=i,
+                share=Decimal(quote.travellers[i]["share"]), checkout_portion=portions[i],
                 full_name=(t.get("name") or "").strip() or (lead_name if i == 0 else f"Guest {i + 1}"),
-                experiences=[e["code"] for e in quote.travellers[i]["experiences"]],
+                experiences=[e["code"] for e in quote.travellers[i]["experiences"]]
+                + ([quote.travellers[i]["transfer"]] if quote.travellers[i]["transfer"] else []),
             )
             for i, t in enumerate(travellers)
         ])
@@ -318,9 +356,6 @@ def create_component_booking(
             PolicyAcceptance(booking=booking, document=d, email=booking.email, ip_address=ip_address)
             for d in documents + optional
         ])
-        Lead.objects.filter(email__iexact=booking.email, booking__isnull=True).exclude(
-            stage=Lead.Stage.LOST,
-        ).update(stage=Lead.Stage.WON, booking=booking)
 
     logger.info(
         "Component booking created: ref=%s pkg=%s mode=%s guests=%s rooms=%s total=%s %s",
@@ -335,7 +370,7 @@ def send_balance_reminder(booking) -> bool:
     deadline-less bookings are skipped; returns whether an email went out."""
     from django.utils import timezone
 
-    from bookings.management.commands.send_payment_reminders import _build_reminder_html
+    from bookings.management.commands.send_payment_reminders import _build_reminder_html, reminder_subject
     from payments.email import deliver
 
     deadline = booking.effective_payment_deadline
@@ -343,7 +378,7 @@ def send_balance_reminder(booking) -> bool:
         return False
     days_left = max((deadline - timezone.localdate()).days, 0)
     return deliver("reminder_manual", booking.email,
-                   f"Balance due {deadline.strftime('%b %d')} – {booking.reference} | Azura Travels",
+                   reminder_subject(booking, days_left, trip=False),
                    _build_reminder_html(booking, days_left), booking=booking)
 
 
@@ -516,8 +551,9 @@ def reject_cancellation(req, *, by_user, note: str = "") -> "CancellationRequest
 ADDON_CANCELLATION_FEE_PERCENT = Decimal("50")
 
 
-def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
-    """Cancel one add-on on a confirmed/pending booking.
+def remove_addon(booking, *, code: str, by_email: str, note: str = "", traveller=None) -> dict:
+    """Cancel one add-on on a confirmed/pending booking — for one guest when
+    `traveller` is given (trip bookings, where a line covers several guests).
 
     The add-on line is replaced by a non-refundable "cancellation fee" line
     worth ADDON_CANCELLATION_FEE_PERCENT of it, so the bundle discount is left
@@ -539,14 +575,17 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     line = next((l for l in lines if l.get("code") == code), None)
     if line is None:
         raise IllegalTransition("That add-on is not on this booking.")
-    charge = quantize(Decimal(str(line.get("line_total", "0"))))
-    if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") == "per_unit":
+    if traveller is not None and code not in traveller.experiences:
+        raise IllegalTransition(f"{traveller.full_name} doesn't have that add-on.")
+    charge = quantize(Decimal(str(line.get("unit_price" if traveller else "line_total", "0"))))
+    if charge <= 0 or code.endswith("_cancellation_fee") or line.get("unit") in ("per_unit", "per_vehicle"):
         raise IllegalTransition("That item cannot be cancelled.")
 
     fee = quantize(charge * ADDON_CANCELLATION_FEE_PERCENT / Decimal("100"))
+    who = f" — {traveller.full_name}" if traveller else ""
     fee_line = {
         "code": f"{code}_cancellation_fee",
-        "name": f"Cancellation fee — {line.get('name', code)} ({ADDON_CANCELLATION_FEE_PERCENT:.0f}%)",
+        "name": f"Cancellation fee — {line.get('name', code)}{who} ({ADDON_CANCELLATION_FEE_PERCENT:.0f}%)",
         "unit": "per_booking", "unit_price": str(fee), "quantity": 1, "line_total": str(fee),
         "refundable": False,
     }
@@ -563,11 +602,22 @@ def remove_addon(booking, *, code: str, by_email: str, note: str = "") -> dict:
     with transaction.atomic():
         booking = Booking.objects.select_for_update().get(pk=booking.pk)
         old_total = quantize(booking.total_amount)
-        booking.addons = [l for l in lines if l.get("code") != code] + ([fallback] if fallback else []) + [fee_line]
+        if traveller is not None:
+            # One guest's place on a per-person line; their share drops by what they no longer owe.
+            rest = {**line, "quantity": line["quantity"] - 1,
+                    "line_total": str(quantize(Decimal(str(line["line_total"])) - charge))}
+            booking.addons = [rest if l is line else l for l in lines if l is not line or rest["quantity"] > 0] + [fee_line]
+            traveller.experiences = [c for c in traveller.experiences if c != code]
+            traveller.share = quantize(traveller.share - charge + fee)
+            traveller.checkout_portion = min(traveller.checkout_portion, traveller.share)
+            traveller.save(update_fields=["experiences", "share", "checkout_portion"])
+        else:
+            booking.addons = [l for l in lines if l.get("code") != code] + ([fallback] if fallback else []) + [fee_line]
         booking.total_amount = quantize(old_total - charge + fee)
         overpaid = quantize(booking.amount_paid - booking.amount_refunded - booking.total_amount)
         booking.addon_changes = [*(booking.addon_changes or []), {
             "code": code, "name": line.get("name"), "charge": str(charge), "fee": str(fee),
+            "guest": traveller.full_name if traveller else "",
             "refund": str(max(overpaid, Decimal("0"))), "old_total": str(old_total),
             "new_total": str(booking.total_amount), "note": note,
             "at": timezone.now().isoformat(), "by": by_email,
@@ -629,6 +679,53 @@ def available_addons(booking) -> list:
     return out
 
 
+def available_component_addons(booking) -> list:
+    """Experiences and transfers a component booking can still add, at live
+    prices, each with the guests eligible for it (Change Request v4 §6, §8:
+    paid when purchased through the guest dashboard)."""
+    from payments.money import quantize
+    from .pricing import live_catalog
+
+    catalog = live_catalog(booking.package).experiences
+    transfer_codes = {c for c, a in catalog.items() if a.unit == "per_vehicle"}
+    travellers = list(booking.travellers.all())
+    out = []
+    for a in catalog.values():
+        eligible = [
+            str(t.id) for t in travellers
+            if a.code not in t.experiences and (not a.requires_stay or t.unit_id)
+            and not (a.code in transfer_codes and transfer_codes & set(t.experiences))  # one transfer per guest
+        ]
+        if eligible:
+            out.append({"code": a.code, "name": a.name, "description": a.description or None, "unit": a.unit,
+                        "unit_price": str(quantize(a.price)), "adults_only": a.adults_only,
+                        "vehicle_capacity": a.vehicle_capacity, "refundable": a.refundable,
+                        "eligible_travellers": eligible})
+    return out
+
+
+def quote_component_addon(booking, code: str, traveller_ids: list, adult: bool = False) -> dict:
+    """Price one add-on for chosen guests: per guest, or per vehicle shared by
+    the guests in this purchase. Raises IllegalTransition."""
+    import math
+    from payments.money import quantize
+
+    ok, reason, _ = addon_additions_open(booking)
+    if not ok:
+        raise IllegalTransition(reason)
+    option = next((o for o in available_component_addons(booking) if o["code"] == code), None)
+    ids = list(dict.fromkeys(str(i) for i in traveller_ids or []))
+    if option is None or not ids or not set(ids) <= set(option["eligible_travellers"]):
+        raise IllegalTransition("That can't be added for those guests.")
+    if option["adults_only"] and not adult:
+        raise IllegalTransition(f"{option['name']} is for guests aged 18 or over — please confirm.")
+    price = Decimal(option["unit_price"])
+    qty = math.ceil(len(ids) / max(option["vehicle_capacity"], 1)) if option["unit"] == "per_vehicle" else len(ids)
+    return {"code": code, "name": option["name"], "unit": option["unit"], "unit_price": option["unit_price"],
+            "quantity": qty, "line_total": str(quantize(price * qty)), "refundable": option["refundable"],
+            "travellers": ids}
+
+
 def quote_addon_addition(booking, code: str) -> dict:
     ok, reason, _ = addon_additions_open(booking)
     if not ok:
@@ -639,12 +736,45 @@ def quote_addon_addition(booking, code: str) -> dict:
     return line
 
 
+def _apply_component_addon(booking, payment) -> bool:
+    """Component booking: the paid add-on joins each chosen guest; their share
+    and covered portion grow by their part, so per-person balances stay right."""
+    from payments.money import quantize
+    from .pricing import split_evenly
+
+    travellers = list(booking.travellers.filter(pk__in=payment.addon_travellers).order_by("position"))
+    travellers = [t for t in travellers if payment.addon_code not in t.experiences]
+    if not travellers:
+        return False
+    addon = booking.package.addons.filter(code=payment.addon_code).first()
+    per_vehicle = addon is not None and addon.unit == addon.Unit.PER_VEHICLE
+    lines = list(booking.addons or [])
+    line = next((l for l in lines if l.get("code") == payment.addon_code), None)
+    if line is None:
+        line = {"code": payment.addon_code, "name": addon.name if addon else payment.addon_code,
+                "unit": addon.unit if addon else "per_person", "unit_price": str(addon.price if addon else payment.amount),
+                "quantity": 0, "line_total": "0.00", "refundable": addon.refundable if addon else True}
+        lines.append(line)
+    line["quantity"] += -(-len(travellers) // max(addon.vehicle_capacity, 1)) if per_vehicle else len(travellers)
+    line["line_total"] = str(quantize(Decimal(line["line_total"]) + payment.amount))
+    for t, part in zip(travellers, split_evenly(payment.amount, len(travellers))):
+        t.experiences = [*t.experiences, payment.addon_code]
+        t.share += part
+        t.checkout_portion += part
+        t.save(update_fields=["experiences", "share", "checkout_portion"])
+    booking.addons = lines
+    booking.total_amount = quantize(booking.total_amount + payment.amount)
+    return True
+
+
 def apply_paid_addon(booking, payment) -> bool:
     """Called under the booking lock once an ADDON payment succeeded: put the
     line on the booking and raise the total by exactly what was paid, so the
     balance is unchanged and the payment is never seen as an over-payment."""
     from payments.money import quantize
     code = payment.addon_code
+    if code and payment.addon_travellers:
+        return _apply_component_addon(booking, payment)
     if not code or any(l.get("code") == code for l in (booking.addons or [])):
         return False
     addon = booking.package.addons.filter(code=code).first()
@@ -654,3 +784,93 @@ def apply_paid_addon(booking, payment) -> bool:
     booking.addons = [*(booking.addons or []), line]
     booking.total_amount = quantize(booking.total_amount + payment.amount)
     return True
+
+
+def ticket_outstanding(traveller) -> Decimal:
+    """What this guest still owes (their share, per Booking.traveller_balances)."""
+    return next(r[3] for r in traveller.booking.traveller_balances() if r[0].pk == traveller.pk)
+
+
+def check_in_ticket(traveller, *, by) -> None:
+    """Event access (Change Request v4 §6): a guest checks in only when their
+    share is paid, or staff recorded an exception. Raises IllegalTransition."""
+    from django.utils import timezone
+
+    if traveller.forfeited_at:
+        raise IllegalTransition(f"{traveller.full_name}'s ticket was forfeited.")
+    if traveller.booking.status not in (Booking.Status.CONFIRMED, Booking.Status.COMPLETED):
+        raise IllegalTransition(f"Booking {traveller.booking.reference} is {traveller.booking.status}.")
+    owed = ticket_outstanding(traveller)
+    if owed > 0 and not traveller.access_exception:
+        raise IllegalTransition(
+            f"{traveller.full_name} owes {traveller.booking.currency} {owed:,.2f}: take payment or record an exception."
+        )
+    if not traveller.checked_in_at:
+        traveller.checked_in_at, traveller.checked_in_by = timezone.now(), by
+        traveller.save(update_fields=["checked_in_at", "checked_in_by"])
+
+
+def forfeit_ticket(traveller) -> None:
+    """Record a ticket as forfeited for non-payment at event start. Moves no
+    money and cancels nothing else; refunds follow the policy via staff."""
+    from django.utils import timezone
+
+    if traveller.checked_in_at:
+        raise IllegalTransition(f"{traveller.full_name} is already checked in.")
+    if traveller.access_exception or ticket_outstanding(traveller) <= 0:
+        raise IllegalTransition(f"{traveller.full_name} is paid or has an exception.")
+    if not traveller.forfeited_at:
+        traveller.forfeited_at = timezone.now()
+        traveller.save(update_fields=["forfeited_at"])
+
+
+TRANSFER_CUTOFF_DAYS = 14
+
+
+def change_lead_contact(booking, *, kind: str, first_name: str, last_name: str, email: str = "", phone: str = "",
+                        note: str = "", by_email: str) -> None:
+    """Terms Part A, staff only.
+
+    correction  → same person, fixed spelling. Free.
+    replacement → a different person takes the place. Free up to
+                  TRANSFER_CUTOFF_DAYS before departure; later ones need a note
+                  recording the approval. If the email changes, the booking is
+                  detached from the old account (ownership never follows an
+                  email change) and the new traveller is emailed to claim it.
+    Both identities, who approved and when go into traveller_changes.
+    Raises IllegalTransition."""
+    from datetime import date
+    from django.utils import timezone
+    from payments.email import send_traveller_updated
+
+    if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+        raise IllegalTransition(f"A {booking.status} booking cannot be changed.")
+    if kind not in ("correction", "replacement"):
+        raise IllegalTransition("Choose a correction or a replacement.")
+    first, last = first_name.strip()[:100], last_name.strip()[:100]
+    if not first or not last:
+        raise IllegalTransition("First and last name are required.")
+    email = (email or booking.email).strip().lower()[:254]
+    phone = (phone or booking.phone or "").strip()[:20]
+    note = note.strip()[:500]
+    days = (booking.travel_date - date.today()).days
+    if kind == "replacement" and days < TRANSFER_CUTOFF_DAYS and not note:
+        raise IllegalTransition(f"Fewer than {TRANSFER_CUTOFF_DAYS} days to departure: replacements need individual "
+                                "review. Add a note explaining the approval.")
+    previous = {"first_name": booking.first_name, "last_name": booking.last_name,
+                "email": booking.email, "phone": booking.phone}
+    new = {"first_name": first, "last_name": last, "email": email, "phone": phone or None}
+    if previous == new:
+        raise IllegalTransition("Nothing changed.")
+
+    fields = ["first_name", "last_name", "email", "phone", "traveller_changes", "updated_at"]
+    if email != booking.email.lower() and booking.user_id:
+        booking.user = None  # the old account must not keep the new traveller's booking
+        fields.append("user")
+    booking.first_name, booking.last_name, booking.email, booking.phone = first, last, email, phone or None
+    booking.traveller_changes = [*(booking.traveller_changes or []), {
+        "kind": kind, "from": previous, "to": new, "note": note,
+        "at": timezone.now().isoformat(), "by": by_email, "days_to_departure": days,
+    }]
+    booking.save(update_fields=fields)
+    send_traveller_updated(booking, previous, kind)

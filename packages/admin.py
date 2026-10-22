@@ -21,6 +21,7 @@ from .models import (
     PackageVideo,
     PriceListVersion,
     RoomUnit,
+    StayImage,
     StayType,
     TourDeparture,
     TravelPackage,
@@ -167,18 +168,20 @@ class PackageAddonInline(TabularInline):
     extra = 0
     tab = True
     verbose_name_plural = "Add-ons & experiences"
-    fields = ["name", "code", "group", "description", "price", "unit", "is_default", "refundable", "order", "is_active"]
+    fields = ["name", "code", "group", "description", "price", "unit", "is_default", "refundable",
+              "adults_only", "requires_stay", "vehicle_capacity", "order", "is_active"]
     ordering = ["order"]
 
 
 class PackageDiscountRuleInline(StackedInline):
-    """Non-stacking bundle discounts. Add the required add-ons after saving the
-    add-ons above (the engine applies only the single highest qualifying rule)."""
+    """Non-stacking savings: the engine applies only the single highest
+    qualifying rule. Group accommodation rules use min travellers; whole-cart
+    rules use required add-ons (add them after saving the add-ons above)."""
     model = PackageDiscountRule
     extra = 0
     tab = True
     verbose_name_plural = "Savings rules"
-    fields = ["name", "scope", "percent", "required_addons", "is_active"]
+    fields = ["name", "scope", "percent", "min_travellers", "required_addons", "is_active"]
     filter_horizontal = ["required_addons"]
 
 
@@ -302,7 +305,7 @@ class TravelPackageAdmin(ModelAdmin):
                            "time using the live market rate plus the margin (rate history is in "
                            "Payments → Exchange Rates); the manual rate is the fallback if the "
                            "rate feed is down. The ledger stays in the package currency.",
-            "fields": ("allow_installments", "deposit_minimum", "deposit_unit", "deposit_threshold", "currency",
+            "fields": ("allow_installments", "deposit_minimum", "deposit_unit", "accommodation_deposit_percent", "currency",
                        "fx_mode", "fx_margin_percent", "charge_exchange_rate"),
         }),
         ("Visa Add-on", {
@@ -418,7 +421,36 @@ class StayTypeInline(TabularInline):
     tab = True
     verbose_name_plural = "Stays"
     fields = ["code", "name", "kind", "capacity", "min_occupancy", "price_per_night", "nights",
-              "discount_percent", "on_sale", "note", "order"]
+              "on_sale", "note", "order"]
+    show_change_link = True  # photos, bedding, amenities: on the stay's own page
+
+
+class StayImageInline(ImagePreviewMixin, TabularInline):
+    model = StayImage
+    extra = 1
+    fields = ["image_preview", "image", "alt_text", "order"]
+    readonly_fields = ["image_preview"]
+
+
+@admin.register(StayType)
+class StayTypeAdmin(ModelAdmin):
+    """What guests see on the Stays page. Prices and capacity are edited on the
+    package (Stays tab) and go live with "Publish price list"."""
+    list_display = ["name", "package", "kind", "photo_count", "on_sale"]
+    list_filter = [("package", RelatedDropdownFilter)]
+    readonly_fields = ["package", "code", "kind", "capacity", "price_per_night", "nights", "on_sale"]
+    fieldsets = (
+        ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note")}),
+        ("Shown on the Stays page", {"fields": ("bedding", "amenities", "breakfast", "location")}),
+    )
+    inlines = [StayImageInline]
+
+    @admin.display(description="Photos")
+    def photo_count(self, obj):
+        return obj.images.count()
+
+    def has_add_permission(self, request):
+        return False  # stays are added on the package
 
 
 class PriceListVersionInline(TabularInline):

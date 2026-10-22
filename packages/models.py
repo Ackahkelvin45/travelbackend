@@ -160,10 +160,10 @@ class TravelPackage(models.Model):
                   "the minimum for each guest, capped at that guest's share of the "
                   "total (so a $878 guest pays $878, never the $1,000 minimum).",
     )
-    deposit_threshold = models.DecimalField(
-        max_digits=12, decimal_places=2, null=True, blank=True,
-        help_text="Component pricing only: carts below this total are payable in full "
-                  "(no deposit offered). Leave empty to switch the rule off.",
+    accommodation_deposit_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=50,
+        help_text="Component pricing only: share of each room's price paid at booking to secure it. "
+                  "Core tickets, experiences and transfers are always paid in full.",
     )
     final_payment_deadline = models.DateField(
         null=True, blank=True,
@@ -526,6 +526,7 @@ class PackageAddon(models.Model):
     class Unit(models.TextChoices):
         PER_PERSON = "per_person", "Per person (× guests)"
         PER_BOOKING = "per_booking", "Per booking (flat)"
+        PER_VEHICLE = "per_vehicle", "Per vehicle (component model: guests share up to vehicle capacity)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="addons")
@@ -543,6 +544,11 @@ class PackageAddon(models.Model):
     refundable = models.BooleanField(
         default=True, help_text="Untick for non-refundable components (excluded from refunds).",
     )
+    adults_only = models.BooleanField(default=False, help_text="Guests must confirm they are 18 or over.")
+    requires_stay = models.BooleanField(
+        default=False, help_text="Only for guests staying in Azura accommodation (e.g. airport transfers).",
+    )
+    vehicle_capacity = models.PositiveSmallIntegerField(default=2, help_text="Per vehicle unit only: guests per vehicle.")
     order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 
@@ -558,9 +564,8 @@ class PackageAddon(models.Model):
 
 class StayType(models.Model):
     """An accommodation product for the component pricing model, priced per
-    unit per night: a unit is charged once whatever its occupancy. Its
-    discount_percent applies to the unit charge plus the Core tickets of the
-    unit's occupants (Change Request v2: 3% Airbnb, 5% Four Points)."""
+    unit per night: a unit is charged once whatever its occupancy, for a fixed
+    block of nights (Change Request v4: Airbnb 5, Four Points 4)."""
 
     class Kind(models.TextChoices):
         AIRBNB = "airbnb", "Airbnb"
@@ -576,13 +581,14 @@ class StayType(models.Model):
         default=1, help_text="e.g. 2 for a couple room that must be shared.",
     )
     price_per_night = models.DecimalField(max_digits=12, decimal_places=2, help_text="Per unit, package currency.")
-    nights = models.PositiveSmallIntegerField(default=4)
-    discount_percent = models.DecimalField(
-        max_digits=5, decimal_places=2, default=0,
-        help_text="Off the unit charge + its occupants' Core tickets, e.g. 3.00.",
-    )
+    nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
     on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
     note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
+    bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
+    amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")
+    breakfast = models.CharField(max_length=200, blank=True, help_text="e.g. 'Not included' or 'Buffet breakfast included'.")
+    location = models.CharField(max_length=200, blank=True, help_text="Area and what's nearby, e.g. 'Airport Residential, 10 min to Osu'.")
     order = models.PositiveIntegerField(default=0)
 
     class Meta:
@@ -602,6 +608,22 @@ class StayType(models.Model):
         if not hold_token:
             return free
         return free + self.units.filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now).count()
+
+
+class StayImage(models.Model):
+    """An approved property photo for the Stays page; alt text is required (accessibility)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stay_type = models.ForeignKey(StayType, on_delete=models.CASCADE, related_name="images")
+    image = models.ImageField(upload_to="stays/images/")
+    alt_text = models.CharField(max_length=200, help_text="What the photo shows, e.g. 'Bedroom with king bed and city view'.")
+    order = models.PositiveIntegerField(default=0, help_text="Lower first; the first photo is the card cover.")
+
+    class Meta:
+        ordering = ["order", "id"]
+
+    def __str__(self):
+        return self.alt_text
 
 
 class RoomUnitQuerySet(models.QuerySet):
@@ -645,20 +667,27 @@ class PackageDiscountRule(models.Model):
     """A bundle discount: applies `percent` off the subtotal when EVERY add-on in
     `required_addons` is in the cart. Discounts never stack — the pricing engine
     applies only the single highest qualifying rule (max percent wins). This
-    reproduces the doc's 5/7/10/12/15% ladder with no negative conditions."""
+    reproduces the doc's 5/7/10/12/15% ladder with no negative conditions.
+
+    Component model: GROUP_ACCOMMODATION rules take `percent` off the room
+    charges only (never Core) once the booking has `min_travellers`; the
+    highest qualifying rule wins (Change Request v4 §5)."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
     class Scope(models.TextChoices):
         CART = "cart", "Whole cart, highest rule wins (core + add-ons model)"
-        TRAVELLER_BUNDLE = "traveller_bundle", "A traveller's complete extras bundle (component model)"
+        GROUP_ACCOMMODATION = "group_accommodation", "Group size, accommodation only (component model)"
 
     name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
     scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.CART)
     percent = models.DecimalField(max_digits=5, decimal_places=2, help_text="e.g. 10.00 for 10%.")
+    min_travellers = models.PositiveSmallIntegerField(
+        null=True, blank=True, help_text="Group accommodation rules: smallest qualifying group.",
+    )
     required_addons = models.ManyToManyField(
-        PackageAddon, related_name="discount_rules",
-        help_text="ALL of these must be in the cart for the rule to qualify.",
+        PackageAddon, related_name="discount_rules", blank=True,
+        help_text="Whole-cart rules: ALL of these must be in the cart for the rule to qualify.",
     )
     is_active = models.BooleanField(default=True)
 

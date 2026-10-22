@@ -98,6 +98,12 @@ class Payment(models.Model):
     # Purpose=ADDON: the add-on this payment buys. The line joins the booking
     # only when the payment succeeds (see apply_successful_payment).
     addon_code = models.CharField(max_length=60, blank=True)
+    # Component bookings: the guests an ADDON payment buys for (traveller ids).
+    addon_travellers = models.JSONField(default=list, blank=True)
+    # Group bookings paid per person: whose share this payment is.
+    traveller = models.ForeignKey(
+        "bookings.BookingTraveller", on_delete=models.SET_NULL, null=True, blank=True, related_name="payments",
+    )
 
     # Chargeback / dispute raised with the card issuer (Paystack
     # charge.dispute.* webhooks). A disputed payment is never refunded by us
@@ -293,6 +299,25 @@ class OpsConfig(models.Model):
         help_text="Saved-quote / abandoned-checkout reminders, hours after the event, e.g. [24, 72]. "
                   "Sent only with marketing consent.",
     )
+
+    # ── WhatsApp confirmations (Change Request v4 §8)
+    whatsapp_confirmation_template = models.CharField(
+        max_length=100, blank=True,
+        help_text="Name of the Meta-approved WhatsApp template sent after each verified payment to guests who "
+                  "opted in. Its body takes 5 values in order: first name, booking reference, amount paid, "
+                  "balance, booking link. Leave empty to send nothing.",
+    )
+    whatsapp_template_language = models.CharField(max_length=10, default="en", help_text="Template language code, e.g. en or en_US.")
+
+    # ── Academy donations (Change Request v4 §7)
+    donations_enabled = models.BooleanField(
+        default=False, help_text="Open donations only after the Academy settlement account is verified.",
+    )
+    donation_subaccount = models.CharField(
+        max_length=40, blank=True,
+        help_text="Paystack subaccount code (ACCT_…) of the Academy's own bank account. Create it in Paystack "
+                  "with a 0% main-account share so every donation settles there. Donations stay closed until set.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -360,3 +385,46 @@ class EmailLog(models.Model):
 
     def __str__(self):
         return f"{self.kind} → {self.to_email} [{self.status}]"
+
+
+class Donation(models.Model):
+    """A voluntary Academy donation, at checkout or on the public page. Its own
+    Paystack transaction settles to the Academy subaccount and never touches
+    a booking's ledger (Change Request v4 §7)."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Received"
+        FAILED = "failed", "Failed"
+
+    class Source(models.TextChoices):
+        CHECKOUT = "checkout", "Checkout"
+        PAGE = "page", "Donation page"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reference = models.CharField(max_length=40, unique=True)
+    source = models.CharField(max_length=10, choices=Source.choices)
+    booking = models.ForeignKey(
+        "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="donations",
+    )
+    donor_name = models.CharField(max_length=200)
+    donor_email = models.EmailField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2, help_text="USD.")
+    currency = models.CharField(max_length=3, default="USD")
+    charged_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    charged_currency = models.CharField(max_length=3, blank=True)
+    exchange_rate = models.DecimalField(max_digits=14, decimal_places=6, null=True, blank=True)
+    subaccount = models.CharField(max_length=40, help_text="Settlement subaccount at the time of the charge.")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    needs_review = models.BooleanField(default=False)
+    review_note = models.TextField(blank=True)
+    gateway_response = models.JSONField(default=dict, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    receipt_sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reference} · {self.currency} {self.amount} [{self.status}]"

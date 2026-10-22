@@ -255,3 +255,7 @@ img[src*="/admin/img/logodark.png"] {
 .az-range input { border: 1px solid var(--color-base-300); border-radius: 8px; padding: 6px 8px; background: transparent; font: inherit; }
 .az-pill { border: 1px solid var(--color-base-300); border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 600; color: inherit; text-decoration: none; }
 .az-pill--on { background: var(--color-primary-600); border-color: var(--color-primary-600); color: #fff; }
+
+/* Radio groups in admin forms (change contact, remove add-on). */
+fieldset.az-field { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; }
+fieldset.az-field label { display: flex; gap: 8px; align-items: center; font-weight: 500; }

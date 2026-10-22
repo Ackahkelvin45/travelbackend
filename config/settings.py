@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from datetime import timedelta
+from django.core.exceptions import ImproperlyConfigured
 from django.templatetags.static import static
 from django.utils.translation import gettext_lazy as _
 import os
@@ -33,9 +34,8 @@ load_dotenv(BASE_DIR / _env_file)
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45",  # dev fallback only
+SECRET_KEY = os.environ.get("SECRET_KEY") or (
+    "django-insecure-th(=^b337c-1pste3n9#%!&x9!d0-vh+$x#z%5om6^@!t2j^45"  # dev fallback only
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -80,6 +80,8 @@ INSTALLED_APPS = [
     "reviews",
     "blog",
     'rest_framework',
+    # Refresh tokens are revoked on logout and on every rotation.
+    'rest_framework_simplejwt.token_blacklist',
     'drf_yasg',
     "corsheaders",
 ]
@@ -162,11 +164,13 @@ UNFOLD = {
             _nav("Bookings", [
                 ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
                 ("Room allocation", "bed", "/admin/packages/roomunit/", None),
+                ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
                 ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
             ]),
             _nav("Money", [
                 ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
                 ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
+                ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
                 ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
             ]),
             _nav("Catalogue", [
@@ -226,17 +230,25 @@ REST_FRAMEWORK = {
         'quote': '120/min',
         'holds': '20/min',
         'leads': '10/min',
+        # Each assistant message is a paid model call.
+        'assistant': '20/min',
         # Email verification / resend — cheap to abuse (email spam), so cap it.
         'auth': '10/min',
         # Live password-rule check from the signup form — generous for typing,
         # capped so it can't be abused as a password-guessing oracle.
         'password_check': '60/min',
+        # Anonymous review posting: spam cap.
+        'reviews': '5/hour',
     },
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    # Short access tokens; each refresh issues a new refresh token and revokes
+    # the old one, so a copied refresh token stops working once either side uses it.
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'TOKEN_OBTAIN_SERIALIZER': 'accounts.jwt_serializers.VerifiedEmailTokenObtainPairSerializer',
 }
@@ -262,6 +274,22 @@ AUTOTASKS_ENABLED = "test" not in sys.argv
 
 # Trust the X-Forwarded-Proto header from the proxy (Nginx)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+if os.environ.get("DJANGO_ENV") == "production":
+    if DEBUG:
+        raise ImproperlyConfigured("DEBUG must be False in production (set DEBUG=False in .env.prod).")
+    if SECRET_KEY.startswith("django-insecure-"):
+        raise ImproperlyConfigured("SECRET_KEY is missing from .env.prod; refusing to sign sessions and tokens with the dev key.")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    # Off by default: TLS ends before Nginx (which listens on :80), so Django
+    # can't always tell a request was HTTPS and a redirect here could loop.
+    # Turn on once the proxy forwards X-Forwarded-Proto: https.
+    SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
+    SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
+    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = ("rest_framework.renderers.JSONRenderer",)
 
 ROOT_URLCONF = "config.urls"
 
@@ -305,6 +333,8 @@ if _db_url.startswith("postgres"):
             "CONN_MAX_AGE": 60,  # persistent connections
         }
     }
+elif os.environ.get("DJANGO_ENV") == "production":
+    raise ImproperlyConfigured("DATABASE_URL must be a postgres:// URL in production; refusing to fall back to SQLite.")
 else:
     DATABASES = {
         "default": {
@@ -362,6 +392,8 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "accounts.User"
+# Staff sign in at /admin/login/; without ?next= Django would send them to /accounts/profile/ (404).
+LOGIN_REDIRECT_URL = "/admin/"
 
 # ── Frontend ─────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://azuratravels.live")
@@ -399,6 +431,16 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 # ── Resend ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "Azura Travels <bookings@azuratravels.live>")
+
+# ── Guest assistant (site chat + WhatsApp) ───────────────────────────────────
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "deepseek-chat")
+# WhatsApp Cloud API (Meta app → WhatsApp → API setup). Unset = webhook rejects everything.
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
+WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
 
 # Framework emails (admin password reset) go through Resend like every other email.
 EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"

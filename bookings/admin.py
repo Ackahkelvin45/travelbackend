@@ -6,9 +6,11 @@ from unfold.decorators import action, display
 from unfold.widgets import UnfoldAdminTextareaWidget
 
 from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_STAGE_BADGE, PAYMENT_STATE_BADGE
-from payments.models import Payment
+from payments.models import EmailLog, Payment
 from payments.services import record_offline_payment
-from .models import Booking, BookingTraveller, CancellationRequest, Lead, PolicyAcceptance, PolicyDocument
+from .models import (
+    Booking, BookingTraveller, CancellationRequest, ChatThread, EventTicket, Lead, PolicyAcceptance, PolicyDocument,
+)
 
 
 class OfflinePaymentInlineForm(forms.ModelForm):
@@ -58,6 +60,24 @@ class PolicyAcceptanceInline(TabularInline):
     extra = 0
     fields = ["document", "email", "ip_address", "accepted_at"]
     readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class EmailLogInline(TabularInline):
+    """What we sent this guest and whether the provider accepted it."""
+    model = EmailLog
+    fk_name = "booking"
+    extra = 0
+    tab = True
+    verbose_name_plural = "Emails sent"
+    fields = ["created_at", "kind", "to_email", "subject", "status", "error"]
+    readonly_fields = fields
+    ordering = ["-created_at"]
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -194,8 +214,8 @@ class TravellerInline(TabularInline):
     tab = True
     verbose_name = "Guest"
     verbose_name_plural = "Guests & rooms"
-    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "travel_info"]
-    readonly_fields = ["is_lead", "ticket", "experiences_display", "travel_info"]
+    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "paid_share", "travel_info"]
+    readonly_fields = ["is_lead", "ticket", "experiences_display", "paid_share", "travel_info"]
     can_delete = False
 
     def has_add_permission(self, request, obj=None):
@@ -207,6 +227,12 @@ class TravellerInline(TabularInline):
             object_id = request.resolver_match.kwargs.get("object_id")
             kwargs["queryset"] = RoomUnit.objects.filter(booking_id=object_id).select_related("stay_type")
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @admin.display(description="Paid / share")
+    def paid_share(self, obj):
+        _, share, paid, outstanding = next(r for r in obj.booking.traveller_balances() if r[0].pk == obj.pk)
+        state = "paid" if outstanding <= 0 else f"{outstanding:,.2f} due"
+        return f"{paid:,.2f} / {share:,.2f} · {state}"
 
     @admin.display(description="Core ticket")
     def ticket(self, obj):
@@ -232,7 +258,8 @@ class BookingAdmin(ModelAdmin):
     form = BookingAdminForm
     actions = ["assign_coordinator", "send_balance_reminders", "export_csv",
                "mark_arrived", "cancel_with_refund", "cancel_as_organizer", "mark_completed"]
-    actions_detail = ["detail_send_reminder", "detail_resend_confirmation", "detail_mark_contacted"]
+    actions_detail = ["detail_send_reminder", "detail_resend_confirmation", "detail_mark_contacted",
+                      "detail_change_contact", "detail_remove_addon"]
     list_display = ["reference_cell", "lead_cell", "stay_cell", "total_cell", "paid_cell",
                     "due_cell", "coordinator_cell", "stage_badge"]
     list_filter = [
@@ -262,7 +289,7 @@ class BookingAdmin(ModelAdmin):
         "coordinator_assigned_at", "lead_contacted_at", "contact_sla",
     ]
     ordering = ["-created_at"]
-    inlines = [TravellerInline, PaymentInline, CancellationRequestInline, PolicyAcceptanceInline]
+    inlines = [TravellerInline, PaymentInline, CancellationRequestInline, PolicyAcceptanceInline, EmailLogInline]
     fieldsets = (
         ("Overview", {
             "classes": ["tab"],
@@ -586,6 +613,61 @@ class BookingAdmin(ModelAdmin):
         self.message_user(request, "Contact recorded.", messages.SUCCESS)
         return self._back(object_id)
 
+    def _form_page(self, request, booking, template, title, **ctx):
+        from django.template.response import TemplateResponse
+        return TemplateResponse(request, template, {
+            **self.admin_site.each_context(request), "title": title, "booking": booking, "opts": self.model._meta,
+            **ctx,
+        })
+
+    @action(description="Change lead contact", url_path="change-contact", permissions=["bookings.change_booking"])
+    def detail_change_contact(self, request, object_id):
+        """Correction (same person) or replacement (someone else takes the place), logged and emailed."""
+        from django.contrib import messages
+        from .services import TRANSFER_CUTOFF_DAYS, IllegalTransition, change_lead_contact
+        booking = Booking.objects.get(pk=object_id)
+        if request.method == "POST":
+            try:
+                change_lead_contact(booking, kind=request.POST.get("kind", ""), first_name=request.POST.get("first_name", ""),
+                                    last_name=request.POST.get("last_name", ""), email=request.POST.get("email", ""),
+                                    phone=request.POST.get("phone", ""), note=request.POST.get("note", ""),
+                                    by_email=request.user.email)
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                self.message_user(request, "Lead contact updated and the guest emailed.", messages.SUCCESS)
+                return self._back(object_id)
+        return self._form_page(request, booking, "admin/bookings/change_contact.html", "Change lead contact",
+                               cutoff=TRANSFER_CUTOFF_DAYS, form=request.POST)
+
+    @action(description="Remove an add-on", url_path="remove-addon", permissions=["bookings.cancel_booking"])
+    def detail_remove_addon(self, request, object_id):
+        """Cancel one experience or transfer; 50% of its charge is kept as a fee (booking terms)."""
+        from django.contrib import messages
+        from .services import IllegalTransition, remove_addon
+        booking = Booking.objects.get(pk=object_id)
+        lines = [l for l in (booking.addons or []) if l.get("unit") not in ("per_unit", "per_vehicle")
+                 and not str(l.get("code", "")).endswith("_cancellation_fee") and float(l.get("line_total", 0)) > 0]
+        # Trip bookings: one choice per guest holding the add-on ("<traveller id>:<code>").
+        names = {l["code"]: l for l in lines}
+        choices = [{"value": f"{t.pk}:{c}", "label": f"{names[c]['name']} · {t.full_name}", "price": names[c]["unit_price"]}
+                   for t in booking.travellers.all() for c in t.experiences if c in names] if booking.mode else []
+        if request.method == "POST":
+            traveller, code = None, request.POST.get("code", "")
+            if booking.mode and ":" in code:
+                tid, code = code.split(":", 1)
+                traveller = booking.travellers.filter(pk=tid).first()
+            try:
+                remove_addon(booking, code=code, by_email=request.user.email, traveller=traveller,
+                             note=request.POST.get("note", "")[:300])
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                self.message_user(request, "Add-on removed; 50% kept as the cancellation fee.", messages.SUCCESS)
+                return self._back(object_id)
+        return self._form_page(request, booking, "admin/bookings/remove_addon.html", "Remove an add-on",
+                               lines=lines, choices=choices)
+
     def save_formset(self, request, form, formset, change):
         """Payments: route new rows through the offline-payment service.
         Travellers: room moves go through move_traveller (capacity enforced,
@@ -894,3 +976,181 @@ class LeadAdmin(ModelAdmin):
             send_saved_quote(lead)
             self.message_user(request, f"Quote reminder sent to {lead.email}.", messages.SUCCESS)
         return self._back(object_id)
+
+
+class ChatThreadForm(forms.ModelForm):
+    reply = forms.CharField(
+        required=False, widget=UnfoldAdminTextareaWidget(attrs={"rows": 3}),
+        help_text="Sent to the guest on WhatsApp when you save. WhatsApp only delivers it within "
+                  "24 hours of the guest's last message.",
+    )
+
+    class Meta:
+        model = ChatThread
+        fields = ["bot_paused"]
+
+
+@admin.register(ChatThread)
+class ChatThreadAdmin(ModelAdmin):
+    """WhatsApp conversations. After a hand-off the bot is paused and staff
+    reply from here; untick "Bot paused" to give the thread back to the bot."""
+    form = ChatThreadForm
+    list_display = ["__str__", "bot_paused", "lead", "last_inbound_at"]
+    list_filter = ["bot_paused"]
+    search_fields = ["wa_id", "name"]
+    readonly_fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript"]
+    fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript", "reply", "bot_paused"]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description="Conversation")
+    def transcript(self, obj):
+        from django.utils.html import format_html, format_html_join
+        return format_html('<div style="white-space:pre-wrap">{}</div>', format_html_join(
+            "", "<p><strong>{}:</strong> {}</p>",
+            (("Guest" if m["role"] == "user" else "Staff" if m.get("staff") else "Bot", m["content"])
+             for m in obj.messages)))
+
+    def save_model(self, request, obj, form, change):
+        import requests
+        from django.contrib import messages
+        from django.db import transaction
+        from .whatsapp import send_text
+
+        text = form.cleaned_data.get("reply", "").strip()
+        if text:
+            try:
+                send_text(obj.wa_id, text)
+            except requests.RequestException as exc:
+                self.message_user(request, f"WhatsApp didn't accept the reply: {exc}", messages.ERROR)
+                text = ""
+        with transaction.atomic():
+            # Re-read so guest messages that arrived while the page was open aren't overwritten.
+            fresh = ChatThread.objects.select_for_update().get(pk=obj.pk)
+            obj.seen_ids, obj.messages = fresh.seen_ids, fresh.messages
+            if text:
+                obj.messages = obj.messages + [{"role": "assistant", "content": text, "staff": True}]
+                if "bot_paused" not in form.changed_data:
+                    obj.bot_paused = True  # a staff reply takes the thread over
+            super().save_model(request, obj, form, change)
+
+
+class AccessFilter(admin.SimpleListFilter):
+    title = "access"
+    parameter_name = "access"
+
+    def lookups(self, request, model_admin):
+        return [("unpaid", "Unpaid (no access)"), ("cleared", "Cleared to check in"),
+                ("checked_in", "Checked in"), ("forfeited", "Forfeited")]
+
+    def queryset(self, request, queryset):
+        from .services import ticket_outstanding
+        v = self.value()
+        if v == "checked_in":
+            return queryset.filter(checked_in_at__isnull=False)
+        if v == "forfeited":
+            return queryset.filter(forfeited_at__isnull=False)
+        if v in ("unpaid", "cleared"):
+            # ponytail: balances are computed per ticket in Python; fine for one event's few hundred guests.
+            open_ = queryset.filter(checked_in_at__isnull=True, forfeited_at__isnull=True)
+            unpaid = [t.pk for t in open_ if ticket_outstanding(t) > 0 and not t.access_exception]
+            return open_.filter(pk__in=unpaid) if v == "unpaid" else open_.exclude(pk__in=unpaid)
+        return queryset
+
+
+@admin.register(EventTicket)
+class EventTicketAdmin(ModelAdmin):
+    """Event-start check-in (Change Request v4 §6): one row per Core ticket.
+    Unpaid guests get no badge or participation; staff take payment, record an
+    exception, or mark the ticket forfeited. Nothing is cancelled automatically."""
+
+    list_display = ["ticket", "full_name", "booking_link", "room", "access", "owed"]
+    list_filter = [AccessFilter, ("booking__package", RelatedDropdownFilter)]
+    list_filter_submit = True
+    search_fields = ["full_name", "booking__reference", "booking__email", "booking__last_name"]
+    fields = ["full_name", "booking_link", "room", "owed", "access", "access_exception", "access_note",
+              "checked_in_at", "checked_in_by", "forfeited_at"]
+    readonly_fields = ["full_name", "booking_link", "room", "owed", "access", "checked_in_at", "checked_in_by",
+                       "forfeited_at"]
+    actions = ["check_in", "forfeit"]
+    actions_detail = ["detail_check_in"]
+
+    def get_queryset(self, request):
+        return (super().get_queryset(request)
+                .filter(booking__status__in=[Booking.Status.CONFIRMED, Booking.Status.COMPLETED])
+                .exclude(booking__mode="")
+                .select_related("booking", "unit", "checked_in_by")
+                .order_by("booking__reference", "position"))
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @display(description="Ticket")
+    def ticket(self, obj):
+        return f"{obj.booking.reference}-T{obj.position + 1}"
+
+    @display(description="Booking")
+    def booking_link(self, obj):
+        from django.urls import reverse
+        from django.utils.html import format_html
+        return format_html('<a href="{}">{}</a>', reverse("admin:bookings_booking_change", args=[obj.booking_id]),
+                           obj.booking.reference)
+
+    @display(description="Room")
+    def room(self, obj):
+        return obj.unit.label if obj.unit else "Own stay"
+
+    @display(description="Owed")
+    def owed(self, obj):
+        from .services import ticket_outstanding
+        owed = ticket_outstanding(obj)
+        return f"{obj.booking.currency} {owed:,.2f}" if owed > 0 else "Paid"
+
+    @display(description="Access", label={"Checked in": "success", "Cleared": "info", "Exception": "warning",
+                                          "Unpaid: no access": "danger", "Forfeited": "danger"})
+    def access(self, obj):
+        from .services import ticket_outstanding
+        if obj.forfeited_at:
+            return "Forfeited"
+        if obj.checked_in_at:
+            return "Checked in"
+        if ticket_outstanding(obj) <= 0:
+            return "Cleared"
+        return "Exception" if obj.access_exception else "Unpaid: no access"
+
+    def _run(self, request, queryset, fn, done):
+        from django.contrib import messages
+        from .services import IllegalTransition
+        ok, refused = 0, []
+        for t in queryset:
+            try:
+                fn(t)
+                ok += 1
+            except IllegalTransition as exc:
+                refused.append(str(exc))
+        if ok:
+            self.message_user(request, f"{ok} ticket{'s' if ok != 1 else ''} {done}.", messages.SUCCESS)
+        for reason in refused[:10]:
+            self.message_user(request, reason, messages.WARNING)
+
+    @admin.action(description="Check in selected guests")
+    def check_in(self, request, queryset):
+        from .services import check_in_ticket
+        self._run(request, queryset, lambda t: check_in_ticket(t, by=request.user), "checked in")
+
+    @admin.action(description="Mark forfeited (unpaid at event start)")
+    def forfeit(self, request, queryset):
+        from .services import forfeit_ticket
+        self._run(request, queryset, forfeit_ticket, "marked forfeited")
+
+    @action(description="Check in", url_path="check-in")
+    def detail_check_in(self, request, object_id):
+        from django.shortcuts import redirect
+        from .services import check_in_ticket
+        self._run(request, EventTicket.objects.filter(pk=object_id), lambda t: check_in_ticket(t, by=request.user),
+                  "checked in")
+        return redirect("admin:bookings_eventticket_change", object_id)

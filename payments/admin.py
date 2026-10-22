@@ -11,7 +11,7 @@ from unfold.contrib.filters.admin import BooleanRadioFilter, ChoicesDropdownFilt
 from unfold.decorators import display
 
 from config.unfold_theme import PAYMENT_STATUS_BADGE, REFUND_STATUS_BADGE
-from .models import FxRate, OpsConfig, Payment, Refund, ScheduledTask
+from .models import Donation, FxRate, OpsConfig, Payment, Refund, ScheduledTask
 from .receipts import compute_line_items, render_receipt_html
 
 
@@ -441,6 +441,20 @@ class OpsConfigAdmin(ModelAdmin):
             "fields": ("hold_minutes", "lead_reply_hours", "coordinator_contact_hours", "reminder_schedule_hours",
                        "checkout_fee_notice"),
         }),
+        ("WhatsApp", {
+            "classes": ["tab"],
+            "description": "Confirmations go only to guests who ticked the WhatsApp box at checkout. Meta must approve "
+                           "the template first (WhatsApp Manager → Message templates); suggested body: \"Hi {{1}}, "
+                           "payment received for Azura booking {{2}}. Paid: {{3}}. Balance: {{4}}. Receipt, tickets "
+                           "and itinerary: {{5}}\"",
+            "fields": ("whatsapp_confirmation_template", "whatsapp_template_language"),
+        }),
+        ("Donations", {
+            "classes": ["tab"],
+            "description": "Academy donations settle to their own Paystack subaccount and never mix with booking "
+                           "receipts. Keep them closed until that account is verified.",
+            "fields": ("donations_enabled", "donation_subaccount"),
+        }),
         ("Alerts", {
             "classes": ["tab"],
             "description": "Payment mismatches, FX outages and other critical events.",
@@ -455,6 +469,42 @@ class OpsConfigAdmin(ModelAdmin):
 
     def has_add_permission(self, request):
         return not OpsConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Donation)
+class DonationAdmin(ModelAdmin):
+    """Academy donation records (read-only: money arrives via Paystack only)."""
+    list_display = ["reference", "donor_name", "amount_display", "source", "status", "needs_review", "paid_at"]
+    list_filter = ["status", "source", "needs_review"]
+    search_fields = ["reference", "donor_name", "donor_email", "booking__reference"]
+    readonly_fields = [f.name for f in Donation._meta.fields]
+    actions = ["export_csv"]
+
+    @admin.display(description="Amount", ordering="amount")
+    def amount_display(self, obj):
+        return f"{obj.currency} {obj.amount:,.2f}"
+
+    @admin.action(description="Export CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="azura-donations.csv"'
+        w = csv.writer(response)
+        w.writerow(["Reference", "Date", "Donor", "Email", "USD", "GHS charged", "Source", "Booking", "Status"])
+        for d in queryset.select_related("booking"):
+            w.writerow([d.reference, d.paid_at or d.created_at, d.donor_name, d.donor_email, d.amount,
+                        d.charged_amount, d.get_source_display(), d.booking.reference if d.booking else "",
+                        d.get_status_display()])
+        return response
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
     def has_delete_permission(self, request, obj=None):
         return False
