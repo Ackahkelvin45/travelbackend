@@ -80,6 +80,8 @@ INSTALLED_APPS = [
     "reviews",
     "blog",
     'rest_framework',
+    # Refresh tokens are revoked on logout and on every rotation.
+    'rest_framework_simplejwt.token_blacklist',
     'drf_yasg',
     "corsheaders",
 ]
@@ -241,8 +243,12 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    # Short access tokens; each refresh issues a new refresh token and revokes
+    # the old one, so a copied refresh token stops working once either side uses it.
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'TOKEN_OBTAIN_SERIALIZER': 'accounts.jwt_serializers.VerifiedEmailTokenObtainPairSerializer',
 }
@@ -327,6 +333,8 @@ if _db_url.startswith("postgres"):
             "CONN_MAX_AGE": 60,  # persistent connections
         }
     }
+elif os.environ.get("DJANGO_ENV") == "production":
+    raise ImproperlyConfigured("DATABASE_URL must be a postgres:// URL in production; refusing to fall back to SQLite.")
 else:
     DATABASES = {
         "default": {
