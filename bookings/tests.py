@@ -1052,7 +1052,7 @@ class ComponentPricingTests(TestCase):
         api = APIClient()
         api.force_authenticate(owner)
         res = api.patch(url, {"marketing_consent": False, "photo_consent": True}, format="json")
-        self.assertEqual(res.json(), {"marketing_consent": False, "photo_consent": True})
+        self.assertEqual(res.json(), {"marketing_consent": False, "photo_consent": True, "whatsapp_updates": False})
         units = {t["unit"] for t in api.get(f"/api/bookings/{booking.reference}/").json()["travellers"]}
         self.assertEqual(len(units), 1)  # both guests share the one held unit
         self.assertIsNotNone(units.pop())
