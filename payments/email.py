@@ -200,7 +200,8 @@ def _build_html(booking, payment) -> str:
         + (_p(f"You accepted: {policy_links}. These versions form your booking contract.", small=True) if policy_links else "")
         + requests_note
     )
-    footer = "Keep this email as your receipt."
+    hours = getattr(_ops(), "coordinator_contact_hours", 24)  # final document §8
+    footer = f"Our team will contact you within {hours} hours of your confirmed payment. Keep this email as your receipt."
     return _shell(f"You're booked! {booking.reference}", body, hero="booked.jpg", footer=footer)
 
 
