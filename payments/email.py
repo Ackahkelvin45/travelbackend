@@ -514,7 +514,7 @@ def send_traveller_updated(booking, previous: dict, kind: str) -> None:
     writing. The new traveller gets the booking link and a claim link for
     their own account; a replaced traveller's old address is told too."""
     b = booking
-    status_url = f"{settings.FRONTEND_URL.rstrip('/')}/payment/callback?reference={b.reference}"
+    status_url = f"{settings.FRONTEND_URL.rstrip('/')}/payment/callback?reference={b.reference}&t={b.view_token}"
     claim_url = f"{settings.FRONTEND_URL.rstrip('/')}/claim?token={build_claim_token(b)}"
     what = "name corrected" if kind == "correction" else "traveller updated"
     body = f"""

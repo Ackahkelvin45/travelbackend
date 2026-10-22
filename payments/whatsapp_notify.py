@@ -42,7 +42,7 @@ def send_payment_whatsapp(booking) -> bool:
     if not (booking.whatsapp_updates and to and ops.whatsapp_confirmation_template
             and settings.WHATSAPP_PHONE_NUMBER_ID and settings.WHATSAPP_TOKEN):
         return False
-    link = f"{settings.FRONTEND_URL.rstrip('/')}/payment/success?reference={booking.reference}"
+    link = f"{settings.FRONTEND_URL.rstrip('/')}/payment/success?reference={booking.reference}&t={booking.view_token}"
     values = [booking.first_name or "there", booking.reference, f"{booking.currency} {booking.amount_paid:,.2f}",
               f"{booking.currency} {booking.balance:,.2f}", link]
     try:

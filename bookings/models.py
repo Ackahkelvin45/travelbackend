@@ -5,6 +5,7 @@ import uuid
 
 # Refund/Installment Policy: hours a guest has to settle after the overdue notice.
 OVERDUE_CURE_HOURS = 72
+VIEW_TOKEN_SALT = "booking-view"
 
 
 class Booking(models.Model):
@@ -302,6 +303,23 @@ class Booking(models.Model):
     def balance(self):
         """Outstanding amount in the booking currency (never negative)."""
         return max(self.total_amount - self.amount_paid + self.amount_refunded, 0)
+
+    @property
+    def view_token(self) -> str:
+        """Signed link token that unlocks the guest's names, contact details and
+        payments on the public status endpoint. Given only to the buyer (the
+        checkout response and their own emails); the reference alone shows
+        status and amounts. Bound to the lead's email, so transferring the
+        booking to someone else revokes the previous holder's links."""
+        from django.core import signing
+        return signing.dumps([self.reference, self.email.lower()], salt=VIEW_TOKEN_SALT)
+
+    def view_token_valid(self, token: str) -> bool:
+        from django.core import signing
+        try:
+            return bool(token) and signing.loads(token, salt=VIEW_TOKEN_SALT) == [self.reference, self.email.lower()]
+        except signing.BadSignature:
+            return False
 
     def traveller_balances(self) -> list:
         """Per-person payment status (component bookings): [(traveller,

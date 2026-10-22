@@ -14,6 +14,7 @@ from .pricing import QuoteError, compute_component_quote, compute_configurable_q
 from .serializers import (
     AssistantSerializer,
     BookingDetailSerializer,
+    BookingPublicSerializer,
     CheckoutSerializer,
     ComponentCheckoutSerializer,
     ComponentQuoteSerializer,
@@ -142,6 +143,7 @@ class CreateBookingView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "currency": booking.currency,
             "status": booking.status,
@@ -238,6 +240,7 @@ class CheckoutView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "amount_due_today": str(
                 booking.deposit_required
@@ -329,6 +332,7 @@ class ConfigurableCheckoutView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "discount_amount": str(booking.discount_amount),
             "amount_due_today": str(
@@ -537,7 +541,9 @@ class BookingStatusView(APIView):
         operation_id="booking_status",
         operation_summary="Get booking status",
         operation_description=(
-            "Returns full booking detail including payment status. "
+            "Returns status and amounts to anyone with the reference; names, contact details, "
+            "guests and the payment ledger only to the owner, staff, or with `?t=<view_token>` "
+            "(returned by checkout and included in the guest's emails). "
             "Poll this after payment to confirm the booking is `confirmed`.\n\n"
             "Also use the returned `payment_reference` and `reference` to:\n"
             "- Re-open the verify endpoint if the user navigates back\n"
@@ -579,7 +585,10 @@ class BookingStatusView(APIView):
         if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = BookingDetailSerializer(booking)
+        user = request.user
+        full = (user.is_authenticated and (user.is_staff or booking.user_id == user.id)) \
+            or booking.view_token_valid(request.query_params.get("t", ""))
+        serializer = (BookingDetailSerializer if full else BookingPublicSerializer)(booking)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -707,6 +716,7 @@ class ComponentCheckoutView(APIView):
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
+            "view_token": booking.view_token,
             "total_amount": str(booking.total_amount),
             "discount_amount": str(booking.discount_amount),
             # The first payment: the deposit (instalments, or a group paying per

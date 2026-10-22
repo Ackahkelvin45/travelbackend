@@ -316,6 +316,20 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         ]
 
 
+class BookingPublicSerializer(BookingDetailSerializer):
+    """What anyone holding just the reference sees: status and money, no names,
+    contact details, guest list or payment ledger (those need ownership or the
+    booking's view token)."""
+
+    class Meta(BookingDetailSerializer.Meta):
+        fields = [
+            "id", "reference", "mode", "pay_separately", "package_title", "package_id", "num_guests",
+            "travel_date", "total_amount", "amount_paid", "balance", "payment_state", "payment_plan",
+            "deposit_required", "payment_deadline", "currency", "status", "payment_status", "line_items",
+        ]
+        read_only_fields = fields
+
+
 class CheckoutSerializer(serializers.Serializer):
     """
     POST /api/bookings/checkout/ — the option-based (flagship tour) create

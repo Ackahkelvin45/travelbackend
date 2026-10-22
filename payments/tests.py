@@ -832,7 +832,9 @@ class FullLifecycleE2ETests(TestCase):
         with self.captureOnCommitCallbacks(execute=False):
             self._signed_webhook(r.data["reference"], Decimal("55500.00"))
 
-        r = self.client.get(f"/api/bookings/{reference}/")
+        from bookings.models import Booking
+        token = Booking.objects.get(reference=reference).view_token
+        r = self.client.get(f"/api/bookings/{reference}/?t={token}")
         self.assertEqual(r.data["payment_state"], "fully_paid")
         self.assertEqual(r.data["balance"], "0.00")
         self.assertEqual(len([p for p in r.data["payments"] if p["status"] == "success"]), 2)
@@ -1316,6 +1318,21 @@ class SecurityRegressionTests(TestCase):
     def _sign(self, body: bytes) -> str:
         return hmac_lib.new(b"sk_test_sec_secret", body, hashlib.sha512).hexdigest()
 
+    def test_reference_alone_never_shows_guest_details(self):
+        booking = make_booking()
+        url = f"/api/bookings/{booking.reference}/"
+        public = self.client.get(url).data
+        self.assertEqual(public["balance"], "1200.00")
+        for pii in ("first_name", "email", "phone", "travellers", "payments"):
+            self.assertNotIn(pii, public)
+        self.assertNotIn("email", self.client.get(url + "?t=forged").data)
+        self.assertEqual(self.client.get(url + f"?t={booking.view_token}").data["email"], booking.email)
+        # Transferring the booking revokes the old holder's links.
+        old = booking.view_token
+        booking.email = "new-lead@example.com"
+        booking.save()
+        self.assertNotIn("email", self.client.get(url + f"?t={old}").data)
+
     # ── Webhook forgery ──────────────────────────────────────────────────────
     def test_webhook_without_signature_is_rejected(self):
         booking = make_booking()
@@ -1743,7 +1760,7 @@ class CancellationRequestTests(TestCase):
         self.assertEqual(p.status_code, 400)
         self.assertIn("under review", p.data["detail"])
         # API surfaces it
-        d = APIClient().get(f"/api/bookings/{booking.reference}/")
+        d = APIClient().get(f"/api/bookings/{booking.reference}/?t={booking.view_token}")
         self.assertEqual(d.data["cancellation_request"]["status"], "pending")
 
     def test_approval_refunds_as_of_request_time_not_approval_time(self, mail):
@@ -1950,7 +1967,7 @@ class DisputeTests(TestCase):
     def test_payments_expose_disputed_flag(self, _sig, _alert):
         booking = make_refundable_booking(["1000.00"])
         self._hook("charge.dispute.create", booking.payments.get().paystack_reference)
-        r = APIClient().get(f"/api/bookings/{booking.reference}/")
+        r = APIClient().get(f"/api/bookings/{booking.reference}/?t={booking.view_token}")
         self.assertTrue(r.data["payments"][0]["disputed"])
 
 
