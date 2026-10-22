@@ -73,9 +73,9 @@ GROUP_DISCOUNTS = [("Group of 4–9", "5.00", 4), ("Group of 10+", "7.00", 10)]
 
 
 DESCRIPTION = (
-    "Six days in Ghana with Michael Blackson, Wednesday 6 to Monday 11 January 2027. "
-    "Cape Coast, the Michael Blackson Academy, a night at Crown Forest, Boti Falls and an Accra city tour, "
-    "with the welcome and farewell dinners included."
+    "Six days in Ghana, Wednesday 6 to Monday 11 January 2027: Cape Coast, the Michael Blackson Academy, "
+    "a night at Crown Forest, Boti Falls and an Accra city tour, with the welcome and farewell dinners included. "
+    "Michael's planned appearances are the welcome dinner, the Academy visit and the ENZO VIP night."
 )
 HIGHLIGHTS = ["Welcome dinner with Michael Blackson", "Cape Coast Castle and the Michael Blackson Academy",
               "Crown Forest night and activities", "Boti Falls excursion", "Accra city tour and farewell dinner"]
@@ -83,8 +83,7 @@ INCLUDED = ["Welcome dinner and farewell dinner", "Cape Coast Castle, Lemon Beac
             "Crown Forest night on 7 January, with breakfast and nature activities",
             "Boti Falls group excursion", "Accra city tour with lunch"]
 EXCLUDED = ["Accra accommodation, unless added", "ENZO VIP, Waterfall Massage and airport transfers, unless added",
-            "Drinks at Bella Afrik (self-pay)",
-            "Flights, visas, gratuities and taxes"]
+            "Drinks at Bella Afrik (self-pay)"]
 # (date label, programme, overnight)
 PROGRAMME = [
     ("Wed 6 Jan", "Arrivals, check-in and settling in. Welcome dinner with Michael Blackson. "
@@ -106,7 +105,7 @@ FAQS = [
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
     ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
-    ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted, and there are no coupon codes."),
+    ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
     ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $40 for an arrival pickup or $70 for pickup and drop-off, per vehicle of up to two guests."),
     ("Payments", "How do deposits and payments work?", "Core tickets, experiences and transfers are paid in full when you book. For accommodation you can pay at least 50% to secure the room and the rest in instalments. Everything must be paid before the first activity on 6 January, and we remind you 30, 14 and 7 days before."),
@@ -114,7 +113,7 @@ FAQS = [
     ("Payments", "What happens if a balance isn't paid?", "Every guest's share must be paid before the first activity on 6 January. Guests with an unpaid balance at the start can't receive a badge or join activities, and unpaid bookings are forfeited under the booking terms. We never cancel early just because one instalment was missed."),
     ("Payments", "What if my payment fails?", "Nothing is booked until payment is verified, and you won't be charged twice. You can retry straight away from the payment page or your booking link."),
     ("Payments", "What is the cancellation policy?", "Refunds of eligible payments depend on notice: 90% at 60 days or more, 60% at 30 to 59 days, 40% at 14 to 29 days and none under 14 days. See our refund policy for the full terms."),
-    ("Travel", "Do you need my passport?", "Only if a confirmed supplier or activity requires it. We'll ask through a secure upload, never by email or chat."),
+    ("Travel", "Do you need my passport?", "Only when a confirmed supplier or legal requirement needs it."),
 ]
 
 
