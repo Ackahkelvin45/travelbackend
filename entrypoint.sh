@@ -8,7 +8,9 @@
 set -e
 
 echo "⏳  Running database migrations..."
-python manage.py migrate --noinput
+# --skip-checks: on an empty database some admin checks query tables that
+# migrate is about to create; every other command still runs the checks.
+python manage.py migrate --noinput --skip-checks
 
 # Collect static files only in production (DJANGO_ENV=production)
 if [ "$DJANGO_ENV" = "production" ]; then
