@@ -83,7 +83,7 @@ INCLUDED = ["Welcome dinner and farewell dinner", "Cape Coast Castle, Lemon Beac
             "Crown Forest night on 7 January, with breakfast and nature activities",
             "Boti Falls group excursion", "Accra city tour with lunch"]
 EXCLUDED = ["Accra accommodation, unless added", "ENZO VIP, Waterfall Massage and airport transfers, unless added",
-            "Drinks at Bella Afrik (self-pay)", "Airbnb meals",
+            "Drinks at Bella Afrik (self-pay)",
             "Flights, visas, gratuities and taxes"]
 # (date label, programme, overnight)
 PROGRAMME = [
@@ -105,7 +105,7 @@ FAQS = [
     ("Trip", "Will Michael Blackson be there the whole time?", "Michael's planned appearances are the Wednesday welcome dinner, the Thursday Academy visit and the Friday ENZO VIP night. Timings are subject to final confirmation, and a Jubilee House visit is possible but not confirmed."),
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
-    ("Stays", "Are meals included at the Airbnb?", "No. Airbnb meals are not included. Breakfast at Crown Forest is included in Core. Four Points breakfast is [TO BE CONFIRMED]."),
+    ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
     ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted, and there are no coupon codes."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
     ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $40 for an arrival pickup or $70 for pickup and drop-off, per vehicle of up to two guests."),
