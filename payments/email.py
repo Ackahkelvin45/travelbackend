@@ -559,12 +559,13 @@ def send_addon_removed(booking, line: dict, fee, refund) -> None:
             _shell("Add-on cancelled", body), booking=b)
 
 
-def send_saved_quote(lead) -> None:
-    """The guest saved a trip-builder quote: send it back with a link to resume.
-    Prices are the server quote stored on the lead, never client figures."""
+def send_saved_quote(lead, reminder: bool = False) -> bool:
+    """The guest saved a trip-builder quote (or left checkout): send it back
+    with a link to resume. Prices are the server quote stored on the lead,
+    never client figures. Reminders carry an unsubscribe link."""
     q = lead.quote or {}
     if not q:
-        return
+        return False
     c = q.get("currency", "USD")
     money = lambda v: f"{c} {Decimal(str(v)):,.2f}"
     rows = [("Core experience × " + str(q.get("num_guests", 1)), q.get("core_total", "0"))]
@@ -593,8 +594,13 @@ def send_saved_quote(lead) -> None:
     <p style="margin:0 0 18px;font-size:13px;">Prices and room availability can change until you book. Rooms are held only during checkout.</p>
     <p style="margin:0 0 18px;"><a href="{resume}" style="background:#BD8F3A;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:10px;display:inline-block;">Continue planning</a></p>
     <p style="margin:0;font-size:12px;color:#888;">Questions? Reply to this email and our team will help.</p>"""
-    deliver("saved_quote", lead.email, "Your saved Ghana trip quote | Azura Travels",
-            _shell("Your saved quote", body), lead=lead)
+    if reminder:
+        from bookings.crm import unsubscribe_url
+        body += (f'<p style="margin:12px 0 0;font-size:11px;color:#999;">You agreed to reminders about this trip. '
+                 f'<a href="{unsubscribe_url(lead)}" style="color:#999;">Stop these emails</a>.</p>')
+    subject = "Your Ghana trip is still waiting | Azura Travels" if reminder else "Your saved Ghana trip quote | Azura Travels"
+    return deliver("quote_reminder" if reminder else "saved_quote", lead.email, subject,
+                   _shell("Your saved quote", body), lead=lead)
 
 
 def send_donation_receipt(donation) -> None:

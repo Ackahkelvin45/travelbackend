@@ -185,6 +185,7 @@ class Booking(models.Model):
     )
     coordinator_assigned_at = models.DateTimeField(null=True, blank=True)
     lead_contacted_at = models.DateTimeField(null=True, blank=True)
+    contact_alerted_at = models.DateTimeField(null=True, blank=True, help_text="Staff alerted the 24-hour contact was missed.")
     checklist = models.JSONField(default=dict, blank=True, help_text='e.g. {"travel_info": true, "flights": false}')
 
     # Idempotency markers for scheduled reminder emails, e.g. {"7d": "<iso ts>"}
@@ -566,6 +567,10 @@ class Lead(models.Model):
     )
     reply_due_at = models.DateTimeField(null=True, blank=True)
     replied_at = models.DateTimeField(null=True, blank=True)
+    reply_alerted_at = models.DateTimeField(null=True, blank=True, help_text="Staff alerted the reply was late.")
+    reminders_sent = models.JSONField(
+        default=dict, blank=True, help_text="Consent-based quote reminders sent, by schedule hour.",
+    )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -192,6 +192,11 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
         ):
             booking.status = Booking.Status.CONFIRMED
             result.promoted = True
+            # Paid: the guest's open leads are won, which stops sales reminders.
+            from bookings.models import Lead
+            Lead.objects.filter(email__iexact=booking.email).exclude(
+                stage__in=[Lead.Stage.WON, Lead.Stage.LOST],
+            ).update(stage=Lead.Stage.WON, booking=booking)
 
         booking.save(update_fields=["amount_paid", "status", "updated_at"]
                      + (["addons", "total_amount"] if addon_added else []))

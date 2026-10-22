@@ -875,3 +875,20 @@ class TravellerShareView(APIView):
             "payable": outstanding > 0 and b.status in (Booking.Status.PENDING, Booking.Status.CONFIRMED)
                        and not b.pending_cancellation,
         })
+
+
+class LeadUnsubscribeView(APIView):
+    """POST /api/leads/unsubscribe/ {token} — the signed link in reminder
+    emails. Turns off marketing for that lead; booking emails are unaffected."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
+
+    def post(self, request):
+        from .crm import unsubscribe
+
+        lead = unsubscribe(str(request.data.get("token", ""))[:500])
+        if lead is None:
+            return Response({"detail": "This link isn't valid."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "You won't get any more reminders about this trip."})

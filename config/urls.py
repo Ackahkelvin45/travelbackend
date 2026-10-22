@@ -6,7 +6,7 @@ from django.urls import path, include
 
 from bookings.reports import reports_view
 from bookings import whatsapp
-from bookings.views import AssistantView, LeadCreateView, SiteSettingsView
+from bookings.views import AssistantView, LeadCreateView, LeadUnsubscribeView, SiteSettingsView
 from payments.donations import DonationCreateView, DonationVerifyView
 from django.http import JsonResponse
 from rest_framework import permissions
@@ -51,6 +51,7 @@ urlpatterns = [
     # Bookings
     path("api/bookings/", include("bookings.urls")),
     path("api/leads/", LeadCreateView.as_view(), name="lead-create"),
+    path("api/leads/unsubscribe/", LeadUnsubscribeView.as_view(), name="lead-unsubscribe"),
     path("api/site-settings/", SiteSettingsView.as_view(), name="site-settings"),
     path("api/donations/", DonationCreateView.as_view(), name="donation-create"),
     path("api/donations/verify/<str:reference>/", DonationVerifyView.as_view(), name="donation-verify"),

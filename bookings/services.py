@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from .models import Booking, BookingTraveller, Lead, PolicyAcceptance, PolicyDocument
+from .models import Booking, BookingTraveller, PolicyAcceptance, PolicyDocument
 from .pricing import (
     QuoteError, assert_capacity, compute_component_quote, compute_configurable_quote, compute_quote,
 )
@@ -355,9 +355,6 @@ def create_component_booking(
             PolicyAcceptance(booking=booking, document=d, email=booking.email, ip_address=ip_address)
             for d in documents + optional
         ])
-        Lead.objects.filter(email__iexact=booking.email, booking__isnull=True).exclude(
-            stage=Lead.Stage.LOST,
-        ).update(stage=Lead.Stage.WON, booking=booking)
 
     logger.info(
         "Component booking created: ref=%s pkg=%s mode=%s guests=%s rooms=%s total=%s %s",
