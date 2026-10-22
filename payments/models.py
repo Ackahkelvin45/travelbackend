@@ -300,6 +300,15 @@ class OpsConfig(models.Model):
                   "Sent only with marketing consent.",
     )
 
+    # ── WhatsApp confirmations (Change Request v4 §8)
+    whatsapp_confirmation_template = models.CharField(
+        max_length=100, blank=True,
+        help_text="Name of the Meta-approved WhatsApp template sent after each verified payment to guests who "
+                  "opted in. Its body takes 5 values in order: first name, booking reference, amount paid, "
+                  "balance, booking link. Leave empty to send nothing.",
+    )
+    whatsapp_template_language = models.CharField(max_length=10, default="en", help_text="Template language code, e.g. en or en_US.")
+
     # ── Academy donations (Change Request v4 §7)
     donations_enabled = models.BooleanField(
         default=False, help_text="Open donations only after the Academy settlement account is verified.",

@@ -693,6 +693,7 @@ class ComponentCheckoutView(APIView):
                 },
                 accepted_policy_types=data["accepted_policies"],
                 marketing_consent=data["marketing_consent"], pay_separately=data["pay_separately"],
+                whatsapp_updates=data["whatsapp_updates"],
                 user=request.user if request.user.is_authenticated else None,
                 ip_address=request.META.get("REMOTE_ADDR"),
             )
@@ -754,7 +755,7 @@ class TravelInfoView(APIView):
 
 
 class BookingPreferencesView(APIView):
-    """PATCH /api/bookings/<reference>/preferences/ {marketing_consent?, photo_consent?}
+    """PATCH /api/bookings/<reference>/preferences/ {marketing_consent?, photo_consent?, whatsapp_updates?}
     — owner-only; consent can be withdrawn or given at any time."""
 
     permission_classes = [IsAuthenticated]
@@ -763,12 +764,14 @@ class BookingPreferencesView(APIView):
         booking = _OwnedBooking.get(request, reference)
         if not booking:
             return Response({"detail": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-        fields = [f for f in ("marketing_consent", "photo_consent") if isinstance(request.data.get(f), bool)]
+        fields = [f for f in ("marketing_consent", "photo_consent", "whatsapp_updates")
+                  if isinstance(request.data.get(f), bool)]
         for f in fields:
             setattr(booking, f, request.data[f])
         if fields:
             booking.save(update_fields=[*fields, "updated_at"])
-        return Response({"marketing_consent": booking.marketing_consent, "photo_consent": booking.photo_consent})
+        return Response({"marketing_consent": booking.marketing_consent, "photo_consent": booking.photo_consent,
+                         "whatsapp_updates": booking.whatsapp_updates})
 
 
 class LeadCreateView(APIView):

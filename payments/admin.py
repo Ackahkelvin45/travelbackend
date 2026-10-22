@@ -441,6 +441,14 @@ class OpsConfigAdmin(ModelAdmin):
             "fields": ("hold_minutes", "lead_reply_hours", "coordinator_contact_hours", "reminder_schedule_hours",
                        "checkout_fee_notice"),
         }),
+        ("WhatsApp", {
+            "classes": ["tab"],
+            "description": "Confirmations go only to guests who ticked the WhatsApp box at checkout. Meta must approve "
+                           "the template first (WhatsApp Manager → Message templates); suggested body: \"Hi {{1}}, "
+                           "payment received for Azura booking {{2}}. Paid: {{3}}. Balance: {{4}}. Receipt, tickets "
+                           "and itinerary: {{5}}\"",
+            "fields": ("whatsapp_confirmation_template", "whatsapp_template_language"),
+        }),
         ("Donations", {
             "classes": ["tab"],
             "description": "Academy donations settle to their own Paystack subaccount and never mix with booking "

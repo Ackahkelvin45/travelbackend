@@ -178,6 +178,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "reference",
             "mode",
             "pay_separately",
+            "whatsapp_updates",
             "coordinator_name",
             "lead_contacted_at",
             "travellers",
@@ -413,6 +414,7 @@ class ComponentCheckoutSerializer(ComponentQuoteSerializer):
     accepted_policies = serializers.ListField(child=serializers.CharField(), default=list)
     marketing_consent = serializers.BooleanField(default=False)
     pay_separately = serializers.BooleanField(default=False, help_text="Group: each member pays their own share.")
+    whatsapp_updates = serializers.BooleanField(default=False, help_text="Opt in to confirmations on WhatsApp.")
     expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
 
 

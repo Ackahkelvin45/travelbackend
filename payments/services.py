@@ -240,6 +240,11 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                     send_payment_receipt(b, p)
             except Exception:
                 logger.exception("Post-commit email failed for booking %s", booking_id)
+            try:
+                from .whatsapp_notify import send_payment_whatsapp
+                send_payment_whatsapp(Booking.objects.get(pk=booking_id))
+            except Exception:
+                logger.exception("Post-commit WhatsApp failed for booking %s", booking_id)
 
         if "terminal_booking" not in result.problems:
             transaction.on_commit(_send)
