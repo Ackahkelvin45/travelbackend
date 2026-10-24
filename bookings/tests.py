@@ -807,6 +807,10 @@ class ComponentPricingTests(TestCase):
         self.assertRejected("couple", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 2]}])
         self.assertRejected("group", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]},
                                          {"stay_type": "fourpoints_standard", "occupants": [1]}])
+        # One Airbnb per booking, and it can't leave a guest without a room.
+        self.assertRejected("group", 4, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]},
+                                         {"stay_type": "airbnb_1bed", "occupants": [2, 3]}])
+        self.assertRejected("group", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])
         # Standard rooms stay single (a couple there takes two rooms); the couple room needs two.
         self.assertRejected("couple", 2, [{"stay_type": "fourpoints_standard", "occupants": [0, 1]}])
         two_rooms = self.quote("couple", 2, [{"stay_type": "fourpoints_standard", "occupants": [0]},

@@ -755,6 +755,15 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         quote.rooms_total += charge
         quote.discount_total += discount
 
+    # One Airbnb per booking, and nobody on it left without a room: a party
+    # too big for one unit books separately (client feedback, Oct 2026).
+    airbnbs = [r for r in quote.rooms if getattr(stay_types[r["stay_type"]], "kind", "") == "airbnb"]
+    if len(airbnbs) > 1:
+        raise QuoteError("Only one Airbnb per booking. Larger groups can make separate bookings.")
+    if airbnbs and len(room_of) < n:
+        raise QuoteError(f"{airbnbs[0]['name']} doesn't fit all {n} guests. Please choose accommodation that fits "
+                         "everyone, or make separate bookings.")
+
     if check_availability:
         for code, count in requested.items():
             left = units_left(package, code, hold_token)

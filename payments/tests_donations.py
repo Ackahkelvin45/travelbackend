@@ -51,6 +51,25 @@ class DonationTests(TestCase):
                                content_type="application/json")
         self.assertEqual(res.status_code, 400)
 
+    @mock.patch("payments.donations._charge_rate", return_value=(Decimal("1"), "test"))
+    def test_any_percentage_from_2_to_15_of_the_booking(self, _rate):
+        from payments.tests import make_booking
+        self.open_donations()
+        booking = make_booking()
+        booking.total_amount = Decimal("1000.00")
+        booking.save()
+        body = {"name": "Efua Mensah", "email": "efua@example.com", "booking_id": str(booking.pk)}
+        with mock.patch("payments.paystack._post", return_value={"access_code": "a", "authorization_url": "u"}):
+            for pct, expected in ((2, "20.00"), (15, "150.00")):
+                res = self.client.post("/api/donations/", {**body, "percent": pct}, content_type="application/json")
+                self.assertEqual(res.status_code, 201, res.content)
+                self.assertEqual(Donation.objects.latest("created_at").amount, Decimal(expected))
+            for pct in (1, 16):
+                res = self.client.post("/api/donations/", {**body, "percent": pct}, content_type="application/json")
+                self.assertEqual(res.status_code, 400)
+        booking.refresh_from_db()
+        self.assertEqual(booking.total_amount, Decimal("1000.00"))  # the gift never touches the booking
+
 
 class WhatsAppConfirmationTests(TestCase):
     """Opt-in WhatsApp template after a verified payment (Change Request v4 §8)."""

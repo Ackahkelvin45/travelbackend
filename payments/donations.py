@@ -1,6 +1,6 @@
 """
 Academy donations (Change Request v4 §7): a voluntary USD gift at checkout
-(5%, 10% of the booking or a custom amount, never pre-selected) or on the
+(2% to 15% of the booking or a custom amount, never pre-selected) or on the
 public /donate page. Each donation is its own Paystack transaction settled to
 the Academy's subaccount, so it never mixes with booking receipts. Closed
 until staff switch it on with a verified subaccount.
@@ -76,12 +76,12 @@ class DonationSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=200)
     email = serializers.EmailField()
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    percent = serializers.ChoiceField(choices=[5, 10], required=False, help_text="Of the booking total (checkout).")
+    percent = serializers.IntegerField(min_value=2, max_value=15, required=False, help_text="Of the booking total (checkout).")
     booking_id = serializers.UUIDField(required=False)
 
     def validate(self, attrs):
         if ("amount" in attrs) == ("percent" in attrs):
-            raise serializers.ValidationError("Choose 5%, 10% or a custom amount.")
+            raise serializers.ValidationError("Choose a percentage from 2% to 15%, or a custom amount.")
         if "percent" in attrs and not attrs.get("booking_id"):
             raise serializers.ValidationError({"percent": "A percentage needs a booking."})
         return attrs
