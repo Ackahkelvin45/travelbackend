@@ -259,6 +259,7 @@ class InitializePaymentView(APIView):
                     f"{booking.package_id} ({booking.currency}->GHS). Customers "
                     "cannot pay until a rate is available. Set the manual "
                     "fallback rate in admin or check the rate providers.",
+                    booking=booking,
                 )
                 return Response(
                     {"detail": "Payment is temporarily unavailable. Please try again later."},
@@ -584,6 +585,7 @@ class PaystackWebhookView(APIView):
                         f"Payment {tx_ref} ({payment.currency} {payment.amount}) is disputed "
                         f"(status: {payment.dispute_status}). Refunds on it are blocked until resolved. "
                         f"Respond in the Paystack dashboard before the due date.",
+                        booking=payment.booking, link_obj=payment,
                     )
             return Response(status=status.HTTP_200_OK)
 

@@ -1029,9 +1029,9 @@ class OpsConfigTests(TestCase):
         config.save()
         django_cache.clear()
 
-        with patch("payments.alerts.resend") as mock_resend:
+        with patch("payments.email.deliver", return_value=True) as deliver:
             alert_admin("k1", "s", "b")
-            recipient = mock_resend.Emails.send.call_args[0][0]["to"]
+            recipient = [deliver.call_args.args[1]]
         self.assertEqual(recipient, ["admin-set@azura.com"])
 
     @override_settings(ADMIN_ALERT_EMAIL="env@azura.com", RESEND_API_KEY="rk_test")
@@ -1039,9 +1039,9 @@ class OpsConfigTests(TestCase):
         from payments.alerts import alert_admin
 
         django_cache.clear()
-        with patch("payments.alerts.resend") as mock_resend:
+        with patch("payments.email.deliver", return_value=True) as deliver:
             alert_admin("k2", "s", "b")
-            recipient = mock_resend.Emails.send.call_args[0][0]["to"]
+            recipient = [deliver.call_args.args[1]]
         self.assertEqual(recipient, ["env@azura.com"])
 
 

@@ -11,7 +11,6 @@ safe to run any time (every step is idempotent):
                         contacted within the coordinator SLA.
 """
 
-import html
 import logging
 from datetime import timedelta
 
@@ -104,16 +103,65 @@ def quote_reminders(now=None) -> int:
     return sent
 
 
-def _alert(to: list, subject: str, lines: list) -> bool:
-    from payments.email import _h, _p, _shell, deliver
+def _gmt(dt) -> str:
+    return f"{timezone.localtime(dt):%d %b %Y %H:%M} GMT" if dt else ""
 
-    body = (_h(html.escape(subject))
-            + "".join(_p(html.escape(l)) for l in lines if l)
-            + _p("Follow up in the Azura admin.", small=True))
-    ok = False
-    for email in dict.fromkeys(e for e in to if e):
-        ok = deliver("staff_alert", email, f"[Azura] {subject}", _shell(subject, body)) or ok
-    return ok
+
+def _quote_rows(quote: dict) -> list:
+    """What the guest chose, from a stored server quote (empty if none)."""
+    if not quote or not quote.get("total"):
+        return []
+    from collections import Counter
+    from payments.email import _money
+
+    cur = quote.get("currency", "USD")
+    exps = Counter(e["name"] for t in quote.get("travellers", []) for e in t.get("experiences", []))
+    return [
+        ("Travellers", quote.get("num_guests")),
+        ("Accommodation", ", ".join(r["name"] for r in quote.get("rooms", [])) or "Own stay"),
+        ("Experiences", ", ".join(f"{name} × {n}" for name, n in exps.items()) or "None"),
+        ("Airport transfer", ", ".join(f"{t['name']} ({t['vehicles']} vehicle{'s' if t['vehicles'] != 1 else ''})"
+                                       for t in quote.get("transfers", [])) or "None"),
+        ("Quoted total", _money(cur, quote["total"])),
+        ("Unfinished booking", quote.get("abandoned_booking", "")),
+    ]
+
+
+def lead_alert(lead, to) -> bool:
+    from payments.email import admin_url, send_staff_alert
+
+    return send_staff_alert(
+        to, f"Lead reply overdue: {lead.name}",
+        f"This {lead.get_source_display().lower()} lead was due a reply by {_gmt(lead.reply_due_at)} and nobody "
+        "has marked it replied yet.",
+        [("Name", lead.name), ("Email", lead.email), ("Phone", lead.phone),
+         ("Source", lead.get_source_display()), ("Stage", lead.get_stage_display()),
+         ("Trip", lead.package.title if lead.package else ""),
+         ("Received", _gmt(lead.created_at)), ("Reply due", _gmt(lead.reply_due_at)),
+         ("Assigned to", lead.assigned_to.full_name.strip() or lead.assigned_to.email if lead.assigned_to else "Nobody yet"),
+         ("Marketing consent", "Yes" if lead.marketing_consent else "No"),
+         *_quote_rows(lead.quote)],
+        note=f"Their message: {lead.message[:600]}" if lead.message else "",
+        link=admin_url(lead), link_label="Open the lead", lead=lead, booking=lead.booking,
+    )
+
+
+def contact_alert(b, to, sla_hours) -> bool:
+    from payments.email import _money, admin_url, send_staff_alert
+
+    paid_at = b.payments.filter(paid_at__isnull=False).order_by("paid_at").values_list("paid_at", flat=True).first()
+    return send_staff_alert(
+        to, f"Guest not contacted: {b.reference}",
+        f"{b.full_name} paid and hasn't been contacted within {sla_hours} hours. Please call or message them "
+        "to confirm names, rooms and payment dates.",
+        [("Reference", b.reference), ("Guest", b.full_name), ("Email", b.email), ("Phone", b.phone),
+         ("Trip", b.package.title if b.package else ""), ("Travel date", f"{b.travel_date:%d %b %Y}" if b.travel_date else ""),
+         ("Travellers", b.num_guests), ("First paid", _gmt(paid_at)),
+         ("Paid", _money(b.currency, b.amount_paid)), ("Total", _money(b.currency, b.total_amount)),
+         ("Balance", _money(b.currency, b.total_amount - b.amount_paid)),
+         ("Coordinator", b.coordinator.full_name if b.coordinator else "Not assigned yet")],
+        link=admin_url(b), link_label="Open the booking", booking=b,
+    )
 
 
 def staff_alerts(now=None) -> int:
@@ -121,25 +169,21 @@ def staff_alerts(now=None) -> int:
     from payments.models import OpsConfig
 
     now = now or timezone.now()
-    ops = OpsConfig.get().alert_email or getattr(settings, "ADMIN_ALERT_EMAIL", "")
+    config = OpsConfig.get()
+    ops = config.alert_email or getattr(settings, "ADMIN_ALERT_EMAIL", "")
     alerted = 0
     late_leads = Lead.objects.filter(
         reply_due_at__lt=now, replied_at__isnull=True, reply_alerted_at__isnull=True,
-    ).exclude(stage__in=[Lead.Stage.WON, Lead.Stage.LOST]).select_related("assigned_to")
+    ).exclude(stage__in=[Lead.Stage.WON, Lead.Stage.LOST]).select_related("assigned_to", "package", "booking")
     for lead in late_leads:
-        who = lead.email or lead.phone or "no contact details"
-        if _alert([lead.assigned_to.email if lead.assigned_to else "", ops], f"Lead reply overdue: {lead.name}",
-                  [f"{lead.get_source_display()} lead ({who}) was due a reply by {lead.reply_due_at:%d %b %H:%M} GMT.",
-                   lead.message[:300]]):
+        if lead_alert(lead, [lead.assigned_to.email if lead.assigned_to else "", ops]):
             lead.reply_alerted_at = now
             lead.save(update_fields=["reply_alerted_at", "updated_at"])
             alerted += 1
     late_contacts = Booking.objects.filter(pk__in=contact_overdue_ids(), contact_alerted_at__isnull=True) \
-        .select_related("coordinator")
+        .select_related("coordinator", "package")
     for b in late_contacts:
-        if _alert([b.coordinator.email if b.coordinator else "", ops], f"Guest not contacted: {b.reference}",
-                  [f"{b.full_name} paid and hasn't been contacted within {OpsConfig.get().coordinator_contact_hours} hours.",
-                   "Coordinator: " + (b.coordinator.full_name if b.coordinator else "not assigned yet")]):
+        if contact_alert(b, [b.coordinator.email if b.coordinator else "", ops], config.coordinator_contact_hours):
             b.contact_alerted_at = now
             b.save(update_fields=["contact_alerted_at", "updated_at"])
             alerted += 1

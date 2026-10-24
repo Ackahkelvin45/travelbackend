@@ -106,12 +106,12 @@ def _contact_footer() -> str:
     return "<br>".join(lines)
 
 
-def _shell(title: str, body_html: str, *, hero: str = "", footer: str = "") -> str:
+def _shell(title: str, body_html: str, *, hero: str = "", footer: str = "", contact: bool = True) -> str:
     """Wrap a body in the brand layout. `hero` is a public/email/ file name;
     `footer` is extra escaped text shown above the contact line."""
     hero_html = (f'<tr><td style="padding:0 0 18px;"><img src="{_url("/email/" + hero)}" width="536" alt="" '
                  f'style="display:block;width:100%;max-width:536px;height:auto;border-radius:10px;"></td></tr>') if hero else ""
-    foot = (footer + "<br>" if footer else "") + _contact_footer()
+    foot = (footer + "<br>" if footer else "") + (_contact_footer() if contact else "")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title></head>
 <body style="margin:0;padding:0;background:#EEF0F2;{_FONT}color:#060504;">
@@ -443,3 +443,44 @@ def send_donation_receipt(donation) -> None:
     if deliver("donation_receipt", donation.donor_email, "Thank you for supporting the Academy | Azura Travels",
                _shell("Donation receipt", body), booking=donation.booking):
         type(donation).objects.filter(pk=donation.pk).update(receipt_sent_at=timezone.now())
+
+
+# ── Staff alerts ─────────────────────────────────────────────────────────────
+
+def site_label() -> str:
+    """"STAGING" / "LOCAL" for non-live sites (live and staging share an
+    alert inbox), "" for live."""
+    from urllib.parse import urlparse
+    host = urlparse(settings.FRONTEND_URL).hostname or ""
+    if host in ("localhost", "127.0.0.1"):
+        return "LOCAL"
+    return "STAGING" if host.startswith("staging.") else ""
+
+
+def admin_url(obj) -> str:
+    meta = obj._meta
+    return f"{settings.BACKEND_URL.rstrip('/')}/admin/{meta.app_label}/{meta.model_name}/{obj.pk}/change/"
+
+
+def send_staff_alert(to, subject: str, intro: str, rows, *, kind="staff_alert", note: str = "",
+                     link: str = "", link_label: str = "Open in admin", booking=None, lead=None) -> bool:
+    """One branded, detailed alert to each address in `to` (blanks and
+    duplicates skipped). rows: (label, value) as plain text; empty values
+    are left out. Returns True if any copy was accepted."""
+    from django.utils import timezone
+
+    label = site_label()
+    sent_at = timezone.localtime().strftime("%d %b %Y %H:%M") + " GMT"
+    site = settings.FRONTEND_URL.split("//")[-1].rstrip("/")
+    details = [(k, v) for k, v in rows if v not in (None, "")] + [("Site", site), ("Sent", sent_at)]
+    body = (_h(html.escape(subject))
+            + _p(html.escape(intro))
+            + _summary([(html.escape(k), html.escape(str(v)), "") for k, v in details])
+            + (_p(html.escape(note)) if note else "")
+            + (_button(link, link_label) if link else ""))
+    prefix = f"[Azura {label}]" if label else "[Azura]"
+    ok = False
+    for email in dict.fromkeys(e for e in (to if isinstance(to, (list, tuple)) else [to]) if e):
+        ok = deliver(kind, email, f"{prefix} {subject}",
+                     _shell(subject, body, footer="Internal alert for the Azura team.", contact=False), booking=booking, lead=lead) or ok
+    return ok

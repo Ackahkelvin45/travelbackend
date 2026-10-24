@@ -27,6 +27,12 @@ from .money import FULLY_PAID_TOLERANCE, quantize, to_subunits
 logger = logging.getLogger(__name__)
 
 
+
+def _payment_rows(p) -> list:
+    return [("Payment reference", p.paystack_reference), ("Payment amount", f"{p.currency} {p.amount:,.2f}"),
+            ("Charged by Paystack", f"{p.charged_currency or 'GHS'} {p.charged_amount:,.2f}" if p.charged_amount else ""),
+            ("Exchange rate", str(p.exchange_rate) if p.exchange_rate else "")]
+
 def generate_payment_reference(booking) -> str:
     """
     Fresh, unique gateway reference per payment attempt.
@@ -115,8 +121,9 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                     payment.pk, expected_subunits, expected_currency, gw_amount, gw_currency,
                 )
                 transaction.on_commit(
-                    lambda pk=payment.pk, note=payment.review_note:
-                        alert_admin(f"gateway-mismatch-{pk}", "Payment gateway amount mismatch", note)
+                    lambda pk=payment.pk, note=payment.review_note, p=payment:
+                        alert_admin(f"gateway-mismatch-{pk}", "Payment gateway amount mismatch", note,
+                                    rows=_payment_rows(p), booking=p.booking, link_obj=p)
                 )
                 result.problems.append("gateway_mismatch")
                 return result
@@ -140,8 +147,9 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                 payment.pk, booking.status, booking.reference,
             )
             transaction.on_commit(
-                lambda pk=payment.pk, note=payment.review_note:
-                    alert_admin(f"terminal-payment-{pk}", "Money received on a closed booking", note)
+                lambda pk=payment.pk, note=payment.review_note, p=payment:
+                    alert_admin(f"terminal-payment-{pk}", "Money received on a closed booking", note,
+                                rows=_payment_rows(p), booking=p.booking, link_obj=p)
             )
             result.applied = True
             result.problems.append("terminal_booking")
@@ -179,8 +187,9 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                 "Booking %s overpaid by %s %s.", booking.reference, overpaid, booking.currency
             )
             transaction.on_commit(
-                lambda ref=booking.reference, note=payment.review_note:
-                    alert_admin(f"overpaid-{ref}", f"Booking {ref} overpaid", note)
+                lambda ref=booking.reference, note=payment.review_note, p=payment:
+                    alert_admin(f"overpaid-{ref}", f"Booking {ref} overpaid", note,
+                                rows=_payment_rows(p), booking=p.booking, link_obj=p)
             )
             result.problems.append("overpaid")
 
@@ -215,8 +224,8 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                 )
                 payment.save(update_fields=["needs_review", "review_note", "updated_at"])
                 transaction.on_commit(
-                    lambda ref=booking.reference, note=payment.review_note:
-                        alert_admin(f"room-lost-{ref}", f"Booking {ref} lost a room", note)
+                    lambda ref=booking.reference, note=payment.review_note, b=booking:
+                        alert_admin(f"room-lost-{ref}", f"Booking {ref} lost a room", note, booking=b)
                 )
                 result.problems.append("room_lost")
 

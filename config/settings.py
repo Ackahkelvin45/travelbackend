@@ -442,6 +442,14 @@ WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
 WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
 
+# The test suite never reaches real inboxes or chat numbers, whatever .env
+# holds; tests that exercise delivery set these with override_settings.
+if len(sys.argv) > 1 and sys.argv[1] == "test":
+    RESEND_API_KEY = WHATSAPP_TOKEN = DEEPSEEK_API_KEY = ""
+
+# Where staff alerts link to (Django admin). Staging sets its own.
+BACKEND_URL = os.environ.get("BACKEND_URL", "https://azuratravelsbackend.cc")
+
 # Framework emails (admin password reset) go through Resend like every other email.
 EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"
 DEFAULT_FROM_EMAIL = RESEND_FROM_EMAIL

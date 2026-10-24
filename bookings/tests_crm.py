@@ -2,7 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from bookings import tests as pricing_tests
@@ -93,9 +93,27 @@ class CrmFollowupTests(TestCase):
         p = Payment.objects.create(booking=booking, paystack_reference="T-2", amount=booking.total_amount, currency="USD")
         apply_successful_payment(p, None)
         Payment.objects.filter(pk=p.pk).update(paid_at=timezone.now() - timedelta(hours=30))
-        with mock.patch("payments.email.deliver", return_value=True) as deliver:
+        with mock.patch("payments.email.deliver", return_value=True) as deliver, \
+                override_settings(FRONTEND_URL="https://azuratravels.live", BACKEND_URL="https://azuratravelsbackend.cc"):
             self.assertEqual(staff_alerts(), 2)
             self.assertEqual(staff_alerts(), 0)
         subjects = sorted(c.args[2] for c in deliver.call_args_list)
         self.assertEqual(subjects, [f"[Azura] Guest not contacted: {booking.reference}", "[Azura] Lead reply overdue: Kofi"])
+        bodies = {c.args[2]: c.args[3] for c in deliver.call_args_list}
+        lead_body = bodies["[Azura] Lead reply overdue: Kofi"]
+        for text in ("kofi@example.com", "Reply due", "/admin/bookings/lead/", "azuratravels.live"):
+            self.assertIn(text, lead_body)
+        contact_body = bodies[f"[Azura] Guest not contacted: {booking.reference}"]
+        for text in (booking.email, "Balance", f"/admin/bookings/booking/{booking.pk}/change/"):
+            self.assertIn(text, contact_body)
+        self.assertNotIn("Questions? Reply", contact_body)  # internal: no guest footer
         self.assertEqual({c.args[1] for c in deliver.call_args_list}, {"ops@example.com"})
+
+    def test_staging_alerts_say_staging(self):
+        from payments.email import site_label
+        with override_settings(FRONTEND_URL="https://staging.azuratravels.live"):
+            self.assertEqual(site_label(), "STAGING")
+        with override_settings(FRONTEND_URL="http://localhost:3000"):
+            self.assertEqual(site_label(), "LOCAL")
+        with override_settings(FRONTEND_URL="https://azuratravels.live"):
+            self.assertEqual(site_label(), "")
