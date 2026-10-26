@@ -235,9 +235,9 @@ class Booking(models.Model):
         # Legacy-tier fallback only. Option-based bookings must be priced by
         # the pricing service — guessing here would silently mischarge.
         if self.option_id is None:
-            if not self.unit_price:
+            if self.unit_price is None:  # 0 is a real price (stay only has no Core)
                 self.unit_price = self.package.price_shared
-            if not self.total_amount:
+            if self.total_amount is None:
                 self.total_amount = self.unit_price * self.num_guests
         elif self.unit_price is None or self.total_amount is None:
             raise ValueError(

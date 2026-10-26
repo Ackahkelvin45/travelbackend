@@ -467,7 +467,8 @@ def catalog_snapshot(package, *, everything_on_sale: bool = False) -> dict:
         "stay_types": [
             {"code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity, "min_occupancy": s.min_occupancy,
              "price_per_night": str(s.price_per_night), "nights": s.nights,
-             "on_sale": s.on_sale or everything_on_sale, "note": s.note}
+             "on_sale": s.on_sale or everything_on_sale, "note": s.note,
+             "stay_only": s.stay_only, "check_in": s.check_in.isoformat() if s.check_in else None}
             for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
         ],
         "experiences": [
@@ -496,6 +497,7 @@ class Catalog:
     group_discounts: list
 
 
+_STAY_DEFAULTS = {"stay_only": False, "check_in": None}
 _EXPERIENCE_DEFAULTS = {"unit": "per_person", "adults_only": False, "requires_stay": False, "vehicle_capacity": 2}
 
 
@@ -505,7 +507,7 @@ def _catalog(snap: dict, version) -> Catalog:
     return Catalog(
         version=version,
         core_price=Decimal(snap["core_price"]) if snap.get("core_price") is not None else None,
-        stay_types={s["code"]: NS(**dec(s, "price_per_night")) for s in snap["stay_types"]},
+        stay_types={s["code"]: NS(**{**_STAY_DEFAULTS, **dec(s, "price_per_night")}) for s in snap["stay_types"]},
         # Snapshots published before v4 lack the newer keys.
         experiences={e["code"]: NS(**{**_EXPERIENCE_DEFAULTS, **dec(e, "price")}) for e in snap["experiences"]},
         group_discounts=[(Decimal(g["percent"]), g["name"], g["min_travellers"]) for g in snap.get("group_discounts", [])],
@@ -719,8 +721,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         raise QuoteError("Single is for one traveller — choose Couple or Group.")
     if mode == Booking.Mode.COUPLE and n != 2:
         raise QuoteError("A couple booking is for exactly two travellers.")
-    # Stay only (client, 24 Oct 2026): the same Airbnb units and rates without
-    # the event, so no Core ticket and no event experiences.
+    # Stay only (client, 24 and 26 Oct 2026): an Airbnb without the event, from
+    # its own stay-only units and dates, so no Core ticket and no event experiences.
     stay_only = mode == Booking.Mode.STAY
     if stay_only and not rooms:
         raise QuoteError("Choose an Airbnb for your stay.")
@@ -753,8 +755,10 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         st = stay_types.get(room.get("stay_type"))
         if st is None or not st.on_sale:
             raise QuoteError(f"'{room.get('stay_type')}' is not available.")
-        if stay_only and getattr(st, "kind", "") != "airbnb":
-            raise QuoteError("Stay-only bookings are for Airbnb units.")
+        if stay_only and not st.stay_only:
+            raise QuoteError(f"{st.name} is sold with the event. Choose a stay-only Airbnb.")
+        if not stay_only and st.stay_only:
+            raise QuoteError(f"{st.name} is a stay without the event. Choose Stay only to book it.")
         occupants = room.get("occupants") or []
         if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < n for i in occupants):
             raise QuoteError("Every room occupant must be one of the travellers and hold a Core ticket.")
@@ -775,7 +779,7 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             shares[i]["room_deposit"] += dep
         quote.rooms.append({
             "stay_type": st.code, "name": st.name, "occupants": occupants,
-            "price_per_night": str(quantize(st.price_per_night)), "nights": st.nights,
+            "price_per_night": str(quantize(st.price_per_night)), "nights": st.nights, "check_in": st.check_in,
             "charge": str(charge), "discount": str(discount), "deposit": str(deposit),
         })
         quote.rooms_total += charge
@@ -900,7 +904,7 @@ def build_component_matrix(package, request=None) -> dict:
                 "code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity,
                 "min_occupancy": s.min_occupancy, "price_per_night": str(quantize(s.price_per_night)),
                 "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
-                "on_sale": s.on_sale, "note": s.note,
+                "on_sale": s.on_sale, "note": s.note, "stay_only": s.stay_only, "check_in": s.check_in,
                 "units_available": units_left(package, s.code) if s.on_sale else 0,
                 **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": [],
                                      "units_total": 0}),

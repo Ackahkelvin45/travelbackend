@@ -150,7 +150,10 @@ def _build_html(booking, payment) -> str:
     cur = booking.currency
     first_name = html.escape(booking.first_name)
     guests = booking.num_guests
-    dates = _trip_dates(package.available_from, package.available_to) if booking.mode and package.available_from \
+    from bookings.services import stay_dates
+    stay = stay_dates((booking.quote_snapshot or {}).get("rooms"))
+    dates = _trip_dates(*stay) if stay else \
+        _trip_dates(package.available_from, package.available_to) if booking.mode and package.available_from \
         else _trip_dates(booking.travel_date)
 
     from .email import build_claim_token  # self-import safe at call time
@@ -427,7 +430,10 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
                      "−" + _money(c, q["discount_total"]), "saving"))
 
     package = TravelPackage.objects.filter(pk=q.get("package_id") or None).first()
-    trip = (f"the {html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
+    from bookings.services import stay_dates
+    stay = stay_dates(q.get("rooms"))
+    trip = (f"an Accra stay, {_trip_dates(*stay)}" if stay
+            else f"the {html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
             if package else "your Ghana trip")
     body = (_h("Pick up where you left off")
             + _p(f"Here's the quote you saved for {trip}.")

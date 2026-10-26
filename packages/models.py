@@ -584,6 +584,10 @@ class StayType(models.Model):
     nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
     on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
     note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    # Stay only (client, 26 Oct 2026): Airbnbs without the event are sold on
+    # their own dates from their own units, so they never take an event room.
+    stay_only = models.BooleanField(default=False, help_text="Sold only as a stay without the event, never with Core.")
+    check_in = models.DateField(null=True, blank=True, help_text="First night. Blank = the tour start date.")
     # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
     bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
     amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")

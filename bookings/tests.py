@@ -707,10 +707,11 @@ class ComponentPricingTests(TestCase):
             final_payment_deadline=date(2027, 1, 5), allow_installments=True,
         )
 
-        def stay(code, cap, price, nights, units, min_occ=1, on_sale=True):
+        def stay(code, cap, price, nights, units, min_occ=1, on_sale=True, **kw):
             st = StayType.objects.create(
                 package=cls.pkg, code=code, name=code, kind="airbnb" if "airbnb" in code else "hotel",
                 capacity=cap, min_occupancy=min_occ, price_per_night=Decimal(price), nights=nights, on_sale=on_sale,
+                **kw,
             )
             for i in range(units):
                 RoomUnit.objects.create(stay_type=st, label=f"{code}-{i}")
@@ -721,6 +722,7 @@ class ComponentPricingTests(TestCase):
         stay("fourpoints_standard", 1, "330", 4, 2)
         stay("fourpoints_couple", 2, "380", 4, 1, min_occ=2)
         stay("fp_closed", 2, "999", 4, 1, on_sale=False)
+        stay("airbnb_1bed_stay", 2, "220", 11, 1, stay_only=True, check_in=date(2027, 1, 20))
 
         def addon(code, price, **kw):
             return PackageAddon.objects.create(package=cls.pkg, code=code, name=code, price=Decimal(price), **kw)
@@ -837,17 +839,27 @@ class ComponentPricingTests(TestCase):
         self.assertRejected("single", 2)
         self.assertRejected("couple", 3)
 
-    def test_stay_only_is_the_airbnb_without_core(self):
-        q = self.quote("stay", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])
-        self.assertEqual((q.core_total, q.total), (Decimal("0.00"), Decimal("1100.00")))  # 5 × 220, no Core
-        q = self.quote("stay", [{"experiences": ["airport_pickup"]}] * 2,
-                       [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])
-        self.assertEqual(q.total, Decimal("1140.00"))  # + one shared vehicle at this fixture's $40
+    def test_stay_only_is_its_own_airbnb_without_core(self):
+        room = [{"stay_type": "airbnb_1bed_stay", "occupants": [0, 1]}]
+        q = self.quote("stay", 2, room)
+        self.assertEqual((q.core_total, q.total), (Decimal("0.00"), Decimal("2420.00")))  # 11 × 220, no Core
+        self.assertEqual(q.rooms[0]["check_in"], "2027-01-20")
+        q = self.quote("stay", [{"experiences": ["airport_pickup"]}] * 2, room)
+        self.assertEqual(q.total, Decimal("2460.00"))  # + one shared vehicle at this fixture's $40
         self.assertRejected("stay", 1)  # needs an Airbnb
-        self.assertRejected("stay", 1, [{"stay_type": "fourpoints_standard", "occupants": [0]}])  # Airbnb only
+        self.assertRejected("stay", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])  # event-week unit
+        self.assertRejected("couple", 2, room)  # stay-only units never come with Core
         self.assertRejected("stay", [{"experiences": ["enzo_vip"], "adult": True}],
-                            [{"stay_type": "airbnb_1bed", "occupants": [0]}])  # event experience
-        self.assertRejected("stay", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1, 2]}])  # doesn't fit
+                            [{"stay_type": "airbnb_1bed_stay", "occupants": [0]}])  # event experience
+        self.assertRejected("stay", 3, [{"stay_type": "airbnb_1bed_stay", "occupants": [0, 1, 2]}])  # doesn't fit
+
+    def test_stay_only_booking_is_dated_from_its_room(self):
+        from .pricing import units_left
+        from .services import create_hold
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed_stay"])
+        booking = self.checkout(token, mode="stay", rooms=[{"stay_type": "airbnb_1bed_stay", "occupants": [0, 1]}])
+        self.assertEqual(booking.travel_date, date(2027, 1, 20))
+        self.assertEqual(units_left(self.pkg, "airbnb_1bed"), 2)  # event-week units untouched
 
     def test_quote_rejects_sold_out_rooms(self):
         self.assertRejected("group", 2, [{"stay_type": "airbnb_2bed", "occupants": [0]},

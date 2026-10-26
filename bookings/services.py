@@ -182,6 +182,16 @@ class IllegalTransition(Exception):
 
 # ── Component bookings: room holds, checkout, traveller moves ────────────────
 
+def stay_dates(rooms):
+    """(check-in, check-out) of a stay-only room with its own dates, else None."""
+    from datetime import date, timedelta
+    room = next((r for r in rooms or [] if r.get("check_in")), None)
+    if room is None:
+        return None
+    start = date.fromisoformat(room["check_in"])
+    return start, start + timedelta(days=room["nights"])
+
+
 def create_hold(package, stay_codes: list, *, replace_token: str = ""):
     """Hold one unit per entry in ``stay_codes`` for OpsConfig.hold_minutes.
     Returns (token, held_until, units). Rows are claimed under a row lock so
@@ -321,7 +331,7 @@ def create_component_booking(
             package=package, option=None, mode=mode, marketing_consent=marketing_consent,
             photo_consent=any(d.type == PolicyDocument.Type.MEDIA for d in optional),
             payment_plan=quote.payment_plan, num_guests=quote.num_guests,
-            travel_date=package.available_from,
+            travel_date=(stay_dates(quote.rooms) or (package.available_from,))[0],
             unit_price=quote.core_price, total_amount=quote.total, currency=package.currency,
             option_snapshot={"component": True, "core_price_per_person": str(quote.core_price)},
             addons=quote.booking_addons(),
