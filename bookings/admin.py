@@ -1079,7 +1079,7 @@ class EventTicketAdmin(ModelAdmin):
     def get_queryset(self, request):
         return (super().get_queryset(request)
                 .filter(booking__status__in=[Booking.Status.CONFIRMED, Booking.Status.COMPLETED])
-                .exclude(booking__mode="")
+                .exclude(booking__mode__in=["", Booking.Mode.STAY])  # stay-only guests have no event ticket
                 .select_related("booking", "unit", "checked_in_by")
                 .order_by("booking__reference", "position"))
 

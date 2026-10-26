@@ -23,6 +23,7 @@ class Booking(models.Model):
         SINGLE = "single", "Single"
         COUPLE = "couple", "Couple"
         GROUP = "group", "Group"
+        STAY = "stay", "Stay only"  # an Airbnb without the event: no Core ticket
 
     class CancellationReason(models.TextChoices):
         CUSTOMER = "customer", "Customer requested"

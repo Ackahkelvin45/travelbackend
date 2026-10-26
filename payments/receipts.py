@@ -79,7 +79,9 @@ def compute_line_items(booking) -> dict:
         pkg_detail = booking.package.title
     pkg_detail += f" · {guests} guest{'s' if guests != 1 else ''} × {currency} {Decimal(booking.unit_price):,.2f}"
 
-    lines = [{"label": "Package / Tour", "detail": pkg_detail, "amount": base_total, "category": "package"}]
+    # Stay-only bookings have no Core ticket: the stay is the whole booking.
+    lines = [] if getattr(booking, "mode", "") == "stay" else \
+        [{"label": "Package / Tour", "detail": pkg_detail, "amount": base_total, "category": "package"}]
 
     addons_total = Decimal("0.00")
     for addon in booking.addons or []:

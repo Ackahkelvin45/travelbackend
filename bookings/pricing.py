@@ -714,6 +714,11 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         raise QuoteError("Single is for one traveller — choose Couple or Group.")
     if mode == Booking.Mode.COUPLE and n != 2:
         raise QuoteError("A couple booking is for exactly two travellers.")
+    # Stay only (client, 24 Oct 2026): the same Airbnb units and rates without
+    # the event, so no Core ticket and no event experiences.
+    stay_only = mode == Booking.Mode.STAY
+    if stay_only and not rooms:
+        raise QuoteError("Choose an Airbnb for your stay.")
     if payment_plan not in (Booking.PaymentPlan.FULL, Booking.PaymentPlan.INSTALLMENT):
         raise QuoteError("Unknown payment plan.")
     installment = payment_plan == Booking.PaymentPlan.INSTALLMENT
@@ -722,7 +727,7 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
     if installment and not rooms:
         raise QuoteError("Only accommodation can be paid in instalments; Core tickets and experiences are paid in full.")
 
-    core = quantize(cat.core_price)
+    core = Decimal("0.00") if stay_only else quantize(cat.core_price)
     quote = ComponentQuote(package=package, mode=mode, payment_plan=payment_plan, core_price=core,
                            price_list_version=cat.version)
     label = lambda i: (travellers[i].get("name") or "").strip() or f"Guest {i + 1}"
@@ -743,6 +748,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         st = stay_types.get(room.get("stay_type"))
         if st is None or not st.on_sale:
             raise QuoteError(f"'{room.get('stay_type')}' is not available.")
+        if stay_only and getattr(st, "kind", "") != "airbnb":
+            raise QuoteError("Stay-only bookings are for Airbnb units.")
         occupants = room.get("occupants") or []
         if any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < n for i in occupants):
             raise QuoteError("Every room occupant must be one of the travellers and hold a Core ticket.")
@@ -797,6 +804,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             raise QuoteError(f"Unknown experience(s): {', '.join(unknown)}.")
         chosen = [addons[c] for c in codes]
         for a in chosen:
+            if stay_only and a.unit != "per_vehicle":
+                raise QuoteError(f"{a.name} is part of the event and needs a Core ticket.")
             if a.adults_only and t.get("adult") is not True:
                 raise QuoteError(f"{a.name} is for guests aged 18 or over — please confirm {label(i)} is 18+.")
             if a.requires_stay and i not in room_of:

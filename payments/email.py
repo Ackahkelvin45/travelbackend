@@ -414,7 +414,8 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
     c = q.get("currency", "USD")
     # Canvas: one line naming what was chosen, with the total ("2 Core tickets + 1-bed Airbnb").
     n = int(q.get("num_guests", 1))
-    parts = [f"{n} Core ticket{'s' if n != 1 else ''}"]
+    parts = [f"Stay for {n} guest{'s' if n != 1 else ''}" if q.get("mode") == "stay"
+             else f"{n} Core ticket{'s' if n != 1 else ''}"]
     parts += [r.get("name", "Accra stay") for r in q.get("rooms") or []]
     if Decimal(q.get("experiences_total", "0")):
         parts.append("experiences")

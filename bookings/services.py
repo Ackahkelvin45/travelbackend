@@ -691,6 +691,8 @@ def available_component_addons(booking) -> list:
     travellers = list(booking.travellers.all())
     out = []
     for a in catalog.values():
+        if booking.mode == Booking.Mode.STAY and a.code not in transfer_codes:
+            continue  # event experiences need a Core ticket
         eligible = [
             str(t.id) for t in travellers
             if a.code not in t.experiences and (not a.requires_stay or t.unit_id)

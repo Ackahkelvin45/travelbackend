@@ -822,6 +822,18 @@ class ComponentPricingTests(TestCase):
         self.assertRejected("single", 2)
         self.assertRejected("couple", 3)
 
+    def test_stay_only_is_the_airbnb_without_core(self):
+        q = self.quote("stay", 2, [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])
+        self.assertEqual((q.core_total, q.total), (Decimal("0.00"), Decimal("1100.00")))  # 5 × 220, no Core
+        q = self.quote("stay", [{"experiences": ["airport_pickup"]}] * 2,
+                       [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}])
+        self.assertEqual(q.total, Decimal("1140.00"))  # + one shared vehicle at this fixture's $40
+        self.assertRejected("stay", 1)  # needs an Airbnb
+        self.assertRejected("stay", 1, [{"stay_type": "fourpoints_standard", "occupants": [0]}])  # Airbnb only
+        self.assertRejected("stay", [{"experiences": ["enzo_vip"], "adult": True}],
+                            [{"stay_type": "airbnb_1bed", "occupants": [0]}])  # event experience
+        self.assertRejected("stay", 3, [{"stay_type": "airbnb_1bed", "occupants": [0, 1, 2]}])  # doesn't fit
+
     def test_quote_rejects_sold_out_rooms(self):
         self.assertRejected("group", 2, [{"stay_type": "airbnb_2bed", "occupants": [0]},
                                          {"stay_type": "airbnb_2bed", "occupants": [1]}])

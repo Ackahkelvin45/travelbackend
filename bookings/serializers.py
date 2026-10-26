@@ -410,7 +410,7 @@ class _RoomInput(serializers.Serializer):
 class ComponentQuoteSerializer(serializers.Serializer):
     """Travellers by list index; rooms list their occupants by that index."""
     package_id = serializers.UUIDField()
-    mode = serializers.ChoiceField(choices=["single", "couple", "group"])
+    mode = serializers.ChoiceField(choices=Booking.Mode.values)
     travellers = _TravellerInput(many=True)
     rooms = _RoomInput(many=True, default=list)
     payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
