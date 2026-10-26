@@ -669,15 +669,17 @@ class PackageDiscountRule(models.Model):
     applies only the single highest qualifying rule (max percent wins). This
     reproduces the doc's 5/7/10/12/15% ladder with no negative conditions.
 
-    Component model: GROUP_ACCOMMODATION rules take `percent` off the room
-    charges only (never Core) once the booking has `min_travellers`; the
-    highest qualifying rule wins (Change Request v4 §5)."""
+    Component model: GROUP_ACCOMMODATION rules take `percent` off the whole
+    price (Core, rooms, experiences, transfers) once the group has
+    `min_travellers`, linked bookings counted together; the highest
+    qualifying rule wins (client decision 26 Oct 2026, replacing v4 §5's
+    accommodation-only scope). The code name is kept for existing rows."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
     class Scope(models.TextChoices):
         CART = "cart", "Whole cart, highest rule wins (core + add-ons model)"
-        GROUP_ACCOMMODATION = "group_accommodation", "Group size, accommodation only (component model)"
+        GROUP_ACCOMMODATION = "group_accommodation", "Group size, whole price (component model)"
 
     name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
     scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.CART)

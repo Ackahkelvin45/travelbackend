@@ -119,3 +119,21 @@ class LinkedBookingTests(TestCase):
         self.assertEqual(second.linked_to.reference, first)
         detail = self.client.get(f"/api/bookings/{first}/", {"t": Booking.objects.get(reference=first).view_token}).json()
         self.assertEqual([b["reference"] for b in detail["linked_bookings"]], [second.reference])
+
+    def test_linked_booking_gets_the_whole_groups_discount(self):
+        """Couple + linked couple = a group of 4, so the second booking gets 5% off its total."""
+        from packages.models import PackageDiscountRule
+        PackageDiscountRule.objects.filter(package=self.pkg).update(is_active=True)
+        self.pkg.price_lists.all().delete()
+        first = self.book("ama@example.com")
+        self.assertEqual(first.json()["total_amount"], "2898.00")  # 2 guests: no discount
+        ref = first.json()["reference"]
+
+        body = {"package_id": str(self.pkg.id), "mode": "couple", "travellers": [{}, {}],
+                "rooms": [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}], "linked_to": ref}
+        preview = self.client.post("/api/bookings/quote/", body, content_type="application/json").json()
+        self.assertEqual((preview["discount_total"], preview["total"]), ("144.90", "2753.10"))  # 5% of 2,898
+
+        second = self.book("ama@example.com", ref)
+        self.assertEqual(second.status_code, 201, second.content)
+        self.assertEqual(second.json()["total_amount"], "2753.10")

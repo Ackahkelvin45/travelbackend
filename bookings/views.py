@@ -614,11 +614,15 @@ class ComponentQuoteView(APIView):
         package = _component_package(data["package_id"])
         if package is None:
             return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+        from .services import linked_group
+        # A linked booking previews the whole group's discount tier; checkout
+        # re-checks the link against the lead email.
+        _, already = linked_group(package, data.get("linked_to", ""))
         try:
             quote = compute_component_quote(
                 package, mode=data["mode"], travellers=data["travellers"],
                 rooms=data["rooms"], payment_plan=data["payment_plan"],
-                hold_token=data.get("hold_token", ""),
+                hold_token=data.get("hold_token", ""), group_size=already + len(data["travellers"]),
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -670,7 +674,7 @@ class ComponentCheckoutView(APIView):
     throttle_scope = "holds"
 
     def post(self, request):
-        from .services import create_component_booking
+        from .services import create_component_booking, linked_group
 
         serializer = ComponentCheckoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -678,10 +682,21 @@ class ComponentCheckoutView(APIView):
         package = _component_package(data["package_id"])
         if package is None:
             return Response({"detail": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+        group, already = None, 0
+        if data.get("linked_to"):
+            # A big group books one Airbnb per booking, linked under one lead,
+            # and the group discount counts everyone in the group.
+            first, already = linked_group(package, data["linked_to"])
+            if first is None or first.email.lower() != data["email"].lower():
+                return Response({"detail": f"We couldn't link this to booking {data['linked_to']}. "
+                                           "Use the same lead email as that booking."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            group = first.linked_to or first
+        group_size = already + len(data["travellers"])
         try:
             quote = compute_component_quote(
                 package, mode=data["mode"], travellers=data["travellers"], rooms=data["rooms"],
-                payment_plan=data["payment_plan"], check_availability=False,
+                payment_plan=data["payment_plan"], check_availability=False, group_size=group_size,
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -691,18 +706,6 @@ class ComponentCheckoutView(APIView):
                 {"detail": "The price has changed since this page was loaded.", "quote": quote.as_dict()},
                 status=status.HTTP_409_CONFLICT,
             )
-        group = None
-        if data.get("linked_to"):
-            # A big group books one Airbnb per booking, linked under one lead.
-            first = Booking.objects.filter(
-                reference=data["linked_to"].strip().upper(), package=package,
-                status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
-            ).first()
-            if first is None or first.email.lower() != data["email"].lower():
-                return Response({"detail": f"We couldn't link this to booking {data['linked_to']}. "
-                                           "Use the same lead email as that booking."},
-                                status=status.HTTP_400_BAD_REQUEST)
-            group = first.linked_to or first
         try:
             booking = create_component_booking(
                 package=package, mode=data["mode"], travellers=data["travellers"], rooms=data["rooms"],
@@ -716,7 +719,7 @@ class ComponentCheckoutView(APIView):
                 marketing_consent=data["marketing_consent"], pay_separately=data["pay_separately"],
                 whatsapp_updates=data["whatsapp_updates"],
                 user=request.user if request.user.is_authenticated else None,
-                ip_address=request.META.get("REMOTE_ADDR"),
+                ip_address=request.META.get("REMOTE_ADDR"), group_size=group_size,
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

@@ -11,7 +11,7 @@ without its acceptances never exists.
 import logging
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import models, transaction
 
 from .models import Booking, BookingTraveller, PolicyAcceptance, PolicyDocument
 from .pricing import (
@@ -256,6 +256,7 @@ def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
     pay_separately: bool = False, whatsapp_updates: bool = False, user=None, ip_address: str | None = None,
+    group_size: int = 0,
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
     BookingTraveller (= one Core ticket) per guest. The units stay held only
@@ -271,6 +272,7 @@ def create_component_booking(
     quote = compute_component_quote(
         package, mode=mode, travellers=travellers, rooms=rooms,
         payment_plan=payment_plan, check_availability=False,  # the hold is the availability
+        group_size=group_size,
     )
     assert_capacity(package, quote.num_guests)
     if mode == Booking.Mode.COUPLE and not all((t.get("name") or "").strip() for t in travellers):
@@ -900,3 +902,20 @@ def invite_traveller(traveller, email: str) -> bool:
     traveller.email, traveller.invited_at = email, timezone.now()
     traveller.save(update_fields=fields)
     return send_guest_invite(traveller)
+
+
+def linked_group(package, reference: str):
+    """The group a new booking would join: (first booking, guests already in
+    the group). Counts live bookings only: cancelled and expired ones don't."""
+    first = Booking.objects.filter(
+        reference=(reference or "").strip().upper(), package=package,
+        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+    ).select_related("linked_to").first()
+    if first is None:
+        return None, 0
+    root = first.linked_to or first
+    members = Booking.objects.filter(
+        models.Q(pk=root.pk) | models.Q(linked_to=root),
+        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+    )
+    return first, sum(b.num_guests for b in members if not b.is_expired)

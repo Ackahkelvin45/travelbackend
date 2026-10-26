@@ -688,6 +688,12 @@ class OptionalPolicyTests(TestCase):
 
 # ── Component pricing (Change Request v2) ─────────────────────────────────────
 
+def compute_component_quote_for(case, mode, n, rooms, **kwargs):
+    from .pricing import compute_component_quote
+    return compute_component_quote(case.pkg, mode=mode, travellers=[{} for _ in range(n)], rooms=list(rooms),
+                                   payment_plan="full", **kwargs)
+
+
 class ComponentPricingTests(TestCase):
     """The client's acceptance totals and room/ticket rules (Change Request v4 §4–§6, §9)."""
 
@@ -755,7 +761,8 @@ class ComponentPricingTests(TestCase):
         self.assertEqual([t["share"] for t in q.travellers], ["1449.00", "1449.00"])
         self.assertEqual(q.as_dict()["average_per_person"], "1449.00")
 
-    def test_group_discount_is_off_by_default_and_never_touches_core(self):
+    def test_group_discount_is_off_by_default_and_comes_off_the_whole_price(self):
+        """Client, 26 Oct 2026: one group discount, worked on the total price."""
         from packages.models import PackageDiscountRule
         rooms = [{"stay_type": "airbnb_2bed", "occupants": [0, 1, 2, 3]}]
         self.assertEqual(self.quote("group", 4, rooms).total, Decimal("5296.00"))  # 4 × 899 + 1,700
@@ -763,10 +770,18 @@ class ComponentPricingTests(TestCase):
         PackageDiscountRule.objects.filter(package=self.pkg).update(is_active=True)
         self.pkg.price_lists.all().delete()  # unpublished: quotes read the draft tables
         q = self.quote("group", 4, rooms)
-        self.assertEqual(q.discount_total, Decimal("85.00"))  # 5% of the 1,700 room only
-        self.assertEqual(q.total, Decimal("5211.00"))
-        self.assertEqual(self.quote("group", 4).total, Decimal("3596.00"))  # Core only: no discount
-        self.assertEqual(self.quote("group", 4, rooms).discount_note(), "Group of 4–9 (5% off accommodation)")
+        self.assertEqual(q.discount_total, Decimal("264.80"))  # 5% of 5,296
+        self.assertEqual(q.total, Decimal("5031.20"))
+        self.assertEqual(sum(Decimal(t["share"]) for t in q.travellers), q.total)
+        self.assertEqual(self.quote("group", 4).total, Decimal("3416.20"))  # Core only: 5% off 3,596
+        self.assertEqual(self.quote("group", 3, [{"stay_type": "airbnb_2bed", "occupants": [0, 1, 2]}]).discount_total,
+                         Decimal("0.00"))  # under 4: none
+        self.assertEqual(q.discount_note(), "Group of 4–9 (5% off the total)")
+
+        # A linked booking counts the whole group: 4 guests here, 10 in the group → 7%.
+        q10 = compute_component_quote_for(self, "group", 4, rooms, group_size=10)
+        self.assertEqual(q10.discount_total, Decimal("370.72"))  # 7% of 5,296
+        self.assertEqual(q10.total, Decimal("4925.28"))
 
     def test_shares_add_up_to_the_total(self):
         q = self.quote("group", 3, [{"stay_type": "airbnb_2bed", "occupants": [0, 1, 2]}])  # 1,700 / 3

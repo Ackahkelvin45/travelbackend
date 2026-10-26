@@ -576,8 +576,10 @@ def split_evenly(amount: Decimal, parts: int) -> list:
 @dataclass
 class ComponentQuote:
     """Core per traveller + each room unit once + experiences per guest +
-    transfers per vehicle. The only discount is the group accommodation rule,
-    applied to each room charge (never Core) and rounded per unit.
+    transfers per vehicle. The only discount is the group rule (client,
+    26 Oct 2026: one group discount on the total price): its percent comes off
+    every part of each guest's share, Core included, rounded per room unit and
+    per guest. Linked bookings count the whole group's size.
 
     Each traveller carries a `share` (their part of the total) and `due_now`;
     shares sum to the total exactly, so a group can pay per person."""
@@ -608,7 +610,7 @@ class ComponentQuote:
     def discount_note(self) -> str:
         if not self.discount_total:
             return ""
-        return f"{self.discount_name} ({self.discount_percent.normalize():f}% off accommodation)"[:200]
+        return f"{self.discount_name} ({self.discount_percent.normalize():f}% off the total)"[:200]
 
     def booking_addons(self) -> list:
         """Room, experience and transfer lines aggregated per code, in the
@@ -681,7 +683,7 @@ class ComponentQuote:
 
 
 def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, check_availability=True,
-                            hold_token="", catalog: Catalog | None = None) -> ComponentQuote:
+                            hold_token="", catalog: Catalog | None = None, group_size: int = 0) -> ComponentQuote:
     """Price a component selection server-side.
 
     travellers: [{"name": str, "experiences": [addon codes], "adult": bool}] —
@@ -692,6 +694,9 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
 
     Installment plan (Change Request v4 §6): Core, experiences and transfers
     are due in full now; each room needs accommodation_deposit_percent now.
+
+    group_size: guests in the whole group when this booking is linked to
+    others (one Airbnb each); the discount tier uses the larger of it and n.
     """
     import math
 
@@ -734,8 +739,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
     shares = [{"core": core, "extras": Decimal("0"), "room": Decimal("0"), "room_deposit": Decimal("0"),
                "transfer": Decimal("0")} for _ in range(n)]
 
-    # Group accommodation discount: the highest rule the group size qualifies for.
-    qualifying = [g for g in cat.group_discounts if g[2] and n >= g[2]]
+    # Group discount: the highest rule the group size qualifies for.
+    qualifying = [g for g in cat.group_discounts if g[2] and max(n, group_size) >= g[2]]
     if qualifying:
         quote.discount_percent, quote.discount_name, _ = max(qualifying, key=lambda g: g[0])
     deposit_pct = package.accommodation_deposit_percent if installment else Decimal("100")
@@ -843,8 +848,13 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
                                 "price": str(quantize(a.price)), "charge": str(charge), "refundable": a.refundable})
         quote.transfers_total += charge
 
+    pct = quote.discount_percent / Decimal("100")
     for t, s in zip(quote.travellers, shares):
         paid_upfront = s["core"] + s["extras"] + s["transfer"]
+        # The room part is already discounted per unit; the rest per guest.
+        off = quantize(paid_upfront * pct)
+        paid_upfront -= off
+        quote.discount_total += off
         t.update(room_share=str(s["room"]), transfer_share=str(s["transfer"]),
                  share=str(quantize(paid_upfront + s["room"])),
                  room_deposit=str(s["room_deposit"]), due_now=str(quantize(paid_upfront + s["room_deposit"])))

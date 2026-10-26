@@ -426,6 +426,10 @@ class ComponentQuoteSerializer(serializers.Serializer):
     rooms = _RoomInput(many=True, default=list)
     payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
     hold_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    linked_to = serializers.CharField(
+        max_length=20, required=False, allow_blank=True,
+        help_text="Reference of the group's first booking (an extra Airbnb for a big group; same lead email).",
+    )
 
     def validate_travellers(self, value):
         if not 1 <= len(value) <= 20:
@@ -451,10 +455,6 @@ class ComponentCheckoutSerializer(ComponentQuoteSerializer):
     pay_separately = serializers.BooleanField(default=False, help_text="Group: each member pays their own share.")
     whatsapp_updates = serializers.BooleanField(default=False, help_text="Opt in to confirmations on WhatsApp.")
     expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    linked_to = serializers.CharField(
-        max_length=20, required=False, allow_blank=True,
-        help_text="Reference of the group's first booking (an extra Airbnb for a big group; same lead email).",
-    )
 
 
 class TravelInfoSerializer(serializers.ModelSerializer):

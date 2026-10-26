@@ -6,7 +6,7 @@ Airbnb as a fixed five-night block, Four Points as four paid nights,
 experiences per guest, airport transfers per vehicle.
 
 Anything the client has not confirmed is created switched OFF: the Four
-Points couple room and the 5% / 7% group accommodation discounts. The old
+Points couple room and the 5% / 7% group discounts (whole price, off by default). The old
 farewell dinner add-on (now included in Core), hotel add-ons, Kozo and the
 whole-cart discount ladder are deactivated (kept for existing bookings).
 
@@ -107,7 +107,7 @@ FAQS = [
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
     ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
-    ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted."),
+    ("Prices", "Are there any discounts?", "Not at the moment. Any group discount we introduce will be shown in the price before you pay."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
     ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $30 per guest for an arrival pickup or $50 per guest for pickup and drop-off."),
     ("Payments", "How do deposits and payments work?", "Core tickets, experiences and transfers are paid in full when you book. For accommodation you can pay at least 50% to secure the room and the rest in instalments. Everything must be paid before the first activity on 6 January, and we remind you 30, 14 and 7 days before."),
