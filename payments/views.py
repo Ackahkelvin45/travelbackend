@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import secrets
+from decimal import Decimal
 
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -224,6 +226,20 @@ class InitializePaymentView(APIView):
         else:
             amount = balance
 
+        # Optional Academy donation on the first payment (client, 24 Oct 2026):
+        # a % of the trip total added to this charge and split to the Academy.
+        donation_percent = serializer.validated_data.get("donation_percent")
+        donation_amount = None
+        if donation_percent:
+            from .donations import CLOSED, donations_open
+            if not donations_open():
+                return Response({"detail": CLOSED}, status=status.HTTP_400_BAD_REQUEST)
+            if intent not in ("balance", "deposit", "custom") or booking.amount_paid > 0 \
+                    or booking.donations.filter(status="success").exists():
+                return Response({"detail": "A donation can be added to a booking's first payment only."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            donation_amount = quantize(booking.total_amount * donation_percent / Decimal("100"))
+
         if intent == "addon":
             purpose = Payment.Purpose.ADDON
         elif booking.payment_plan == Booking.PaymentPlan.INSTALLMENT or booking.pay_separately:
@@ -289,6 +305,21 @@ class InitializePaymentView(APIView):
 
         gateway_amount = to_subunits(charged_amount if charged_amount is not None else amount)
         gateway_currency = charged_currency or booking.currency
+        split = {}
+        if donation_amount:
+            from .models import Donation, OpsConfig
+            donation = Donation.objects.create(
+                reference=f"DON-{secrets.token_hex(6).upper()}", source=Donation.Source.CHECKOUT,
+                booking=booking, payment=payment, percent=donation_percent,
+                donor_name=booking.full_name, donor_email=booking.email,
+                amount=donation_amount, currency=booking.currency,
+                charged_amount=quantize(donation_amount * exchange_rate) if exchange_rate else None,
+                charged_currency=charged_currency or "", exchange_rate=exchange_rate,
+                subaccount=OpsConfig.get().donation_subaccount,
+            )
+            # Azura keeps the booking part; the Academy subaccount gets the rest.
+            split = {"subaccount": donation.subaccount, "transaction_charge": gateway_amount}
+            gateway_amount += to_subunits(donation.charged_amount if exchange_rate else donation_amount)
         gateway_metadata = {
             "booking_reference": booking.reference,
             "customer_name": booking.full_name,
@@ -310,6 +341,7 @@ class InitializePaymentView(APIView):
                     phone=momo_phone,
                     provider=momo_provider,
                     metadata=gateway_metadata,
+                    **split,
                 )
                 if paystack_data.get("status") == "failed":
                     raise ValueError(paystack_data.get("gateway_response") or "Charge failed.")
@@ -335,6 +367,7 @@ class InitializePaymentView(APIView):
                     currency=gateway_currency,
                     metadata=gateway_metadata,
                     channels=channels,
+                    **split,
                 )
         except Exception as exc:
             logger.exception("Paystack init failed for booking %s: %s", booking_id, exc)

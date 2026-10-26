@@ -166,6 +166,7 @@ def _build_html(booking, payment) -> str:
         deadline = booking.effective_payment_deadline
         label = f"Balance due {deadline.day} {deadline:%B %Y}" if deadline else "Balance"
         summary.append((label, _money(cur, booking.balance), "strong"))
+    summary += _donation_rows(payment)
 
     from .receipts import compute_line_items
     items = compute_line_items(booking)
@@ -222,6 +223,17 @@ def build_claim_token(booking) -> str:
     return signing.dumps({"booking": str(booking.id)}, salt="booking-claim")
 
 
+def _donation_rows(payment) -> list:
+    """An Academy donation charged with this payment: its own line plus what
+    the card was actually charged, so the receipt matches the statement."""
+    from .models import Donation
+    d = Donation.objects.filter(payment=payment).first() if payment else None
+    if not d:
+        return []
+    return [(f"Academy donation ({d.percent}%)" if d.percent else "Academy donation", _money(d.currency, d.amount), ""),
+            ("Charged today", _money(payment.currency, payment.amount + d.amount), "strong")]
+
+
 def _payment_summary_rows(booking, payment) -> list:
     cur = booking.currency
     rows = [("Payment received", _money(payment.currency, payment.amount), "strong"),
@@ -231,7 +243,7 @@ def _payment_summary_rows(booking, payment) -> list:
     deadline = booking.effective_payment_deadline
     if booking.balance > 0 and deadline:
         rows.append(("Final payment deadline", f"{deadline.day} {deadline:%B %Y}", ""))
-    return rows
+    return rows + _donation_rows(payment)
 
 
 def send_payment_receipt(booking, payment) -> None:
@@ -435,11 +447,17 @@ def send_donation_receipt(donation) -> None:
 
     body = (_h(f"Thank you, {html.escape(donation.donor_name)}")
             + _p("Your donation to the Michael Blackson Academy has been received.")
-            + _summary([("Donation", _money(donation.currency, donation.amount), "strong"),
-                        ("Charged", _money(donation.charged_currency, donation.charged_amount), ""),
+            + _summary([("Donation" + (f" ({donation.percent}% of your trip)" if donation.percent else ""),
+                         _money(donation.currency, donation.amount), "strong"),
+                        *([("Charged", _money(donation.charged_currency, donation.charged_amount), "")]
+                          if donation.charged_amount is not None else []),
                         ("Reference", html.escape(donation.reference), ""),
+                        *([("Booking", html.escape(donation.booking.reference), "")] if donation.booking_id else []),
                         ("Date", f"{(donation.paid_at or timezone.now()):%d %b %Y}", "")])
-            + _p("This donation is voluntary, separate from any travel booking, and goes to the Academy's own account.", small=True))
+            + _p("This donation is voluntary, goes to the Academy's own account, and is recorded separately "
+                 "from your trip cost." if donation.payment_id else
+                 "This donation is voluntary, separate from any travel booking, and goes to the Academy's own account.",
+                 small=True))
     if deliver("donation_receipt", donation.donor_email, "Thank you for supporting the Academy | Azura Travels",
                _shell("Donation receipt", body), booking=donation.booking):
         type(donation).objects.filter(pk=donation.pk).update(receipt_sent_at=timezone.now())

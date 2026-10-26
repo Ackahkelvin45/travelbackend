@@ -407,10 +407,15 @@ class Donation(models.Model):
     booking = models.ForeignKey(
         "bookings.Booking", on_delete=models.SET_NULL, null=True, blank=True, related_name="donations",
     )
+    payment = models.OneToOneField(
+        "payments.Payment", on_delete=models.SET_NULL, null=True, blank=True, related_name="donation",
+        help_text="Checkout donation: the booking payment it was charged with (one split transaction).",
+    )
     donor_name = models.CharField(max_length=200)
     donor_email = models.EmailField()
     amount = models.DecimalField(max_digits=12, decimal_places=2, help_text="USD.")
     currency = models.CharField(max_length=3, default="USD")
+    percent = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Checkout: % of the trip total.")
     charged_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     charged_currency = models.CharField(max_length=3, blank=True)
     exchange_rate = models.DecimalField(max_digits=14, decimal_places=6, null=True, blank=True)

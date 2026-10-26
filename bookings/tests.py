@@ -783,7 +783,8 @@ class ComponentPricingTests(TestCase):
         self.assertRejected("single", [{"experiences": ["airport_pickup"]}])  # no Azura stay
         q = self.quote("group", [{"experiences": ["airport_pickup"]}] * 3, room)
         self.assertEqual(q.transfers, [{"code": "airport_pickup", "name": "airport_pickup", "guests": [0, 1, 2],
-                                        "vehicles": 2, "price": "40.00", "charge": "80.00", "refundable": True}])
+                                        "vehicles": 2, "vehicle_capacity": 2, "price": "40.00", "charge": "80.00",
+                                        "refundable": True}])
         self.assertEqual(q.total, Decimal("4477.00"))  # 3 × 899 + 1,700 + 2 vehicles × 40
         self.assertRejected("single", [{"experiences": ["airport_pickup", "airport_return"]}],
                             [{"stay_type": "airbnb_1bed", "occupants": [0]}])

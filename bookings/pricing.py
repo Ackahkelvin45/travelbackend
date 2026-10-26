@@ -632,6 +632,19 @@ class ComponentQuote:
             add(tr["code"], tr["name"], "per_vehicle", tr["price"], tr["vehicles"], tr["charge"], tr["refundable"])
         return list(lines.values())
 
+    def donation_options(self) -> list:
+        """The optional Academy donation, priced here like everything else:
+        a % of the trip total, added to the first payment (empty while closed)."""
+        from payments.donations import CHECKOUT_PERCENTS, donations_open
+        if not donations_open():
+            return []
+        out = []
+        for pct in CHECKOUT_PERCENTS:
+            amount = quantize(self.total * pct / Decimal("100"))
+            out.append({"percent": pct, "amount": str(amount), "total": str(quantize(self.total + amount)),
+                        "due_today": str(quantize(self.amount_due_today + amount))})
+        return out
+
     def as_dict(self):
         return {
             "package_id": str(self.package.id),
@@ -659,6 +672,7 @@ class ComponentQuote:
             "deposit_required": str(self.deposit_required) if self.deposit_required is not None else None,
             "amount_due_today": str(self.amount_due_today),
             "balance_after_today": str(quantize(self.total - self.amount_due_today)),
+            "donation_options": self.donation_options(),
             # Stored in JSONFields (Booking.quote_snapshot, Lead.quote): ISO string, not a date.
             "final_payment_deadline": (
                 self.package.final_payment_deadline.isoformat() if self.package.final_payment_deadline else None
@@ -816,6 +830,7 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         for i, part in zip(guests, split_evenly(charge, len(guests))):
             shares[i]["transfer"] = part
         quote.transfers.append({"code": a.code, "name": a.name, "guests": guests, "vehicles": vehicles,
+                                "vehicle_capacity": a.vehicle_capacity,
                                 "price": str(quantize(a.price)), "charge": str(charge), "refundable": a.refundable})
         quote.transfers_total += charge
 
@@ -849,6 +864,7 @@ def build_component_matrix(package, request=None) -> dict:
             "bedding": s.bedding, "breakfast": s.breakfast, "location": s.location,
             "amenities": [a.strip() for a in s.amenities.splitlines() if a.strip()],
             "images": [{"url": url(i.image.url), "alt": i.alt_text} for i in s.images.all()],
+            "units_total": s.units.filter(blocked=False).count(),
         }
         for s in package.stay_types.prefetch_related("images")
     }
@@ -867,7 +883,8 @@ def build_component_matrix(package, request=None) -> dict:
                 "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
                 "on_sale": s.on_sale, "note": s.note,
                 "units_available": units_left(package, s.code) if s.on_sale else 0,
-                **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": []}),
+                **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": [],
+                                     "units_total": 0}),
             }
             for s in cat.stay_types.values()
         ],

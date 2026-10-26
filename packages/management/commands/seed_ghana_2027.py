@@ -56,16 +56,18 @@ STAYS = [
      "Two-adult rate awaiting confirmation"),
 ]
 
-# (code, name, $, unit, adults_only, requires_stay, description)
+# (code, name, $, unit, adults_only, requires_stay, description[, guests per vehicle])
+# ponytail: transfers are priced per head (client, 24 Oct 2026) as a
+# one-guest "vehicle", which keeps them one-per-guest and stay-only.
 EXPERIENCES = [
     ("enzo_vip", "ENZO VIP", "220.00", PackageAddon.Unit.PER_PERSON, True, False,
      "Friday night at ENZO with Michael. Guests 18 and over."),
     ("waterfall_massage", "Waterfall Massage", "100.00", PackageAddon.Unit.PER_PERSON, False, False,
      "Saturday at Boti Falls."),
-    ("airport_pickup", "Airport pickup", "40.00", PackageAddon.Unit.PER_VEHICLE, False, True,
-     "Arrival transfer. Per vehicle, up to 2 guests. For guests in Azura accommodation."),
-    ("airport_return", "Airport pickup + drop-off", "70.00", PackageAddon.Unit.PER_VEHICLE, False, True,
-     "Arrival and departure transfers. Per vehicle, up to 2 guests. For guests in Azura accommodation."),
+    ("airport_pickup", "Airport pickup", "30.00", PackageAddon.Unit.PER_VEHICLE, False, True,
+     "Arrival transfer, per guest. For guests in Azura accommodation.", 1),
+    ("airport_return", "Airport pickup + drop-off", "50.00", PackageAddon.Unit.PER_VEHICLE, False, True,
+     "Arrival and departure transfers, per guest. For guests in Azura accommodation.", 1),
 ]
 
 # (name, percent, min travellers) — proposed, OFF until margin approval.
@@ -107,7 +109,7 @@ FAQS = [
     ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
     ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
-    ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $40 for an arrival pickup or $70 for pickup and drop-off, per vehicle of up to two guests."),
+    ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $30 per guest for an arrival pickup or $50 per guest for pickup and drop-off."),
     ("Payments", "How do deposits and payments work?", "Core tickets, experiences and transfers are paid in full when you book. For accommodation you can pay at least 50% to secure the room and the rest in instalments. Everything must be paid before the first activity on 6 January, and we remind you 30, 14 and 7 days before."),
     ("Payments", "Can each member of our group pay separately?", "Yes. One organiser can pay for everyone, or each guest can pay their own share under the same group booking."),
     ("Payments", "What happens if a balance isn't paid?", "Every guest's share must be paid before the first activity on 6 January. Guests with an unpaid balance at the start can't receive a badge or join activities, and unpaid bookings are forfeited under the booking terms. We never cancel early just because one instalment was missed."),
@@ -161,11 +163,12 @@ class Command(BaseCommand):
         experiences, _ = PackageAddonGroup.objects.get_or_create(
             package=pkg, name="Experiences", defaults=dict(selection=PackageAddonGroup.Selection.MULTI, order=2),
         )
-        for order, (code, name, price, unit, adults_only, requires_stay, desc) in enumerate(EXPERIENCES, start=1):
+        for order, (code, name, price, unit, adults_only, requires_stay, desc, *per) in enumerate(EXPERIENCES, start=1):
             fields = dict(price=Decimal(price), unit=unit, adults_only=adults_only, requires_stay=requires_stay,
-                          vehicle_capacity=2, group=experiences, order=order, is_active=True)
+                          vehicle_capacity=per[0] if per else 2, group=experiences, order=order, is_active=True,
+                          description=desc)
             PackageAddon.objects.update_or_create(
-                package=pkg, code=code, defaults=fields, create_defaults=dict(name=name, description=desc, **fields),
+                package=pkg, code=code, defaults=fields, create_defaults=dict(name=name, **fields),
             )
         retired = pkg.addons.exclude(code__in=[c for c, *_ in EXPERIENCES]).update(is_active=False)
 

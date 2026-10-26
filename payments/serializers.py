@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from .donations import CHECKOUT_PERCENTS
 from .models import Payment
 
 
@@ -27,6 +28,10 @@ class InitializePaymentSerializer(serializers.Serializer):
     )
     adult = serializers.BooleanField(default=False, help_text="intent=addon: guests confirmed 18+ (adults-only items).")
     payer_email = serializers.EmailField(required=False, help_text="Receipt email for a member paying their share.")
+    donation_percent = serializers.ChoiceField(
+        choices=CHECKOUT_PERCENTS, required=False,
+        help_text="Optional Academy donation, % of the trip total, added to the booking's first payment.",
+    )
     addon_code = serializers.CharField(max_length=60, required=False,
                                        help_text="Required for intent=addon.")
     amount = serializers.DecimalField(

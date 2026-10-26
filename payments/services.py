@@ -21,7 +21,7 @@ from django.utils import timezone
 
 from bookings.models import Booking
 from .alerts import alert_admin
-from .models import Payment
+from .models import Donation, Payment
 from .money import FULLY_PAID_TOLERANCE, quantize, to_subunits
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,10 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
             expected_amount = payment.charged_amount if payment.charged_amount is not None else payment.amount
             expected_currency = payment.charged_currency or payment.currency
             expected_subunits = to_subunits(expected_amount)
+            donation = Donation.objects.filter(payment=payment).first()
+            if donation:  # charged together, split to the Academy at settlement
+                expected_subunits += to_subunits(
+                    donation.charged_amount if donation.charged_amount is not None else donation.amount)
             if gw_amount != expected_subunits or gw_currency != expected_currency:
                 payment.gateway_response = gateway_data
                 payment.needs_review = True
@@ -128,6 +132,13 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
                 result.problems.append("gateway_mismatch")
                 return result
             payment.gateway_response = gateway_data
+            if donation and donation.status != Donation.Status.SUCCESS:
+                # The split already settled the Academy's share, whatever happens to the booking.
+                donation.status, donation.paid_at, donation.gateway_response = (
+                    Donation.Status.SUCCESS, timezone.now(), gateway_data)
+                donation.save(update_fields=["status", "paid_at", "gateway_response"])
+                from .email import send_donation_receipt
+                transaction.on_commit(lambda d=donation: send_donation_receipt(d))
 
         # ── 2. Terminal-state guard ──────────────────────────────────────────
         # Money arrived for a dead booking (late webhook after cancellation,

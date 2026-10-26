@@ -171,12 +171,14 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     cancellation_request = serializers.SerializerMethodField()
     coordinator_name = serializers.SerializerMethodField()
     travellers = serializers.SerializerMethodField()
+    donation = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id",
             "reference",
+            "donation",
             "mode",
             "pay_separately",
             "whatsapp_updates",
@@ -252,6 +254,13 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             }
             for t, share, paid, outstanding in obj.traveller_balances()
         ]
+
+    def get_donation(self, obj):
+        """The Academy donation received with this booking, if any (shown as its
+        own line; never part of total_amount)."""
+        d = obj.donations.filter(status="success").order_by("paid_at").first()
+        return {"amount": str(d.amount), "percent": d.percent, "currency": d.currency,
+                "reference": d.reference} if d else None
 
     def get_coordinator_name(self, obj):
         """First name only — this serializer also backs the public status view."""
