@@ -503,3 +503,21 @@ def send_staff_alert(to, subject: str, intro: str, rows, *, kind="staff_alert", 
         ok = deliver(kind, email, f"{prefix} {subject}",
                      _shell(subject, body, footer="Internal alert for the Azura team.", contact=False), booking=booking, lead=lead) or ok
     return ok
+
+
+def send_guest_invite(traveller) -> bool:
+    """Client feedback (Oct 2026): the lead invites each guest by email to
+    complete their own details. The link is bound to this address."""
+    b = traveller.booking
+    url = _url(f"/invite/{traveller.invite_token}")
+    body = (_h(f"{html.escape(b.full_name)} has added you to their trip")
+            + _p(f"You're booked on <strong>{html.escape(b.package.title)}</strong> under booking "
+                 f"<strong>{b.reference}</strong>, as <strong>{html.escape(traveller.full_name)}</strong>.")
+            + _p("Please confirm your name and add your phone, flights and emergency contact. "
+                 "It takes two minutes and nothing is charged.")
+            + _button(url, "Complete my details")
+            + _p("Afterwards you can sign in or create an account with this email address to see your own ticket, "
+                 "room, experiences and payments.")
+            + _p("Not expecting this? You can ignore this email.", small=True))
+    return deliver("guest_invite", traveller.email, f"Complete your details for {b.package.title} | Azura Travels",
+                   _shell("You're invited", body), booking=b)

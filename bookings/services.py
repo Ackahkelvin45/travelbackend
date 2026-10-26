@@ -876,3 +876,27 @@ def change_lead_contact(booking, *, kind: str, first_name: str, last_name: str, 
     }]
     booking.save(update_fields=fields)
     send_traveller_updated(booking, previous, kind)
+
+
+def invite_traveller(traveller, email: str) -> bool:
+    """Lead invites a guest by email. A new address revokes the previous link
+    and unlinks the previous account; resending to the same address keeps
+    both. The Core ticket row is reused, never duplicated. Raises
+    IllegalTransition."""
+    from django.utils import timezone
+    from payments.email import send_guest_invite
+
+    booking = traveller.booking
+    if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+        raise IllegalTransition("This booking can no longer be changed.")
+    if traveller.is_lead:
+        raise IllegalTransition("The lead guest is already on the booking.")
+    email = email.strip().lower()
+    fields = ["email", "invited_at"]
+    if email != (traveller.email or "").lower():
+        traveller.user = None
+        traveller.details_completed_at = None
+        fields += ["user", "details_completed_at"]
+    traveller.email, traveller.invited_at = email, timezone.now()
+    traveller.save(update_fields=fields)
+    return send_guest_invite(traveller)

@@ -691,6 +691,18 @@ class ComponentCheckoutView(APIView):
                 {"detail": "The price has changed since this page was loaded.", "quote": quote.as_dict()},
                 status=status.HTTP_409_CONFLICT,
             )
+        group = None
+        if data.get("linked_to"):
+            # A big group books one Airbnb per booking, linked under one lead.
+            first = Booking.objects.filter(
+                reference=data["linked_to"].strip().upper(), package=package,
+                status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+            ).first()
+            if first is None or first.email.lower() != data["email"].lower():
+                return Response({"detail": f"We couldn't link this to booking {data['linked_to']}. "
+                                           "Use the same lead email as that booking."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            group = first.linked_to or first
         try:
             booking = create_component_booking(
                 package=package, mode=data["mode"], travellers=data["travellers"], rooms=data["rooms"],
@@ -713,10 +725,14 @@ class ComponentCheckoutView(APIView):
                 {"detail": "All booking policies must be accepted.", "missing_policies": exc.missing_types},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if group:
+            booking.linked_to = group
+            booking.save(update_fields=["linked_to", "updated_at"])
         return Response({
             "id": str(booking.id),
             "reference": booking.reference,
             "view_token": booking.view_token,
+            "linked_to": group.reference if group else None,
             "total_amount": str(booking.total_amount),
             "discount_amount": str(booking.discount_amount),
             # The first payment: the deposit (instalments, or a group paying per
@@ -905,3 +921,158 @@ class LeadUnsubscribeView(APIView):
         if lead is None:
             return Response({"detail": "This link isn't valid."}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"detail": "You won't get any more reminders about this trip."})
+
+
+# ── Guest invites and per-guest dashboards (client feedback, Oct 2026) ────────
+
+def _guest_trip(t):
+    """One guest's own view of a trip: their ticket, room, experiences and
+    payments. Never the other guests' details."""
+    b = t.booking
+    names = {a.code: a.name for a in b.package.addons.all()}
+    _, share, paid, outstanding = next(r for r in b.traveller_balances() if r[0].pk == t.pk)
+    payments = b.payments.filter(traveller=t, status__in=["success", "refunded"]).order_by("-created_at")
+    return {
+        "traveller_id": str(t.id), "full_name": t.full_name, "ticket": t.ticket_code,
+        "reference": b.reference, "package_id": str(b.package_id), "package_title": b.package.title,
+        "travel_date": b.travel_date, "status": b.status, "mode": b.mode, "lead_name": b.full_name,
+        "coordinator_name": b.coordinator.first_name if b.coordinator_id else None,
+        "unit": t.unit.label if t.unit else None,
+        "experiences": [names.get(c, c) for c in t.experiences],
+        "currency": b.currency, "pay_separately": b.pay_separately,
+        "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
+        "travel_info_submitted": t.travel_info_submitted_at is not None,
+        "invite_token": t.invite_token if t.email else None,
+        "payments": [
+            {"reference": p.paystack_reference, "amount": str(p.amount), "currency": p.currency,
+             "status": p.status, "paid_at": p.paid_at}
+            for p in payments
+        ],
+    }
+
+
+class TravellerInviteView(APIView):
+    """POST /api/bookings/<reference>/travellers/<id>/invite/ {email} — owner
+    only. Emails the guest a link to complete their details; calling again
+    resends it, or re-addresses it (which revokes the old link)."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, reference, traveller_id):
+        from django.core.validators import validate_email
+        from django.core.exceptions import ValidationError
+        from .services import IllegalTransition, invite_traveller
+
+        booking = _OwnedBooking.get(request, reference)
+        traveller = booking and booking.travellers.filter(pk=traveller_id).first()
+        if not traveller:
+            return Response({"detail": "Guest not found."}, status=status.HTTP_404_NOT_FOUND)
+        email = str(request.data.get("email", "")).strip()[:254]
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response({"detail": "Enter a valid email address."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            sent = invite_traveller(traveller, email)
+        except IllegalTransition as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "id": str(traveller.id), "email": traveller.email, "invite_status": traveller.invite_status,
+            "invited_at": traveller.invited_at, "sent": sent,
+        })
+
+
+class GuestInviteView(APIView):
+    """GET/PUT /api/bookings/invite/<token>/ — the invited guest's own page.
+    The signed link is the capability; it shows and edits only that guest."""
+
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "booking-status"
+
+    def _payload(self, t):
+        from .serializers import GuestDetailsSerializer
+        b = t.booking
+        names = {a.code: a.name for a in b.package.addons.all()}
+        return {
+            "reference": b.reference, "package_title": b.package.title, "travel_date": b.travel_date,
+            "lead_name": b.full_name, "status": b.status, "ticket": t.ticket_code,
+            "unit": t.unit.label if t.unit else None, "experiences": [names.get(c, c) for c in t.experiences],
+            "linked_account": t.user_id is not None,
+            "guest": GuestDetailsSerializer(t).data,
+        }
+
+    def get(self, request, token):
+        from .models import BookingTraveller
+        t = BookingTraveller.from_invite_token(token)
+        if t is None:
+            return Response({"detail": "This invite link isn't valid any more. Ask the lead booker to resend it."},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(self._payload(t))
+
+    def put(self, request, token):
+        from django.utils import timezone
+        from .models import BookingTraveller
+        from .serializers import GuestDetailsSerializer
+
+        t = BookingTraveller.from_invite_token(token)
+        if t is None:
+            return Response({"detail": "This invite link isn't valid any more. Ask the lead booker to resend it."},
+                            status=status.HTTP_404_NOT_FOUND)
+        if t.booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+            return Response({"detail": "This booking can no longer be changed."}, status=status.HTTP_400_BAD_REQUEST)
+        previous = t.full_name
+        serializer = GuestDetailsSerializer(t, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        now = timezone.now()
+        t = serializer.save(details_completed_at=now, travel_info_submitted_at=now)
+        if t.full_name != previous:  # renames are audited like staff renames
+            b = t.booking
+            Booking.objects.filter(pk=b.pk).update(traveller_changes=[*(b.traveller_changes or []), {
+                "kind": "guest_rename", "from": previous, "to": t.full_name, "at": now.isoformat(), "by": t.email,
+            }])
+        return Response(self._payload(t))
+
+
+class GuestInviteClaimView(APIView):
+    """POST /api/bookings/invite/<token>/claim/ — link the signed-in account
+    to this guest. Needs both the invite link and an account with the invited
+    (verified) email, so a forwarded link alone isn't enough."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+    def post(self, request, token):
+        from .models import BookingTraveller
+        t = BookingTraveller.from_invite_token(token)
+        if t is None:
+            return Response({"detail": "This invite link isn't valid any more."}, status=status.HTTP_404_NOT_FOUND)
+        if request.user.email.lower() != t.email.lower():
+            return Response({"detail": f"Sign in with {t.email} to link this ticket to your account."},
+                            status=status.HTTP_403_FORBIDDEN)
+        if t.user_id and t.user_id != request.user.id:
+            return Response({"detail": "This ticket is linked to another account."}, status=status.HTTP_400_BAD_REQUEST)
+        t.user = request.user
+        t.save(update_fields=["user"])
+        return Response({"reference": t.booking.reference, "detail": "Ticket linked to your account."})
+
+
+class MyTripsView(APIView):
+    """GET /api/bookings/trips/ — trips the user joined as an invited guest
+    (bookings they lead come from /mine/). Each shows only their own part."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import BookingTraveller
+        places = (
+            BookingTraveller.objects.filter(user=request.user)
+            .exclude(booking__user=request.user)
+            .exclude(booking__status=Booking.Status.CANCELLED)
+            .select_related("booking__package", "booking__coordinator", "unit")
+            .order_by("booking__travel_date")
+        )
+        return Response([_guest_trip(t) for t in places])
