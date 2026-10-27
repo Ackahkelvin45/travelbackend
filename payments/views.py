@@ -297,6 +297,7 @@ class InitializePaymentView(APIView):
             charged_amount=charged_amount,
             charged_currency=charged_currency,
             exchange_rate=exchange_rate,
+            exchange_rate_source=rate_source if exchange_rate is not None else "",
             purpose=purpose,
             addon_code=serializer.validated_data.get("addon_code", "") if intent == "addon" else "",
             traveller=traveller if intent == "traveller" else None,

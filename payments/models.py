@@ -80,6 +80,10 @@ class Payment(models.Model):
         max_digits=12, decimal_places=4, null=True, blank=True,
         help_text="Rate used for this charge (charged_currency per 1 unit of currency).",
     )
+    exchange_rate_source = models.CharField(
+        max_length=60, blank=True,
+        help_text="Where the rate came from: provider (cached), db-fallback, manual or manual-fallback.",
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,

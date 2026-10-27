@@ -56,6 +56,11 @@ def _run_crm_followups():
     return run_followups()
 
 
+def _run_reconcile_payments():
+    from .services import reconcile_open_payments
+    return reconcile_open_payments()
+
+
 def _run_flush_expired_tokens():
     from django.core.management import call_command
     call_command("flushexpiredtokens")
@@ -69,6 +74,8 @@ TASKS = {
     "send_overdue_notices": (lambda: timedelta(hours=24), _run_send_overdue_notices),
     # Checkout leads, consent-based quote reminders and staff SLA alerts (hourly, idempotent).
     "crm_followups": (lambda: timedelta(hours=1), _run_crm_followups),
+    # Missed webhooks: re-check open Paystack payments with the gateway.
+    "reconcile_payments": (lambda: timedelta(minutes=30), _run_reconcile_payments),
     # Revoked/expired login tokens pile up one row per login; clear them daily.
     "flush_expired_tokens": (lambda: timedelta(hours=24), _run_flush_expired_tokens),
 }

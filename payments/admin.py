@@ -51,7 +51,7 @@ class PaymentAdmin(ModelAdmin):
         "payment_overview", "breakdown_table", "receipt_link",
         "gateway_summary", "gateway_response_pretty",
         "id", "booking", "amount", "currency",
-        "charged_amount", "charged_currency", "exchange_rate", "purpose", "method",
+        "charged_amount", "charged_currency", "exchange_rate", "exchange_rate_source", "purpose", "method",
         "paystack_reference", "paystack_access_code", "paystack_authorization_url",
         "gateway_response", "paid_at", "created_at", "updated_at", "status",
     ]
@@ -81,7 +81,7 @@ class PaymentAdmin(ModelAdmin):
         ("Raw transaction fields", {
             "classes": ("collapse",),
             "fields": ("booking", "amount", "currency",
-                       "charged_amount", "charged_currency", "exchange_rate",
+                       "charged_amount", "charged_currency", "exchange_rate", "exchange_rate_source",
                        "purpose", "method", "status", "paid_at", "created_at", "updated_at"),
         }),
         ("Raw gateway response (JSON)", {
@@ -305,10 +305,10 @@ class PaymentAdmin(ModelAdmin):
         response["Content-Disposition"] = 'attachment; filename="payments.csv"'
         w = csv.writer(response)
         w.writerow(["Reference", "Booking", "Status", "Purpose", "Method", "Amount", "Currency",
-                    "Charged", "Charged currency", "Rate", "Paid at", "Needs review"])
+                    "Charged", "Charged currency", "Rate", "Rate source", "Paid at", "Needs review"])
         for p in queryset.select_related("booking"):
             w.writerow([p.paystack_reference, p.booking.reference, p.status, p.purpose, p.method, p.amount, p.currency,
-                        p.charged_amount or "", p.charged_currency or "", p.exchange_rate or "", p.paid_at or "", p.needs_review])
+                        p.charged_amount or "", p.charged_currency or "", p.exchange_rate or "", p.exchange_rate_source, p.paid_at or "", p.needs_review])
         return response
 
     def receipt_view(self, request, pk):

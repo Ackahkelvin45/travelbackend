@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 def _payment_rows(p) -> list:
     return [("Payment reference", p.paystack_reference), ("Payment amount", f"{p.currency} {p.amount:,.2f}"),
             ("Charged by Paystack", f"{p.charged_currency or 'GHS'} {p.charged_amount:,.2f}" if p.charged_amount else ""),
-            ("Exchange rate", str(p.exchange_rate) if p.exchange_rate else "")]
+            ("Exchange rate", f"{p.exchange_rate} ({p.exchange_rate_source})" if p.exchange_rate else "")]
 
 def generate_payment_reference(booking) -> str:
     """
@@ -112,7 +112,10 @@ def apply_successful_payment(payment: Payment, gateway_data: dict | None) -> App
             if donation:  # charged together, split to the Academy at settlement
                 expected_subunits += to_subunits(
                     donation.charged_amount if donation.charged_amount is not None else donation.amount)
-            if gw_amount != expected_subunits or gw_currency != expected_currency:
+            # When the guest bears Paystack's fee, `amount` includes it and
+            # `requested_amount` is what we asked for.
+            if expected_subunits not in (gw_amount, gateway_data.get("requested_amount")) \
+                    or gw_currency != expected_currency:
                 payment.gateway_response = gateway_data
                 payment.needs_review = True
                 payment.review_note = (
@@ -316,3 +319,48 @@ def record_offline_payment(booking, *, amount, method, note, purpose=None) -> Ap
         note=note,
     )
     return apply_successful_payment(payment, gateway_data=None)
+
+
+def reconcile_open_payments(now=None) -> str:
+    """
+    Safety net for a missed webhook: ask Paystack about every gateway payment
+    still open (pending, or retired as abandoned by a newer attempt) from the
+    last 3 days, and apply whatever really happened. Without this, money taken
+    while the guest closed the tab and the webhook failed would sit unapplied.
+    Skips payments already flagged for review (a person is on those).
+    """
+    from datetime import timedelta
+    from .paystack import verify_transaction
+
+    now = now or timezone.now()
+    open_payments = Payment.objects.filter(
+        method=Payment.Method.PAYSTACK, paystack_reference__isnull=False, needs_review=False,
+        status__in=[Payment.Status.PENDING, Payment.Status.ABANDONED],
+        created_at__range=(now - timedelta(days=3), now - timedelta(minutes=10)),
+    ).order_by("created_at")[:100]  # ponytail: 100 per run; raise if traffic ever outgrows it
+
+    applied, failed, errors = [], 0, 0
+    for payment in open_payments:
+        try:
+            data = verify_transaction(payment.paystack_reference)
+        except Exception:
+            logger.exception("Reconcile: verify failed for %s", payment.paystack_reference)
+            errors += 1
+            continue
+        if data.get("status") == "success":
+            if apply_successful_payment(payment, data).applied:
+                applied.append(payment)
+        elif data.get("status") == "failed":
+            mark_payment_unsuccessful(payment, "failed", data)
+            failed += 1
+
+    if applied:
+        logger.error("Reconcile applied %s payment(s) the webhook missed: %s",
+                     len(applied), [p.paystack_reference for p in applied])
+        alert_admin(
+            "reconcile-missed-webhook", "Payments recovered without a webhook",
+            f"{len(applied)} paid charge(s) had not been applied because Paystack's webhook never "
+            "reached us. They are applied now. Check the webhook URL in the Paystack dashboard.",
+            rows=[(p.paystack_reference, f"{p.currency} {p.amount}") for p in applied],
+        )
+    return f"checked {len(open_payments)}, applied {len(applied)}, failed {failed}, errors {errors}"

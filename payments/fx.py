@@ -170,13 +170,14 @@ def get_market_rate(base: str, quote: str) -> ResolvedRate | None:
     key = _cache_key(base, quote)
     cached = cache.get(key)
     if cached is not None:
-        return ResolvedRate(rate=cached["rate"], source="cache", fetched_at=cached["fetched_at"])
+        return ResolvedRate(rate=cached["rate"], source=f'{cached.get("source", "?")} (cached)',
+                            fetched_at=cached["fetched_at"])
 
     live = fetch_live_rate(base, quote)
     if live is not None:
         cache.set(
             key,
-            {"rate": live.rate, "fetched_at": live.fetched_at},
+            {"rate": live.rate, "fetched_at": live.fetched_at, "source": live.source},
             getattr(settings, "FX_CACHE_SECONDS", 3600),
         )
         return live
@@ -216,7 +217,9 @@ def effective_charge_rate(package, quote: str = "GHS") -> tuple[Decimal, str]:
     resolved = get_market_rate(base, quote)
     if resolved is not None:
         margin = getattr(package, "fx_margin_percent", None) or Decimal("0")
-        rate = (resolved.rate * (1 + margin / 100)).quantize(Decimal("0.000001"))
+        # 4 places = Payment.exchange_rate's precision, so the stored rate
+        # reproduces the charged amount exactly.
+        rate = (resolved.rate * (1 + margin / 100)).quantize(Decimal("0.0001"))
         return rate, resolved.source
 
     if manual:
