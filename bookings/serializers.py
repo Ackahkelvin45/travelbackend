@@ -1,3 +1,4 @@
+from django.db import models
 from rest_framework import serializers
 
 from packages.models import TourDeparture, TravelPackage
@@ -171,12 +172,16 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     cancellation_request = serializers.SerializerMethodField()
     coordinator_name = serializers.SerializerMethodField()
     travellers = serializers.SerializerMethodField()
+    donation = serializers.SerializerMethodField()
+    linked_bookings = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id",
             "reference",
+            "linked_bookings",
+            "donation",
             "mode",
             "pay_separately",
             "whatsapp_updates",
@@ -248,10 +253,25 @@ class BookingDetailSerializer(serializers.ModelSerializer):
                 "unit": t.unit.label if t.unit else None,
                 "experiences": [names.get(c, c) for c in t.experiences],
                 "travel_info_submitted": t.travel_info_submitted_at is not None,
+                "email": t.email, "invite_status": t.invite_status, "has_account": t.user_id is not None,
                 "share": str(share), "paid": str(paid), "outstanding": str(outstanding),
             }
             for t, share, paid, outstanding in obj.traveller_balances()
         ]
+
+    def get_donation(self, obj):
+        """The Academy donation received with this booking, if any (shown as its
+        own line; never part of total_amount)."""
+        d = obj.donations.filter(status="success").order_by("paid_at").first()
+        return {"amount": str(d.amount), "percent": d.percent, "currency": d.currency,
+                "reference": d.reference} if d else None
+
+    def get_linked_bookings(self, obj):
+        """Other bookings in this group (one Airbnb each, same lead)."""
+        root = obj.linked_to or obj
+        group = Booking.objects.filter(models.Q(pk=root.pk) | models.Q(linked_to=root)).exclude(pk=obj.pk)
+        return [{"reference": b.reference, "status": b.status, "num_guests": b.num_guests}
+                for b in group.exclude(status=Booking.Status.CANCELLED).order_by("created_at")]
 
     def get_coordinator_name(self, obj):
         """First name only — this serializer also backs the public status view."""
@@ -401,11 +421,15 @@ class _RoomInput(serializers.Serializer):
 class ComponentQuoteSerializer(serializers.Serializer):
     """Travellers by list index; rooms list their occupants by that index."""
     package_id = serializers.UUIDField()
-    mode = serializers.ChoiceField(choices=["single", "couple", "group"])
+    mode = serializers.ChoiceField(choices=Booking.Mode.values)
     travellers = _TravellerInput(many=True)
     rooms = _RoomInput(many=True, default=list)
     payment_plan = serializers.ChoiceField(choices=["full", "installment"], default="full")
     hold_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
+    linked_to = serializers.CharField(
+        max_length=20, required=False, allow_blank=True,
+        help_text="Reference of the group's first booking (an extra Airbnb for a big group; same lead email).",
+    )
 
     def validate_travellers(self, value):
         if not 1 <= len(value) <= 20:
@@ -474,3 +498,17 @@ class AssistantSerializer(serializers.Serializer):
         if value[0]["role"] != "user" or value[-1]["role"] != "user":
             raise serializers.ValidationError("The conversation must start and end with the guest.")
         return value
+
+
+class GuestDetailsSerializer(TravelInfoSerializer):
+    """What an invited guest completes from their invite link."""
+    full_name = serializers.CharField(max_length=200)
+
+    class Meta(TravelInfoSerializer.Meta):
+        fields = [*TravelInfoSerializer.Meta.fields, "email", "phone", "details_completed_at"]
+        read_only_fields = ["id", "is_lead", "email", "travel_info_submitted_at", "details_completed_at"]
+
+    def validate_full_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Please give your full name.")
+        return value.strip()

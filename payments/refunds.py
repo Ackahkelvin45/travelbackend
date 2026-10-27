@@ -103,9 +103,7 @@ def compute_refund(booking, at=None, *, full: bool = False) -> dict:
             # Gateway refunds are executed in the CHARGED currency (GHS for
             # USD bookings) — give the operator the exact proportional GHS
             # figure so nothing is left to mental arithmetic.
-            gateway_amount = None
-            if payment.charged_amount is not None and payment.amount:
-                gateway_amount = quantize(payment.charged_amount * leg / payment.amount)
+            gateway_amount = gateway_share(payment, refunded_on_payment, leg)
             allocation.append({
                 "payment": payment,
                 "amount": leg,
@@ -131,6 +129,16 @@ def compute_refund(booking, at=None, *, full: bool = False) -> dict:
     return {"refund_total": refund_total, "breakdown": breakdown, "allocation": allocation}
 
 
+def gateway_share(payment, already_refunded, leg):
+    """The charged-currency (GHS) amount to refund for a ledger leg. Rounds the
+    running total, not each leg, so the legs on one charge add up to exactly
+    what was charged — never a pesewa over."""
+    if payment.charged_amount is None or not payment.amount:
+        return None
+    upto = lambda ledger: quantize(payment.charged_amount * ledger / payment.amount)
+    return upto(already_refunded + leg) - upto(already_refunded)
+
+
 def create_fixed_refund(booking, amount, *, reason: str, breakdown: dict | None = None) -> list:
     """Owe the guest a specific amount (e.g. an over-payment after an add-on is
     removed): decompose it into pending legs newest-charge-first, skipping
@@ -152,8 +160,8 @@ def create_fixed_refund(booking, amount, *, reason: str, breakdown: dict | None 
                 continue
             leg = min(capacity, remaining)
             info = dict(breakdown or {})
-            if payment.charged_amount is not None and payment.amount:
-                gw = quantize(payment.charged_amount * leg / payment.amount)
+            gw = gateway_share(payment, refunded, leg)
+            if gw is not None:
                 info["execute_on_gateway"] = (
                     f"Refund {payment.charged_currency} {gw} on Paystack transaction "
                     f"{payment.paystack_reference} (= {booking.currency} {leg} of the ledger)."

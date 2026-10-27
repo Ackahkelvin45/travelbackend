@@ -214,8 +214,8 @@ class TravellerInline(TabularInline):
     tab = True
     verbose_name = "Guest"
     verbose_name_plural = "Guests & rooms"
-    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "paid_share", "travel_info"]
-    readonly_fields = ["is_lead", "ticket", "experiences_display", "paid_share", "travel_info"]
+    fields = ["full_name", "is_lead", "ticket", "unit", "experiences_display", "paid_share", "invite", "travel_info"]
+    readonly_fields = ["is_lead", "ticket", "experiences_display", "paid_share", "invite", "travel_info"]
     can_delete = False
 
     def has_add_permission(self, request, obj=None):
@@ -236,8 +236,14 @@ class TravellerInline(TabularInline):
 
     @admin.display(description="Core ticket")
     def ticket(self, obj):
-        index = list(obj.booking.travellers.values_list("pk", flat=True)).index(obj.pk) + 1
-        return f"{obj.booking.reference}-T{index}"
+        return obj.ticket_code
+
+    @admin.display(description="Invite")
+    def invite(self, obj):
+        if obj.is_lead:
+            return "Lead booker"
+        label = {"completed": "Details completed", "pending": "Invite pending", "not_invited": "Not invited"}[obj.invite_status]
+        return f"{label} · {obj.email}{' · has account' if obj.user_id else ''}" if obj.email else label
 
     @admin.display(description="Experiences")
     def experiences_display(self, obj):
@@ -286,16 +292,29 @@ class BookingAdmin(ModelAdmin):
         "effective_deadline_display", "cancelled_at", "cancellation_reason",
         "reminders_sent", "overdue_notice_sent_at", "cure_deadline_display",
         "arrived_at", "created_at", "updated_at",
-        "coordinator_assigned_at", "lead_contacted_at", "contact_sla",
+        "coordinator_assigned_at", "lead_contacted_at", "contact_sla", "linked_group",
     ]
     ordering = ["-created_at"]
+
+    @admin.display(description="Linked bookings")
+    def linked_group(self, obj):
+        """A big group books one Airbnb per booking under the same lead."""
+        from django.urls import reverse
+        from django.db.models import Q
+        from django.utils.html import format_html_join
+        root = obj.linked_to or obj
+        group = Booking.objects.filter(Q(pk=root.pk) | Q(linked_to=root)).exclude(pk=obj.pk).order_by("created_at")
+        return format_html_join(" · ", '<a href="{}">{}</a> ({})', (
+            (reverse("admin:bookings_booking_change", args=[b.pk]), b.reference, b.get_status_display()) for b in group
+        )) or "—"
+
     inlines = [TravellerInline, PaymentInline, CancellationRequestInline, PolicyAcceptanceInline, EmailLogInline]
     fieldsets = (
         ("Overview", {
             "classes": ["tab"],
             "fields": ("reference", "status", "user", ("first_name", "last_name"), ("email", "phone"),
                        "country", ("mode", "num_guests"), "package", "option", "travel_date",
-                       "arrived_at", "special_requests"),
+                       "linked_group", "arrived_at", "special_requests"),
         }),
         ("Coordinator", {
             "classes": ["tab"],
@@ -1079,7 +1098,7 @@ class EventTicketAdmin(ModelAdmin):
     def get_queryset(self, request):
         return (super().get_queryset(request)
                 .filter(booking__status__in=[Booking.Status.CONFIRMED, Booking.Status.COMPLETED])
-                .exclude(booking__mode="")
+                .exclude(booking__mode__in=["", Booking.Mode.STAY])  # stay-only guests have no event ticket
                 .select_related("booking", "unit", "checked_in_by")
                 .order_by("booking__reference", "position"))
 

@@ -74,6 +74,11 @@ def _cache_key(base: str, quote: str) -> str:
     return f"fx:{base}:{quote}"
 
 
+def _last_good(base: str, quote: str) -> str:
+    last = FxRate.objects.filter(base=base, quote=quote).order_by("-fetched_at").first()
+    return f"1 {base} = {last.rate} {quote}" if last else "None stored yet"
+
+
 def _passes_sanity_check(base: str, quote: str, rate: Decimal, source: str) -> bool:
     """
     Two independent guards so a corrupted or hijacked feed can never set
@@ -100,7 +105,10 @@ def _passes_sanity_check(base: str, quote: str, rate: Decimal, source: str) -> b
                 "FX rate feed rejected (hard bound)",
                 f"Provider {source} reported 1 {base} = {rate} {quote}, outside "
                 f"the configured plausibility band [{low}, {high}]. The rate was "
-                "ignored; the fallback chain is serving instead. Investigate the feed.",
+                "ignored, so prices are not affected: checkout keeps using the last good "
+                "rate (or the manual fallback). Check the provider; nothing to do if it recovers.",
+                rows=[("Provider", source), ("Reported", f"1 {base} = {rate} {quote}"),
+                      ("Allowed range", f"{low} – {high} {quote}"), ("Last good rate", _last_good(base, quote))],
             )
             return False
 
@@ -121,7 +129,10 @@ def _passes_sanity_check(base: str, quote: str, rate: Decimal, source: str) -> b
             "FX rate feed rejected (deviation)",
             f"Provider {source} reported 1 {base} = {rate} {quote}, deviating "
             f"{deviation:.1f}% from the last known {last.rate} (max {max_deviation}%). "
-            "The rate was ignored; the fallback chain is serving instead.",
+            "The rate was ignored, so prices are not affected: checkout keeps using the last good rate.",
+            rows=[("Provider", source), ("Reported", f"1 {base} = {rate} {quote}"),
+                  ("Last good rate", f"1 {base} = {last.rate} {quote}"),
+                  ("Deviation", f"{deviation:.1f}% (max {max_deviation}%)")],
         )
         return False
     return True
@@ -159,13 +170,14 @@ def get_market_rate(base: str, quote: str) -> ResolvedRate | None:
     key = _cache_key(base, quote)
     cached = cache.get(key)
     if cached is not None:
-        return ResolvedRate(rate=cached["rate"], source="cache", fetched_at=cached["fetched_at"])
+        return ResolvedRate(rate=cached["rate"], source=f'{cached.get("source", "?")} (cached)',
+                            fetched_at=cached["fetched_at"])
 
     live = fetch_live_rate(base, quote)
     if live is not None:
         cache.set(
             key,
-            {"rate": live.rate, "fetched_at": live.fetched_at},
+            {"rate": live.rate, "fetched_at": live.fetched_at, "source": live.source},
             getattr(settings, "FX_CACHE_SECONDS", 3600),
         )
         return live
@@ -205,7 +217,9 @@ def effective_charge_rate(package, quote: str = "GHS") -> tuple[Decimal, str]:
     resolved = get_market_rate(base, quote)
     if resolved is not None:
         margin = getattr(package, "fx_margin_percent", None) or Decimal("0")
-        rate = (resolved.rate * (1 + margin / 100)).quantize(Decimal("0.000001"))
+        # 4 places = Payment.exchange_rate's precision, so the stored rate
+        # reproduces the charged amount exactly.
+        rate = (resolved.rate * (1 + margin / 100)).quantize(Decimal("0.0001"))
         return rate, resolved.source
 
     if manual:

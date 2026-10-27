@@ -106,12 +106,12 @@ def _contact_footer() -> str:
     return "<br>".join(lines)
 
 
-def _shell(title: str, body_html: str, *, hero: str = "", footer: str = "") -> str:
+def _shell(title: str, body_html: str, *, hero: str = "", footer: str = "", contact: bool = True) -> str:
     """Wrap a body in the brand layout. `hero` is a public/email/ file name;
     `footer` is extra escaped text shown above the contact line."""
     hero_html = (f'<tr><td style="padding:0 0 18px;"><img src="{_url("/email/" + hero)}" width="536" alt="" '
                  f'style="display:block;width:100%;max-width:536px;height:auto;border-radius:10px;"></td></tr>') if hero else ""
-    foot = (footer + "<br>" if footer else "") + _contact_footer()
+    foot = (footer + "<br>" if footer else "") + (_contact_footer() if contact else "")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title></head>
 <body style="margin:0;padding:0;background:#EEF0F2;{_FONT}color:#060504;">
@@ -150,7 +150,10 @@ def _build_html(booking, payment) -> str:
     cur = booking.currency
     first_name = html.escape(booking.first_name)
     guests = booking.num_guests
-    dates = _trip_dates(package.available_from, package.available_to) if booking.mode and package.available_from \
+    from bookings.services import stay_dates
+    stay = stay_dates((booking.quote_snapshot or {}).get("rooms"))
+    dates = _trip_dates(*stay) if stay else \
+        _trip_dates(package.available_from, package.available_to) if booking.mode and package.available_from \
         else _trip_dates(booking.travel_date)
 
     from .email import build_claim_token  # self-import safe at call time
@@ -166,6 +169,7 @@ def _build_html(booking, payment) -> str:
         deadline = booking.effective_payment_deadline
         label = f"Balance due {deadline.day} {deadline:%B %Y}" if deadline else "Balance"
         summary.append((label, _money(cur, booking.balance), "strong"))
+    summary += _donation_rows(payment)
 
     from .receipts import compute_line_items
     items = compute_line_items(booking)
@@ -222,6 +226,17 @@ def build_claim_token(booking) -> str:
     return signing.dumps({"booking": str(booking.id)}, salt="booking-claim")
 
 
+def _donation_rows(payment) -> list:
+    """An Academy donation charged with this payment: its own line plus what
+    the card was actually charged, so the receipt matches the statement."""
+    from .models import Donation
+    d = Donation.objects.filter(payment=payment).first() if payment else None
+    if not d:
+        return []
+    return [(f"Academy donation ({d.percent}%)" if d.percent else "Academy donation", _money(d.currency, d.amount), ""),
+            ("Charged today", _money(payment.currency, payment.amount + d.amount), "strong")]
+
+
 def _payment_summary_rows(booking, payment) -> list:
     cur = booking.currency
     rows = [("Payment received", _money(payment.currency, payment.amount), "strong"),
@@ -231,7 +246,7 @@ def _payment_summary_rows(booking, payment) -> list:
     deadline = booking.effective_payment_deadline
     if booking.balance > 0 and deadline:
         rows.append(("Final payment deadline", f"{deadline.day} {deadline:%B %Y}", ""))
-    return rows
+    return rows + _donation_rows(payment)
 
 
 def send_payment_receipt(booking, payment) -> None:
@@ -402,7 +417,8 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
     c = q.get("currency", "USD")
     # Canvas: one line naming what was chosen, with the total ("2 Core tickets + 1-bed Airbnb").
     n = int(q.get("num_guests", 1))
-    parts = [f"{n} Core ticket{'s' if n != 1 else ''}"]
+    parts = [f"Stay for {n} guest{'s' if n != 1 else ''}" if q.get("mode") == "stay"
+             else f"{n} Core ticket{'s' if n != 1 else ''}"]
     parts += [r.get("name", "Accra stay") for r in q.get("rooms") or []]
     if Decimal(q.get("experiences_total", "0")):
         parts.append("experiences")
@@ -414,7 +430,10 @@ def send_saved_quote(lead, reminder: bool = False) -> bool:
                      "−" + _money(c, q["discount_total"]), "saving"))
 
     package = TravelPackage.objects.filter(pk=q.get("package_id") or None).first()
-    trip = (f"the {html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
+    from bookings.services import stay_dates
+    stay = stay_dates(q.get("rooms"))
+    trip = (f"an Accra stay, {_trip_dates(*stay)}" if stay
+            else f"the {html.escape(package.title)}, {_trip_dates(package.available_from, package.available_to)}"
             if package else "your Ghana trip")
     body = (_h("Pick up where you left off")
             + _p(f"Here's the quote you saved for {trip}.")
@@ -435,11 +454,76 @@ def send_donation_receipt(donation) -> None:
 
     body = (_h(f"Thank you, {html.escape(donation.donor_name)}")
             + _p("Your donation to the Michael Blackson Academy has been received.")
-            + _summary([("Donation", _money(donation.currency, donation.amount), "strong"),
-                        ("Charged", _money(donation.charged_currency, donation.charged_amount), ""),
+            + _summary([("Donation" + (f" ({donation.percent}% of your trip)" if donation.percent else ""),
+                         _money(donation.currency, donation.amount), "strong"),
+                        *([("Charged", _money(donation.charged_currency, donation.charged_amount), "")]
+                          if donation.charged_amount is not None else []),
                         ("Reference", html.escape(donation.reference), ""),
+                        *([("Booking", html.escape(donation.booking.reference), "")] if donation.booking_id else []),
                         ("Date", f"{(donation.paid_at or timezone.now()):%d %b %Y}", "")])
-            + _p("This donation is voluntary, separate from any travel booking, and goes to the Academy's own account.", small=True))
+            + _p("This donation is voluntary, goes to the Academy's own account, and is recorded separately "
+                 "from your trip cost." if donation.payment_id else
+                 "This donation is voluntary, separate from any travel booking, and goes to the Academy's own account.",
+                 small=True))
     if deliver("donation_receipt", donation.donor_email, "Thank you for supporting the Academy | Azura Travels",
                _shell("Donation receipt", body), booking=donation.booking):
         type(donation).objects.filter(pk=donation.pk).update(receipt_sent_at=timezone.now())
+
+
+# ── Staff alerts ─────────────────────────────────────────────────────────────
+
+def site_label() -> str:
+    """"STAGING" / "LOCAL" for non-live sites (live and staging share an
+    alert inbox), "" for live."""
+    from urllib.parse import urlparse
+    host = urlparse(settings.FRONTEND_URL).hostname or ""
+    if host in ("localhost", "127.0.0.1"):
+        return "LOCAL"
+    return "STAGING" if host.startswith("staging.") else ""
+
+
+def admin_url(obj) -> str:
+    meta = obj._meta
+    return f"{settings.BACKEND_URL.rstrip('/')}/admin/{meta.app_label}/{meta.model_name}/{obj.pk}/change/"
+
+
+def send_staff_alert(to, subject: str, intro: str, rows, *, kind="staff_alert", note: str = "",
+                     link: str = "", link_label: str = "Open in admin", booking=None, lead=None) -> bool:
+    """One branded, detailed alert to each address in `to` (blanks and
+    duplicates skipped). rows: (label, value) as plain text; empty values
+    are left out. Returns True if any copy was accepted."""
+    from django.utils import timezone
+
+    label = site_label()
+    sent_at = timezone.localtime().strftime("%d %b %Y %H:%M") + " GMT"
+    site = settings.FRONTEND_URL.split("//")[-1].rstrip("/")
+    details = [(k, v) for k, v in rows if v not in (None, "")] + [("Site", site), ("Sent", sent_at)]
+    body = (_h(html.escape(subject))
+            + _p(html.escape(intro))
+            + _summary([(html.escape(k), html.escape(str(v)), "") for k, v in details])
+            + (_p(html.escape(note)) if note else "")
+            + (_button(link, link_label) if link else ""))
+    prefix = f"[Azura {label}]" if label else "[Azura]"
+    ok = False
+    for email in dict.fromkeys(e for e in (to if isinstance(to, (list, tuple)) else [to]) if e):
+        ok = deliver(kind, email, f"{prefix} {subject}",
+                     _shell(subject, body, footer="Internal alert for the Azura team.", contact=False), booking=booking, lead=lead) or ok
+    return ok
+
+
+def send_guest_invite(traveller) -> bool:
+    """Client feedback (Oct 2026): the lead invites each guest by email to
+    complete their own details. The link is bound to this address."""
+    b = traveller.booking
+    url = _url(f"/invite/{traveller.invite_token}")
+    body = (_h(f"{html.escape(b.full_name)} has added you to their trip")
+            + _p(f"You're booked on <strong>{html.escape(b.package.title)}</strong> under booking "
+                 f"<strong>{b.reference}</strong>, as <strong>{html.escape(traveller.full_name)}</strong>.")
+            + _p("Please confirm your name and add your phone, flights and emergency contact. "
+                 "It takes two minutes and nothing is charged.")
+            + _button(url, "Complete my details")
+            + _p("Afterwards you can sign in or create an account with this email address to see your own ticket, "
+                 "room, experiences and payments.")
+            + _p("Not expecting this? You can ignore this email.", small=True))
+    return deliver("guest_invite", traveller.email, f"Complete your details for {b.package.title} | Azura Travels",
+                   _shell("You're invited", body), booking=b)

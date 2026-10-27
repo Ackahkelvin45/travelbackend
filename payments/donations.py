@@ -1,6 +1,6 @@
 """
 Academy donations (Change Request v4 §7): a voluntary USD gift at checkout
-(5%, 10% of the booking or a custom amount, never pre-selected) or on the
+(5%, 10% or 20% of the trip, added to the first payment, never pre-selected) or on the
 public /donate page. Each donation is its own Paystack transaction settled to
 the Academy's subaccount, so it never mixes with booking receipts. Closed
 until staff switch it on with a verified subaccount.
@@ -25,6 +25,7 @@ from .money import quantize, to_subunits
 
 logger = logging.getLogger(__name__)
 
+CHECKOUT_PERCENTS = (5, 10, 20)  # of the trip total, added to the first payment
 MIN_DONATION = Decimal("1.00")
 MAX_DONATION = Decimal("50000.00")
 CLOSED = "Donations open once the Academy's account is verified. Thank you for your patience."
@@ -76,12 +77,12 @@ class DonationSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=200)
     email = serializers.EmailField()
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
-    percent = serializers.ChoiceField(choices=[5, 10], required=False, help_text="Of the booking total (checkout).")
+    percent = serializers.ChoiceField(choices=CHECKOUT_PERCENTS, required=False, help_text="Of the booking total.")
     booking_id = serializers.UUIDField(required=False)
 
     def validate(self, attrs):
         if ("amount" in attrs) == ("percent" in attrs):
-            raise serializers.ValidationError("Choose 5%, 10% or a custom amount.")
+            raise serializers.ValidationError("Choose 5%, 10%, 20% or a custom amount.")
         if "percent" in attrs and not attrs.get("booking_id"):
             raise serializers.ValidationError({"percent": "A percentage needs a booking."})
         return attrs

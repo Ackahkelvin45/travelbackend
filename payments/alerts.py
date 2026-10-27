@@ -12,7 +12,6 @@ so an incident can't flood the inbox.
 
 import logging
 
-import resend
 from django.conf import settings
 from django.core.cache import cache
 
@@ -21,7 +20,16 @@ logger = logging.getLogger(__name__)
 THROTTLE_SECONDS = 3600
 
 
-def alert_admin(key: str, subject: str, body: str) -> None:
+def _booking_rows(b) -> list:
+    from .email import _money
+    return [("Booking", b.reference), ("Guest", b.full_name), ("Email", b.email), ("Phone", b.phone),
+            ("Trip", b.package.title if b.package_id else ""), ("Status", b.get_status_display()),
+            ("Paid", _money(b.currency, b.amount_paid)), ("Total", _money(b.currency, b.total_amount))]
+
+
+def alert_admin(key: str, subject: str, body: str, *, rows=(), booking=None, link_obj=None) -> None:
+    """body: what happened and what to do, in plain text. rows: extra
+    (label, value) facts; a booking adds its own and the admin link."""
     logger.error("ADMIN ALERT [%s]: %s — %s", key, subject, body)
 
     recipient = ""
@@ -40,12 +48,12 @@ def alert_admin(key: str, subject: str, body: str) -> None:
     cache.set(throttle_key, True, THROTTLE_SECONDS)
 
     try:
-        resend.api_key = settings.RESEND_API_KEY
-        resend.Emails.send({
-            "from": settings.RESEND_FROM_EMAIL,
-            "to": [recipient],
-            "subject": f"[Azura ALERT] {subject}",
-            "html": f"<pre style='font-family:monospace'>{body}</pre>",
-        })
+        from .email import admin_url, send_staff_alert
+        target = link_obj or booking
+        send_staff_alert(
+            recipient, subject, body, [*rows, *(_booking_rows(booking) if booking else [])],
+            kind="admin_alert", booking=booking,
+            link=admin_url(target) if target else "", link_label="Open in admin",
+        )
     except Exception:
         logger.exception("Failed to deliver admin alert %s", key)

@@ -584,6 +584,10 @@ class StayType(models.Model):
     nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
     on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
     note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
+    # Stay only (client, 26 Oct 2026): Airbnbs without the event are sold on
+    # their own dates from their own units, so they never take an event room.
+    stay_only = models.BooleanField(default=False, help_text="Sold only as a stay without the event, never with Core.")
+    check_in = models.DateField(null=True, blank=True, help_text="First night. Blank = the tour start date.")
     # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
     bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
     amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")
@@ -669,15 +673,17 @@ class PackageDiscountRule(models.Model):
     applies only the single highest qualifying rule (max percent wins). This
     reproduces the doc's 5/7/10/12/15% ladder with no negative conditions.
 
-    Component model: GROUP_ACCOMMODATION rules take `percent` off the room
-    charges only (never Core) once the booking has `min_travellers`; the
-    highest qualifying rule wins (Change Request v4 §5)."""
+    Component model: GROUP_ACCOMMODATION rules take `percent` off the whole
+    price (Core, rooms, experiences, transfers) once the group has
+    `min_travellers`, linked bookings counted together; the highest
+    qualifying rule wins (client decision 26 Oct 2026, replacing v4 §5's
+    accommodation-only scope). The code name is kept for existing rows."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     package = models.ForeignKey(TravelPackage, on_delete=models.CASCADE, related_name="discount_rules")
     class Scope(models.TextChoices):
         CART = "cart", "Whole cart, highest rule wins (core + add-ons model)"
-        GROUP_ACCOMMODATION = "group_accommodation", "Group size, accommodation only (component model)"
+        GROUP_ACCOMMODATION = "group_accommodation", "Group size, whole price (component model)"
 
     name = models.CharField(max_length=200, help_text="e.g. 'Core + Mid-Tier Hotel + all extras'")
     scope = models.CharField(max_length=20, choices=Scope.choices, default=Scope.CART)

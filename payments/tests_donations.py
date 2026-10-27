@@ -51,6 +51,61 @@ class DonationTests(TestCase):
                                content_type="application/json")
         self.assertEqual(res.status_code, 400)
 
+    def test_checkout_donation_is_added_to_the_first_payment_and_split(self):
+        """$5,000 trip + 10% = $5,500 charged once: Azura keeps 5,000, the
+        Academy subaccount gets 500; the booking ledger only ever sees 5,000."""
+        from payments.models import Payment
+        from payments.services import apply_successful_payment
+        from payments.tests import make_booking
+        self.open_donations()
+        booking = make_booking(total="5000.00")
+        init = {"booking_id": str(booking.pk), "donation_percent": 10}
+        with mock.patch("payments.views.initialize_transaction",
+                        return_value={"access_code": "a", "authorization_url": "u"}) as gw:
+            self.assertEqual(self.client.post("/api/payments/initialize/", {**init, "donation_percent": 15},
+                                              content_type="application/json").status_code, 400)  # 5, 10 or 20
+            res = self.client.post("/api/payments/initialize/", init, content_type="application/json")
+        self.assertEqual(res.status_code, 200, res.content)
+        kw = gw.call_args.kwargs
+        self.assertEqual((kw["amount_kobo"], kw["subaccount"], kw["transaction_charge"]),
+                         (550000, "ACCT_academy", 500000))
+        payment = Payment.objects.get(paystack_reference=res.json()["reference"])
+        self.assertEqual(payment.amount, Decimal("5000.00"))
+        donation = Donation.objects.get(payment=payment)
+        self.assertEqual((donation.amount, donation.percent), (Decimal("500.00"), 10))
+
+        with mock.patch("payments.email.deliver", return_value=True) as deliver:
+            with self.captureOnCommitCallbacks(execute=True):
+                apply_successful_payment(payment, {"amount": 550000, "currency": "GHS", "status": "success"})
+        sent = {c.args[0]: c.args[3] for c in deliver.call_args_list}
+        self.assertIn("donation_receipt", sent)
+        self.assertIn("Academy donation (10%)", sent["confirmation"])
+        self.assertIn("GHS 5,500.00", sent["confirmation"])  # matches the card statement
+        booking.refresh_from_db()
+        donation.refresh_from_db()
+        self.assertEqual((booking.amount_paid, booking.total_amount), (Decimal("5000.00"), Decimal("5000.00")))
+        self.assertEqual(donation.status, Donation.Status.SUCCESS)
+
+        # Only on the first payment.
+        with mock.patch("payments.views.initialize_transaction", return_value={}):
+            res = self.client.post("/api/payments/initialize/", init, content_type="application/json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_checkout_donation_without_the_split_amount_is_not_applied(self):
+        from payments.models import Payment
+        from payments.services import apply_successful_payment
+        from payments.tests import make_booking
+        self.open_donations()
+        booking = make_booking(total="1000.00")
+        with mock.patch("payments.views.initialize_transaction", return_value={}):
+            res = self.client.post("/api/payments/initialize/", {"booking_id": str(booking.pk), "donation_percent": 5},
+                                   content_type="application/json")
+        payment = Payment.objects.get(paystack_reference=res.json()["reference"])
+        with mock.patch("payments.alerts.alert_admin"):
+            result = apply_successful_payment(payment, {"amount": 100000, "currency": "GHS"})  # donation missing
+        self.assertEqual(result.problems, ["gateway_mismatch"])
+        self.assertEqual(Donation.objects.get().status, Donation.Status.PENDING)
+
 
 class WhatsAppConfirmationTests(TestCase):
     """Opt-in WhatsApp template after a verified payment (Change Request v4 §8)."""

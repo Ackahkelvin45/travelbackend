@@ -6,6 +6,7 @@ import uuid
 # Refund/Installment Policy: hours a guest has to settle after the overdue notice.
 OVERDUE_CURE_HOURS = 72
 VIEW_TOKEN_SALT = "booking-view"
+INVITE_TOKEN_SALT = "guest-invite"
 
 
 class Booking(models.Model):
@@ -23,6 +24,7 @@ class Booking(models.Model):
         SINGLE = "single", "Single"
         COUPLE = "couple", "Couple"
         GROUP = "group", "Group"
+        STAY = "stay", "Stay only"  # an Airbnb without the event: no Core ticket
 
     class CancellationReason(models.TextChoices):
         CUSTOMER = "customer", "Customer requested"
@@ -207,6 +209,10 @@ class Booking(models.Model):
     # Installment Policy: an overdue balance gets ONE notice and a cure period.
     # Nothing cancels automatically — staff decide after the cure period.
     overdue_notice_sent_at = models.DateTimeField(null=True, blank=True)
+    linked_to = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="linked_bookings",
+        help_text="First booking of a group too big for one Airbnb; same lead, booked separately.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -229,9 +235,9 @@ class Booking(models.Model):
         # Legacy-tier fallback only. Option-based bookings must be priced by
         # the pricing service — guessing here would silently mischarge.
         if self.option_id is None:
-            if not self.unit_price:
+            if self.unit_price is None:  # 0 is a real price (stay only has no Core)
                 self.unit_price = self.package.price_shared
-            if not self.total_amount:
+            if self.total_amount is None:
                 self.total_amount = self.unit_price * self.num_guests
         elif self.unit_price is None or self.total_amount is None:
             raise ValueError(
@@ -525,6 +531,16 @@ class BookingTraveller(models.Model):
     dietary = models.TextField(blank=True)
     accessibility = models.TextField(blank=True)
     travel_info_submitted_at = models.DateTimeField(null=True, blank=True)
+    # Guest invites (client feedback Oct 2026): the lead invites each guest by
+    # email; the guest completes their details and can link their own account.
+    email = models.EmailField(blank=True, help_text="Where this guest's invite goes. Changing it revokes the old link.")
+    phone = models.CharField(max_length=30, blank=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="trip_places",
+        help_text="The guest's own account, linked from their invite. Sees only this guest's details.",
+    )
+    invited_at = models.DateTimeField(null=True, blank=True)
+    details_completed_at = models.DateTimeField(null=True, blank=True)
 
     # ── Event access (Change Request v4 §6): no badge or participation for an
     # unpaid ticket; staff record exceptions and forfeits, nothing is automatic.
@@ -541,6 +557,35 @@ class BookingTraveller(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def invite_status(self) -> str:
+        if self.details_completed_at:
+            return "completed"
+        return "pending" if self.invited_at else "not_invited"
+
+    @property
+    def invite_token(self) -> str:
+        """Signed invite link token, bound to the invited email: re-inviting
+        another address revokes the old link."""
+        from django.core import signing
+        return signing.dumps([str(self.pk), self.email.lower()], salt=INVITE_TOKEN_SALT)
+
+    @classmethod
+    def from_invite_token(cls, token: str):
+        from django.core import signing
+        try:
+            pk, email = signing.loads(token, salt=INVITE_TOKEN_SALT)
+        except (signing.BadSignature, ValueError, TypeError):
+            return None
+        t = cls.objects.select_related("booking__package", "unit").filter(pk=pk).first()
+        return t if t and t.email and t.email.lower() == email else None
+
+    @property
+    def ticket_code(self) -> str:
+        """Core ticket number shown to guests and staff, e.g. AZT-1A2B3C4D-T2."""
+        ids = list(self.booking.travellers.values_list("pk", flat=True))
+        return f"{self.booking.reference}-T{ids.index(self.pk) + 1}"
 
     class Meta:
         ordering = ["position", "created_at"]

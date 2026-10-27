@@ -110,6 +110,7 @@ def initialize_transaction(
     metadata: dict | None = None,
     channels: list[str] | None = None,
     subaccount: str | None = None,
+    transaction_charge: int | None = None,
 ) -> dict:
     """
     POST /transaction/initialize (hosted checkout / Inline popup).
@@ -128,11 +129,7 @@ def initialize_transaction(
     }
     if channels:
         payload["channels"] = channels
-    if subaccount:
-        # Split settlement: the subaccount (created with a 0% main-account
-        # share) receives the charge and bears the Paystack fee.
-        payload["subaccount"] = subaccount
-        payload["bearer"] = "subaccount"
+    payload.update(_split(subaccount, transaction_charge))
     if callback_url:
         payload["callback_url"] = callback_url
     if metadata:
@@ -140,6 +137,18 @@ def initialize_transaction(
 
     logger.info("Paystack initialize | payload=%s", payload)
     return _post("/transaction/initialize", payload)
+
+
+def _split(subaccount: str | None, transaction_charge: int | None) -> dict:
+    """Split settlement to a subaccount. Alone: the subaccount (created with a
+    0% main-account share) receives the whole charge and bears the fee. With
+    transaction_charge: the main account keeps that many subunits (a booking
+    payment) and bears the fee; the subaccount gets the rest (the donation)."""
+    if not subaccount:
+        return {}
+    if transaction_charge is None:
+        return {"subaccount": subaccount, "bearer": "subaccount"}
+    return {"subaccount": subaccount, "transaction_charge": transaction_charge, "bearer": "account"}
 
 
 def charge_mobile_money(
@@ -151,6 +160,8 @@ def charge_mobile_money(
     phone: str,
     provider: str,
     metadata: dict | None = None,
+    subaccount: str | None = None,
+    transaction_charge: int | None = None,
 ) -> dict:
     """
     POST /charge with a ``mobile_money`` object — the direct MoMo path.
@@ -166,6 +177,7 @@ def charge_mobile_money(
         "reference": reference,
         "currency": currency,
         "mobile_money": {"phone": normalize_msisdn(phone), "provider": provider},
+        **_split(subaccount, transaction_charge),
     }
     if metadata:
         payload["metadata"] = json.dumps(metadata)

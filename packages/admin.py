@@ -440,7 +440,8 @@ class StayTypeAdmin(ModelAdmin):
     list_filter = [("package", RelatedDropdownFilter)]
     readonly_fields = ["package", "code", "kind", "capacity", "price_per_night", "nights", "on_sale"]
     fieldsets = (
-        ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note")}),
+        ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note",
+                            "stay_only", "check_in")}),
         ("Shown on the Stays page", {"fields": ("bedding", "amenities", "breakfast", "location")}),
     )
     inlines = [StayImageInline]

@@ -11,7 +11,7 @@ without its acceptances never exists.
 import logging
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import models, transaction
 
 from .models import Booking, BookingTraveller, PolicyAcceptance, PolicyDocument
 from .pricing import (
@@ -182,6 +182,16 @@ class IllegalTransition(Exception):
 
 # ── Component bookings: room holds, checkout, traveller moves ────────────────
 
+def stay_dates(rooms):
+    """(check-in, check-out) of a stay-only room with its own dates, else None."""
+    from datetime import date, timedelta
+    room = next((r for r in rooms or [] if r.get("check_in")), None)
+    if room is None:
+        return None
+    start = date.fromisoformat(room["check_in"])
+    return start, start + timedelta(days=room["nights"])
+
+
 def create_hold(package, stay_codes: list, *, replace_token: str = ""):
     """Hold one unit per entry in ``stay_codes`` for OpsConfig.hold_minutes.
     Returns (token, held_until, units). Rows are claimed under a row lock so
@@ -256,6 +266,7 @@ def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
     pay_separately: bool = False, whatsapp_updates: bool = False, user=None, ip_address: str | None = None,
+    group_size: int = 0,
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
     BookingTraveller (= one Core ticket) per guest. The units stay held only
@@ -271,6 +282,7 @@ def create_component_booking(
     quote = compute_component_quote(
         package, mode=mode, travellers=travellers, rooms=rooms,
         payment_plan=payment_plan, check_availability=False,  # the hold is the availability
+        group_size=group_size,
     )
     assert_capacity(package, quote.num_guests)
     if mode == Booking.Mode.COUPLE and not all((t.get("name") or "").strip() for t in travellers):
@@ -319,7 +331,7 @@ def create_component_booking(
             package=package, option=None, mode=mode, marketing_consent=marketing_consent,
             photo_consent=any(d.type == PolicyDocument.Type.MEDIA for d in optional),
             payment_plan=quote.payment_plan, num_guests=quote.num_guests,
-            travel_date=package.available_from,
+            travel_date=(stay_dates(quote.rooms) or (package.available_from,))[0],
             unit_price=quote.core_price, total_amount=quote.total, currency=package.currency,
             option_snapshot={"component": True, "core_price_per_person": str(quote.core_price)},
             addons=quote.booking_addons(),
@@ -691,6 +703,8 @@ def available_component_addons(booking) -> list:
     travellers = list(booking.travellers.all())
     out = []
     for a in catalog.values():
+        if booking.mode == Booking.Mode.STAY and a.code not in transfer_codes:
+            continue  # event experiences need a Core ticket
         eligible = [
             str(t.id) for t in travellers
             if a.code not in t.experiences and (not a.requires_stay or t.unit_id)
@@ -874,3 +888,45 @@ def change_lead_contact(booking, *, kind: str, first_name: str, last_name: str, 
     }]
     booking.save(update_fields=fields)
     send_traveller_updated(booking, previous, kind)
+
+
+def invite_traveller(traveller, email: str) -> bool:
+    """Lead invites a guest by email. A new address revokes the previous link
+    and unlinks the previous account; resending to the same address keeps
+    both. The Core ticket row is reused, never duplicated. Raises
+    IllegalTransition."""
+    from django.utils import timezone
+    from payments.email import send_guest_invite
+
+    booking = traveller.booking
+    if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+        raise IllegalTransition("This booking can no longer be changed.")
+    if traveller.is_lead:
+        raise IllegalTransition("The lead guest is already on the booking.")
+    email = email.strip().lower()
+    fields = ["email", "invited_at"]
+    if email != (traveller.email or "").lower():
+        traveller.user = None
+        traveller.details_completed_at = None
+        fields += ["user", "details_completed_at"]
+    traveller.email, traveller.invited_at = email, timezone.now()
+    traveller.save(update_fields=fields)
+    return send_guest_invite(traveller)
+
+
+def linked_group(package, reference: str):
+    """The group a new booking would join: (first booking, guests already in
+    the group). Only bookings that have paid count toward the discount tier,
+    so unpaid placeholder bookings can't buy a bigger discount."""
+    first = Booking.objects.filter(
+        reference=(reference or "").strip().upper(), package=package,
+        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+    ).select_related("linked_to").first()
+    if first is None:
+        return None, 0
+    root = first.linked_to or first
+    members = Booking.objects.filter(
+        models.Q(pk=root.pk) | models.Q(linked_to=root),
+        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED], amount_paid__gt=0,
+    )
+    return first, sum(b.num_guests for b in members)

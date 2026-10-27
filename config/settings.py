@@ -290,6 +290,10 @@ if os.environ.get("DJANGO_ENV") == "production":
     SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
     SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
     REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = ("rest_framework.renderers.JSONRenderer",)
+    # Rate limits key on the client IP. Requests pass the host nginx and this
+    # stack's nginx, each appending to X-Forwarded-For, so the client is the
+    # 2nd entry from the end; anything earlier is client-supplied and ignored.
+    REST_FRAMEWORK["NUM_PROXIES"] = int(os.environ.get("NUM_PROXIES", "2"))
 
 ROOT_URLCONF = "config.urls"
 
@@ -441,6 +445,14 @@ WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
 WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
+
+# The test suite never reaches real inboxes or chat numbers, whatever .env
+# holds; tests that exercise delivery set these with override_settings.
+if len(sys.argv) > 1 and sys.argv[1] == "test":
+    RESEND_API_KEY = WHATSAPP_TOKEN = DEEPSEEK_API_KEY = ""
+
+# Where staff alerts link to (Django admin). Staging sets its own.
+BACKEND_URL = os.environ.get("BACKEND_URL", "https://azuratravelsbackend.cc")
 
 # Framework emails (admin password reset) go through Resend like every other email.
 EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"

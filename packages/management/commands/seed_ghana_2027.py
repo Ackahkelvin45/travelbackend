@@ -6,7 +6,9 @@ Airbnb as a fixed five-night block, Four Points as four paid nights,
 experiences per guest, airport transfers per vehicle.
 
 Anything the client has not confirmed is created switched OFF: the Four
-Points couple room and the 5% / 7% group accommodation discounts. The old
+Points couple room. The 5% / 7% group discounts (whole price) are ON (client,
+26 Oct 2026). Stay-only Airbnbs are their own stay types, 20 to 31 January,
+with their own units. The old
 farewell dinner add-on (now included in Core), hotel add-ons, Kozo and the
 whole-cart discount ladder are deactivated (kept for existing bookings).
 
@@ -45,7 +47,9 @@ PHOTOS = [
 # any as December offerings.
 RETIRED_SLUGS = ["ghana-flagship-tour-2027", "accra-city-tour", "akosombo-trip", "cape-coast-tour", "ada-tour", "aburi-tour"]
 
-# (code, name, kind, capacity, min_occupancy, $/night, nights, on_sale, units, note)
+STAY_ONLY_CHECK_IN = date(2027, 1, 20)  # 20 to 31 January (client, 26 Oct 2026)
+
+# (code, name, kind, capacity, min_occupancy, $/night, nights, on_sale, units, note[, stay-only])
 # ponytail: unit counts are placeholders until the client confirms inventory; edit in admin.
 STAYS = [
     ("airbnb_1bed", "One-bedroom Airbnb", StayType.Kind.AIRBNB, 2, 1, "220.00", 5, True, 6, ""),
@@ -54,21 +58,25 @@ STAYS = [
      "Rate provisional"),
     ("fourpoints_couple", "Four Points couple room", StayType.Kind.HOTEL, 2, 2, "380.00", 4, False, 5,
      "Two-adult rate awaiting confirmation"),
+    ("airbnb_1bed_stay", "One-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 2, 1, "220.00", 11, True, 6, "", True),
+    ("airbnb_2bed_stay", "Two-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 4, 1, "340.00", 11, True, 4, "", True),
 ]
 
-# (code, name, $, unit, adults_only, requires_stay, description)
+# (code, name, $, unit, adults_only, requires_stay, description[, guests per vehicle])
+# ponytail: transfers are priced per head (client, 24 Oct 2026) as a
+# one-guest "vehicle", which keeps them one-per-guest and stay-only.
 EXPERIENCES = [
     ("enzo_vip", "ENZO VIP", "220.00", PackageAddon.Unit.PER_PERSON, True, False,
      "Friday night at ENZO with Michael. Guests 18 and over."),
     ("waterfall_massage", "Waterfall Massage", "100.00", PackageAddon.Unit.PER_PERSON, False, False,
      "Saturday at Boti Falls."),
-    ("airport_pickup", "Airport pickup", "40.00", PackageAddon.Unit.PER_VEHICLE, False, True,
-     "Arrival transfer. Per vehicle, up to 2 guests. For guests in Azura accommodation."),
-    ("airport_return", "Airport pickup + drop-off", "70.00", PackageAddon.Unit.PER_VEHICLE, False, True,
-     "Arrival and departure transfers. Per vehicle, up to 2 guests. For guests in Azura accommodation."),
+    ("airport_pickup", "Airport pickup", "100.00", PackageAddon.Unit.PER_VEHICLE, False, True,
+     "Arrival transfer, per guest. For guests in Azura accommodation.", 1),
+    ("airport_return", "Airport pickup + drop-off", "200.00", PackageAddon.Unit.PER_VEHICLE, False, True,
+     "Arrival and departure transfers, per guest. For guests in Azura accommodation.", 1),
 ]
 
-# (name, percent, min travellers) — proposed, OFF until margin approval.
+# (name, percent, min travellers) — approved by the client, 26 Oct 2026.
 GROUP_DISCOUNTS = [("Group of 4–9", "5.00", 4), ("Group of 10+", "7.00", 10)]
 
 
@@ -104,10 +112,11 @@ FAQS = [
     ("Trip", "Will Michael Blackson be there the whole time?", "Michael's planned appearances are the Wednesday welcome dinner, the Thursday Academy visit and the Friday ENZO VIP night. Timings are subject to final confirmation, and a Jubilee House visit is possible but not confirmed."),
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
+    ("Stays", "Can I book just an Airbnb, without the event?", "Yes. Stay-only Airbnbs are for 20 to 31 January, eleven nights, at the same nightly rate. They don't include a Core ticket or event experiences, and you can add an airport transfer."),
     ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
-    ("Prices", "Are there any discounts?", "Not at the moment. The $899 Core ticket is never discounted."),
+    ("Prices", "Are there any discounts?", "Yes. Groups of 4 to 9 get 5% off the total price and groups of 10 or more get 7%. Bookings linked to the same lead count as one group, and the discount is shown before you pay. A booking keeps the discount it was paid at: if your group grows later, the new booking gets the higher rate and earlier ones stay as they are."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
-    ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $40 for an arrival pickup or $70 for pickup and drop-off, per vehicle of up to two guests."),
+    ("Prices", "Do you offer airport transfers?", "Yes, for guests staying in Azura accommodation: $100 per guest for an arrival pickup or $200 per guest for pickup and drop-off."),
     ("Payments", "How do deposits and payments work?", "Core tickets, experiences and transfers are paid in full when you book. For accommodation you can pay at least 50% to secure the room and the rest in instalments. Everything must be paid before the first activity on 6 January, and we remind you 30, 14 and 7 days before."),
     ("Payments", "Can each member of our group pay separately?", "Yes. One organiser can pay for everyone, or each guest can pay their own share under the same group booking."),
     ("Payments", "What happens if a balance isn't paid?", "Every guest's share must be paid before the first activity on 6 January. Guests with an unpaid balance at the start can't receive a badge or join activities, and unpaid bookings are forfeited under the booking terms. We never cancel early just because one instalment was missed."),
@@ -144,14 +153,13 @@ class Command(BaseCommand):
         pkg.final_payment_deadline = date(2027, 1, 5)  # settled before the first 6 January activity
         pkg.save()
 
-        for order, (code, name, kind, cap, min_occ, price, nights, on_sale, units, note) in enumerate(STAYS):
+        for order, (code, name, kind, cap, min_occ, price, nights, on_sale, units, note, *only) in enumerate(STAYS):
+            fields = dict(kind=kind, capacity=cap, min_occupancy=min_occ, price_per_night=Decimal(price),
+                          nights=nights, order=order, stay_only=bool(only),
+                          check_in=STAY_ONLY_CHECK_IN if only else None)
             st, _ = StayType.objects.update_or_create(
-                package=pkg, code=code,
-                defaults=dict(kind=kind, capacity=cap, min_occupancy=min_occ, price_per_night=Decimal(price),
-                              nights=nights, order=order),
-                create_defaults=dict(name=name, kind=kind, capacity=cap, min_occupancy=min_occ,
-                                     price_per_night=Decimal(price), nights=nights,
-                                     on_sale=on_sale, note=note, order=order),
+                package=pkg, code=code, defaults=fields,
+                create_defaults=dict(name=name, on_sale=on_sale, note=note, **fields),
             )
             if not st.units.exists():
                 RoomUnit.objects.bulk_create(
@@ -161,20 +169,27 @@ class Command(BaseCommand):
         experiences, _ = PackageAddonGroup.objects.get_or_create(
             package=pkg, name="Experiences", defaults=dict(selection=PackageAddonGroup.Selection.MULTI, order=2),
         )
-        for order, (code, name, price, unit, adults_only, requires_stay, desc) in enumerate(EXPERIENCES, start=1):
+        for order, (code, name, price, unit, adults_only, requires_stay, desc, *per) in enumerate(EXPERIENCES, start=1):
             fields = dict(price=Decimal(price), unit=unit, adults_only=adults_only, requires_stay=requires_stay,
-                          vehicle_capacity=2, group=experiences, order=order, is_active=True)
+                          vehicle_capacity=per[0] if per else 2, group=experiences, order=order, is_active=True,
+                          description=desc)
             PackageAddon.objects.update_or_create(
-                package=pkg, code=code, defaults=fields, create_defaults=dict(name=name, description=desc, **fields),
+                package=pkg, code=code, defaults=fields, create_defaults=dict(name=name, **fields),
             )
         retired = pkg.addons.exclude(code__in=[c for c, *_ in EXPERIENCES]).update(is_active=False)
 
         pkg.discount_rules.filter(scope=PackageDiscountRule.Scope.CART).update(is_active=False)
         for name, pct, min_n in GROUP_DISCOUNTS:
-            PackageDiscountRule.objects.get_or_create(
+            PackageDiscountRule.objects.update_or_create(
                 package=pkg, scope=PackageDiscountRule.Scope.GROUP_ACCOMMODATION, min_travellers=min_n,
-                defaults=dict(name=name, percent=Decimal(pct), is_active=False),
+                defaults=dict(is_active=True), create_defaults=dict(name=name, percent=Decimal(pct), is_active=True),
             )
+        # FAQs that state prices or booking rules follow the catalogue on every
+        # run; the rest of the copy only changes with --content.
+        for topic, q, a in FAQS:
+            if topic in ("Prices", "Stays"):
+                PackageFAQ.objects.update_or_create(package=pkg, question=q, defaults=dict(topic=topic, answer=a),
+                                                    create_defaults=dict(topic=topic, answer=a, order=FAQS.index((topic, q, a))))
 
         if options["content"]:
             self._content(pkg)
@@ -190,7 +205,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"{pkg.title}: component pricing, Core ${pkg.base_price_per_person}, "
             f"{pkg.stay_types.count()} stay types, {len(EXPERIENCES)} experiences and transfers, "
-            f"{retired} old add-ons retired. Couple room and group discounts are OFF until the client confirms."
+            f"{retired} old add-ons retired. The couple room is OFF until the client confirms."
         ))
 
     def _content(self, pkg):
@@ -205,7 +220,7 @@ class Command(BaseCommand):
                 package=pkg, day=day,
                 defaults=dict(title=date_label, description=text, activities=[], notes=f"Overnight: {night}"),
             )
-        for code, name, _, _, _, _, desc in EXPERIENCES:
+        for code, name, _, _, _, _, desc, *_ in EXPERIENCES:
             pkg.addons.filter(code=code).update(name=name, description=desc)
         for code, name, *_ in STAYS:
             pkg.stay_types.filter(code=code).update(name=name)

@@ -553,7 +553,7 @@ class FxServiceTests(TestCase):
         second = get_market_rate("USD", "GHS")  # served from cache
 
         self.assertEqual(first.rate, Decimal("15.500000"))
-        self.assertEqual(second.source, "cache")
+        self.assertEqual(second.source, "open.er-api.com (cached)")
         self.assertEqual(mock_get.call_count, 1)
         self.assertEqual(FxRate.objects.count(), 1)  # audit row appended once
 
@@ -595,7 +595,7 @@ class FxServiceTests(TestCase):
         package = usd_package(fx_margin_percent=Decimal("2.00"))
 
         rate, source = effective_charge_rate(package)
-        self.assertEqual(rate, Decimal("15.810000"))  # 15.5 × 1.02
+        self.assertEqual(rate, Decimal("15.8100"))  # 15.5 × 1.02
         self.assertEqual(source, "open.er-api.com")
 
     @patch("payments.fx.requests.get")
@@ -624,9 +624,9 @@ class FxServiceTests(TestCase):
 
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data["charged_amount"], "15810.00")   # 1000 × 15.5 × 1.02
-        self.assertEqual(r.data["exchange_rate"], "15.810000")
+        self.assertEqual(r.data["exchange_rate"], "15.8100")
         payment = booking.payments.get()
-        self.assertEqual(payment.exchange_rate, Decimal("15.810000"))
+        self.assertEqual(payment.exchange_rate, Decimal("15.8100"))
 
 
 
@@ -1029,9 +1029,9 @@ class OpsConfigTests(TestCase):
         config.save()
         django_cache.clear()
 
-        with patch("payments.alerts.resend") as mock_resend:
+        with patch("payments.email.deliver", return_value=True) as deliver:
             alert_admin("k1", "s", "b")
-            recipient = mock_resend.Emails.send.call_args[0][0]["to"]
+            recipient = [deliver.call_args.args[1]]
         self.assertEqual(recipient, ["admin-set@azura.com"])
 
     @override_settings(ADMIN_ALERT_EMAIL="env@azura.com", RESEND_API_KEY="rk_test")
@@ -1039,9 +1039,9 @@ class OpsConfigTests(TestCase):
         from payments.alerts import alert_admin
 
         django_cache.clear()
-        with patch("payments.alerts.resend") as mock_resend:
+        with patch("payments.email.deliver", return_value=True) as deliver:
             alert_admin("k2", "s", "b")
-            recipient = mock_resend.Emails.send.call_args[0][0]["to"]
+            recipient = [deliver.call_args.args[1]]
         self.assertEqual(recipient, ["env@azura.com"])
 
 
