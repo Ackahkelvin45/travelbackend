@@ -5,6 +5,7 @@ from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework.views import APIView
 
 from .emails import (
@@ -43,10 +44,18 @@ class PasswordStrengthView(APIView):
         return Response({"rules": rules, "valid": all(p for _, p in results)})
 
 
+class LoginView(TokenObtainPairView):
+    """POST /api/auth/token/ — throttled per IP against password guessing."""
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth"
+
+
 class RegisterView(generics.CreateAPIView):
     """POST /api/auth/register/ — create an account and email a verification link."""
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]  # each signup sends an email
+    throttle_scope = "auth"
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

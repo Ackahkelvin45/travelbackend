@@ -1,5 +1,6 @@
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
 from .models import NewsletterSubscriber
 from .serializers import NewsletterSubscriberSerializer
@@ -10,6 +11,8 @@ class NewsletterSubscribeView(generics.CreateAPIView):
     POST /api/newsletter/subscribe/
     Subscribe an email to package announcements.
     """
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "leads"
 
     serializer_class = NewsletterSubscriberSerializer
     permission_classes = [permissions.AllowAny]

@@ -87,6 +87,8 @@ _booking_detail_response = openapi.Schema(
 
 class CreateBookingView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]  # each call writes a booking
+    throttle_scope = "holds"
 
     @swagger_auto_schema(
         tags=["Bookings"],
@@ -155,6 +157,8 @@ class CheckoutView(APIView):
     """Option-based booking creation (hotel × occupancy flagship flow)."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]  # each call writes a booking
+    throttle_scope = "holds"
 
     @swagger_auto_schema(
         tags=["Bookings"],
@@ -262,6 +266,8 @@ class ConfigurableCheckoutView(APIView):
     quote (same guard as the option flow)."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]  # each call writes a booking
+    throttle_scope = "holds"
 
     @swagger_auto_schema(
         tags=["Bookings"],
@@ -1055,6 +1061,9 @@ class GuestInviteClaimView(APIView):
             return Response({"detail": "This invite link isn't valid any more."}, status=status.HTTP_404_NOT_FOUND)
         if request.user.email.lower() != t.email.lower():
             return Response({"detail": f"Sign in with {t.email} to link this ticket to your account."},
+                            status=status.HTTP_403_FORBIDDEN)
+        if not request.user.email_verified:  # else anyone holding the link could register the address
+            return Response({"detail": "Please verify your email address first, then link this ticket."},
                             status=status.HTTP_403_FORBIDDEN)
         if t.user_id and t.user_id != request.user.id:
             return Response({"detail": "This ticket is linked to another account."}, status=status.HTTP_400_BAD_REQUEST)

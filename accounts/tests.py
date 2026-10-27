@@ -9,6 +9,10 @@ from accounts.models import User
 
 @override_settings(FRONTEND_URL="https://azuratravels.live", RESEND_API_KEY="re_test_key")
 class SignupVerificationTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # login/signup throttles count per IP across tests
+
     def _register(self):
         return APIClient().post("/api/auth/register/", {
             "email": "newuser@test.com", "first_name": "New", "last_name": "User",
@@ -142,3 +146,14 @@ class TokenRevocationTests(TestCase):
         self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": self.refresh}, format="json").status_code, 401)
         self.assertEqual(self.c.post("/api/auth/token/blacklist/", {"refresh": new}, format="json").status_code, 200)
         self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": new}, format="json").status_code, 401)
+
+
+class LoginThrottleTests(TestCase):
+    def test_login_is_rate_limited(self):
+        from django.core.cache import cache
+        cache.clear()
+        codes = [self.client.post("/api/auth/token/", {"email": "x@example.com", "password": "wrong"}).status_code
+                 for _ in range(11)]
+        cache.clear()
+        self.assertEqual(codes[-1], 429)
+        self.assertNotIn(429, codes[:10])

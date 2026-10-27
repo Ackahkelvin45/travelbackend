@@ -84,6 +84,9 @@ class GuestInviteTests(TestCase):
         kojo = User.objects.create_user(email="Kojo@Example.com", password="x-Strong-pass-1", first_name="Kojo", last_name="O")
         api = APIClient()
         api.force_authenticate(kojo)
+        self.assertEqual(api.post(f"/api/bookings/invite/{token}/claim/").status_code, 403)  # email not verified yet
+        User.objects.filter(pk=kojo.pk).update(email_verified=True)
+        kojo.refresh_from_db()
         self.assertEqual(api.post(f"/api/bookings/invite/{token}/claim/").status_code, 200)
         trips = api.get("/api/bookings/trips/").json()
         self.assertEqual(len(trips), 1)
@@ -131,8 +134,10 @@ class LinkedBookingTests(TestCase):
 
         body = {"package_id": str(self.pkg.id), "mode": "couple", "travellers": [{}, {}],
                 "rooms": [{"stay_type": "airbnb_1bed", "occupants": [0, 1]}], "linked_to": ref}
-        preview = self.client.post("/api/bookings/quote/", body, content_type="application/json").json()
-        self.assertEqual((preview["discount_total"], preview["total"]), ("144.90", "2753.10"))  # 5% of 2,898
+        preview = lambda: self.client.post("/api/bookings/quote/", body, content_type="application/json").json()
+        self.assertEqual(preview()["discount_total"], "0.00")  # an unpaid booking doesn't count toward the group
+        Booking.objects.filter(reference=ref).update(amount_paid=2898)
+        self.assertEqual((preview()["discount_total"], preview()["total"]), ("144.90", "2753.10"))  # 5% of 2,898
 
         second = self.book("ama@example.com", ref)
         self.assertEqual(second.status_code, 201, second.content)

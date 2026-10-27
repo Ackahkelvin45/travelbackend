@@ -916,7 +916,8 @@ def invite_traveller(traveller, email: str) -> bool:
 
 def linked_group(package, reference: str):
     """The group a new booking would join: (first booking, guests already in
-    the group). Counts live bookings only: cancelled and expired ones don't."""
+    the group). Only bookings that have paid count toward the discount tier,
+    so unpaid placeholder bookings can't buy a bigger discount."""
     first = Booking.objects.filter(
         reference=(reference or "").strip().upper(), package=package,
         status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
@@ -926,6 +927,6 @@ def linked_group(package, reference: str):
     root = first.linked_to or first
     members = Booking.objects.filter(
         models.Q(pk=root.pk) | models.Q(linked_to=root),
-        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED],
+        status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED], amount_paid__gt=0,
     )
-    return first, sum(b.num_guests for b in members if not b.is_expired)
+    return first, sum(b.num_guests for b in members)
