@@ -290,6 +290,10 @@ if os.environ.get("DJANGO_ENV") == "production":
     SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
     SECURE_REDIRECT_EXEMPT = [r"^api/health/$"]
     REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"] = ("rest_framework.renderers.JSONRenderer",)
+    # Rate limits key on the client IP. Requests pass the host nginx and this
+    # stack's nginx, each appending to X-Forwarded-For, so the client is the
+    # 2nd entry from the end; anything earlier is client-supplied and ignored.
+    REST_FRAMEWORK["NUM_PROXIES"] = int(os.environ.get("NUM_PROXIES", "2"))
 
 ROOT_URLCONF = "config.urls"
 

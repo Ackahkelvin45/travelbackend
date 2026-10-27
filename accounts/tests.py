@@ -127,25 +127,39 @@ class SignupVerificationTests(TestCase):
 
 
 class TokenRevocationTests(TestCase):
-    """Refresh tokens rotate (the used one is revoked) and logout revokes."""
+    """The refresh token only travels in an httpOnly cookie; it rotates (the
+    used one is revoked) and logout revokes it and clears the cookie."""
 
     def setUp(self):
         from django.core.cache import cache
         cache.clear()
         User.objects.create_user(email="rev@test.com", password="Str0ng!pass", email_verified=True)
         self.c = APIClient()
-        self.refresh = self.c.post("/api/auth/token/", {"email": "rev@test.com", "password": "Str0ng!pass"},
-                                   format="json").data["refresh"]
+        r = self.c.post("/api/auth/token/", {"email": "rev@test.com", "password": "Str0ng!pass"}, format="json")
+        self.assertIn("access", r.data)
+        self.assertNotIn("refresh", r.data)  # never readable by page scripts
+        cookie = r.cookies["azura_refresh"]
+        self.assertTrue(cookie["httponly"])
+        self.assertEqual((cookie["path"], cookie["samesite"]), ("/api/auth/", "Strict"))
+        self.refresh = cookie.value
 
     def test_refresh_rotates_and_logout_revokes(self):
-        r = self.c.post("/api/auth/token/refresh/", {"refresh": self.refresh}, format="json")
+        r = self.c.post("/api/auth/token/refresh/")
         self.assertEqual(r.status_code, 200)
-        new = r.data["refresh"]
+        self.assertIn("access", r.data)
+        new = r.cookies["azura_refresh"].value
         self.assertNotEqual(new, self.refresh)
         # The used refresh token is dead: a stolen copy can't be replayed.
-        self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": self.refresh}, format="json").status_code, 401)
-        self.assertEqual(self.c.post("/api/auth/token/blacklist/", {"refresh": new}, format="json").status_code, 200)
-        self.assertEqual(self.c.post("/api/auth/token/refresh/", {"refresh": new}, format="json").status_code, 401)
+        stale = APIClient()
+        stale.cookies["azura_refresh"] = self.refresh
+        self.assertEqual(stale.post("/api/auth/token/refresh/").status_code, 401)
+        # A token in the body is ignored: only the cookie counts.
+        self.assertEqual(APIClient().post("/api/auth/token/refresh/", {"refresh": new}, format="json").status_code, 401)
+        r = self.c.post("/api/auth/token/blacklist/")
+        self.assertEqual((r.status_code, r.cookies["azura_refresh"].value), (200, ""))
+        again = APIClient()
+        again.cookies["azura_refresh"] = new
+        self.assertEqual(again.post("/api/auth/token/refresh/").status_code, 401)
 
 
 class LoginThrottleTests(TestCase):
@@ -157,3 +171,16 @@ class LoginThrottleTests(TestCase):
         cache.clear()
         self.assertEqual(codes[-1], 429)
         self.assertNotIn(429, codes[:10])
+
+    def test_a_forged_forwarded_ip_does_not_reset_the_limit(self):
+        """Behind the two nginx hops (production NUM_PROXIES=2), only the
+        address the host nginx saw counts; client-supplied entries don't."""
+        from django.conf import settings
+        from django.core.cache import cache
+        cache.clear()
+        with self.settings(REST_FRAMEWORK={**settings.REST_FRAMEWORK, "NUM_PROXIES": 2}):
+            codes = [self.client.post("/api/auth/token/", {"email": "x@example.com", "password": "wrong"},
+                                      HTTP_X_FORWARDED_FOR=f"10.9.9.{i}, 203.0.113.7, 172.18.0.1").status_code
+                     for i in range(11)]
+        cache.clear()
+        self.assertEqual(codes[-1], 429)

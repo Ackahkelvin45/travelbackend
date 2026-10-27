@@ -5,7 +5,9 @@ from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.views import APIView
 
 from .emails import (
@@ -44,10 +46,65 @@ class PasswordStrengthView(APIView):
         return Response({"rules": rules, "valid": all(p for _, p in results)})
 
 
+# The refresh token lives only in an httpOnly cookie on the site's own domain
+# (the browser reaches /api/auth/ through azuratravels.live), so page scripts
+# can never read it; the short-lived access token stays in memory.
+REFRESH_COOKIE = "azura_refresh"
+
+
+def _with_refresh_cookie(response, refresh):
+    response.set_cookie(
+        REFRESH_COOKIE, refresh, httponly=True, secure=not settings.DEBUG, samesite="Strict", path="/api/auth/",
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+    )
+    return response
+
+
 class LoginView(TokenObtainPairView):
-    """POST /api/auth/token/ — throttled per IP against password guessing."""
+    """POST /api/auth/token/ — {access} in the body, refresh in the cookie.
+    Throttled per IP against password guessing."""
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "auth"
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            _with_refresh_cookie(response, response.data.pop("refresh"))
+        return response
+
+
+class CookieRefreshView(TokenRefreshView):
+    """POST /api/auth/token/refresh/ — a new access token from the cookie;
+    the rotated refresh token replaces the cookie."""
+
+    def post(self, request, *args, **kwargs):
+        token = request.COOKIES.get(REFRESH_COOKIE)
+        if not token:
+            raise InvalidToken("Not signed in.")
+        serializer = self.get_serializer(data={"refresh": token})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            raise InvalidToken(e.args[0])
+        data = dict(serializer.validated_data)
+        refresh = data.pop("refresh", None)
+        response = Response(data)
+        return _with_refresh_cookie(response, refresh) if refresh else response
+
+
+class LogoutView(APIView):
+    """POST /api/auth/token/blacklist/ — revoke the cookie's refresh token and clear it."""
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        try:
+            RefreshToken(request.COOKIES.get(REFRESH_COOKIE, "")).blacklist()
+        except TokenError:
+            pass  # already expired or revoked: signing out still succeeds
+        response = Response(status=status.HTTP_200_OK)
+        response.delete_cookie(REFRESH_COOKIE, path="/api/auth/", samesite="Strict")
+        return response
 
 
 class RegisterView(generics.CreateAPIView):
