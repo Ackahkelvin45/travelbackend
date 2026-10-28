@@ -526,17 +526,18 @@ def draft_catalog(package) -> Catalog:
     return _catalog(catalog_snapshot(package), None)
 
 
-# The client's acceptance totals (Change Request v4 §5 and §9), before any
+# The client's acceptance totals (Change Request v4 §5 and §9, Core $999 from
+# 27 Oct 2026), before any
 # group discount — (label, mode, travellers' experiences, rooms as
 # (stay code, occupants), expected, compare) where compare is "total" or
 # "extras" (total minus Core).
 ACCEPTANCE_SCENARIOS = [
-    ("Couple · Core only", "couple", [[], []], [], "1798.00", "total"),
-    ("Couple · one-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_1bed", [0, 1])], "2898.00", "total"),
-    ("Couple · two-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_2bed", [0, 1])], "3498.00", "total"),
-    ("Couple · Four Points couple room, 4 nights", "couple", [[], []], [("fourpoints_couple", [0, 1])], "3318.00", "total"),
-    ("Single · one-bedroom Airbnb", "single", [[]], [("airbnb_1bed", [0])], "1999.00", "total"),
-    ("Single · Four Points standard room", "single", [[]], [("fourpoints_standard", [0])], "2219.00", "total"),
+    ("Couple · Core only", "couple", [[], []], [], "1998.00", "total"),
+    ("Couple · one-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_1bed", [0, 1])], "3098.00", "total"),
+    ("Couple · two-bedroom Airbnb, 5 nights", "couple", [[], []], [("airbnb_2bed", [0, 1])], "3698.00", "total"),
+    ("Couple · Four Points couple room, 4 nights", "couple", [[], []], [("fourpoints_couple", [0, 1])], "3518.00", "total"),
+    ("Single · one-bedroom Airbnb", "single", [[]], [("airbnb_1bed", [0])], "2099.00", "total"),
+    ("Single · Four Points standard room", "single", [[]], [("fourpoints_standard", [0])], "2319.00", "total"),
     ("Two-person ENZO VIP", "couple", [["enzo_vip"], ["enzo_vip"]], [], "440.00", "extras"),
 ]
 
