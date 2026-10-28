@@ -1,6 +1,6 @@
 """
 Switch the flagship Ghana Experience to the Change Request v4 catalogue
-(component pricing, 14 Oct 2026): Core $899 per traveller paid in full,
+(component pricing, 14 Oct 2026): Core $999 per traveller (client, 27 Oct 2026) paid in full,
 Wed 6 – Mon 11 Jan 2027 (Crown Forest night on the 7th included in Core),
 Airbnb as a fixed five-night block, Four Points as four paid nights,
 experiences per guest, airport transfers per vehicle.
@@ -108,7 +108,7 @@ PROGRAMME = [
 ]
 FAQS = [
     ("Trip", "What are the trip dates?", "Wednesday 6 to Monday 11 January 2027. Thursday 7 January is the Crown Forest night, included in Core. Monday is checkout and departure."),
-    ("Trip", "What does the $899 Core ticket include?", "The welcome and farewell dinners, Cape Coast Castle, Lemon Beach lunch, the Academy visit, the Crown Forest night with breakfast and activities, the Boti Falls excursion and the Accra city tour with lunch. Drinks at Bella Afrik are self-pay."),
+    ("Trip", "What does the Core ticket include?", "The welcome and farewell dinners, Cape Coast Castle, Lemon Beach lunch, the Academy visit, the Crown Forest night with breakfast and activities, the Boti Falls excursion and the Accra city tour with lunch. Drinks at Bella Afrik are self-pay."),
     ("Trip", "Will Michael Blackson be there the whole time?", "Michael's planned appearances are the Wednesday welcome dinner, the Thursday Academy visit and the Friday ENZO VIP night. Timings are subject to final confirmation, and a Jubilee House visit is possible but not confirmed."),
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
@@ -144,7 +144,7 @@ class Command(BaseCommand):
             return
 
         pkg.pricing_model = TravelPackage.PricingModel.COMPONENT
-        pkg.base_price_per_person = Decimal("899.00")
+        pkg.base_price_per_person = Decimal("999.00")
         pkg.available_from = date(2027, 1, 6)
         pkg.available_to = date(2027, 1, 11)
         pkg.duration_days = 6
@@ -186,6 +186,7 @@ class Command(BaseCommand):
             )
         # FAQs that state prices or booking rules follow the catalogue on every
         # run; the rest of the copy only changes with --content.
+        pkg.faqs.filter(question="What does the $899 Core ticket include?").update(question="What does the Core ticket include?")
         for topic, q, a in FAQS:
             if topic in ("Prices", "Stays"):
                 PackageFAQ.objects.update_or_create(package=pkg, question=q, defaults=dict(topic=topic, answer=a),

@@ -750,6 +750,8 @@ class ComponentPricingTests(TestCase):
 
     def test_acceptance_totals(self):
         from .pricing import acceptance_checks
+        self.pkg.base_price_per_person = Decimal("999.00")  # the client's current Core price
+        self.pkg.save()
         results = acceptance_checks(self.pkg)
         self.assertEqual(len(results), 7)
         for r in results:
