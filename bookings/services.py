@@ -192,11 +192,53 @@ def stay_dates(rooms):
     return start, start + timedelta(days=room["nights"])
 
 
-def create_hold(package, stay_codes: list, *, replace_token: str = ""):
+def _dated_overlap(st, check_in, check_out):
+    """Stay-only rows for this type whose nights overlap [check_in, check_out)."""
+    from packages.models import RoomUnit
+    return RoomUnit.objects.filter(stay_type=st, check_in__isnull=False, check_in__lt=check_out, check_out__gt=check_in)
+
+
+def _taken(rows, now):
+    """Rows still claiming their nights: sold, or held (checkout or unpaid window)."""
+    from django.db.models import Q
+    return rows.filter(Q(booking__isnull=False, held_until__isnull=True) | Q(held_until__gt=now))
+
+
+def free_dated_labels(st, check_in, check_out, *, hold_token="", now=None) -> list:
+    """Labels of the stay-only units free for these nights."""
+    from django.utils import timezone
+
+    from packages.models import RoomUnit
+    taken = _taken(_dated_overlap(st, check_in, check_out), now or timezone.now())
+    if hold_token:
+        taken = taken.exclude(hold_token=hold_token, booking__isnull=True)
+    busy = set(taken.values_list("label", flat=True))
+    units = RoomUnit.objects.filter(stay_type=st, check_in__isnull=True, blocked=False).values_list("label", flat=True)
+    return [label for label in units if label not in busy]
+
+
+def claim_dated(st, check_in, check_out, count, *, token, held_until, now):
+    """Hold `count` stay-only units for these nights: a new row per stay, with
+    the unit's label. Locks the type's units, so two checkouts never take the
+    same nights. A lapsed unpaid claim on those nights is let go (its booking
+    is then flagged if it pays: payments.services `room_lost`)."""
+    from packages.models import RoomUnit
+    list(RoomUnit.objects.select_for_update().filter(stay_type=st, check_in__isnull=True))
+    labels = free_dated_labels(st, check_in, check_out, now=now)[:count]
+    if len(labels) < count:
+        raise QuoteError(f"Sorry — {st.name} is fully booked for those dates.")
+    stale = _dated_overlap(st, check_in, check_out).filter(label__in=labels)
+    stale.exclude(pk__in=_taken(stale, now)).update(booking=None, hold_token="", held_until=None)
+    return [RoomUnit.objects.create(stay_type=st, label=label, check_in=check_in, check_out=check_out,
+                                    hold_token=token, held_until=held_until) for label in labels]
+
+
+def create_hold(package, stay_codes: list, *, replace_token: str = "", check_in=None, check_out=None):
     """Hold one unit per entry in ``stay_codes`` for OpsConfig.hold_minutes.
     Returns (token, held_until, units). Rows are claimed under a row lock so
     two checkouts can never hold the same unit; a previous hold of the same
-    checkout (``replace_token``) is released first."""
+    checkout (``replace_token``) is released first. Stay-only units are held
+    for the guest's nights (check_in, check_out)."""
     import secrets
     from collections import Counter
     from datetime import timedelta
@@ -216,6 +258,12 @@ def create_hold(package, stay_codes: list, *, replace_token: str = ""):
         if replace_token:
             release_hold(replace_token)
         for code, count in Counter(stay_codes).items():
+            st = package.stay_types.filter(code=code, on_sale=True).first()
+            if st and st.stay_only:
+                from .pricing import stay_window_dates
+                ci, co, _ = stay_window_dates(st, check_in, check_out)
+                claimed += claim_dated(st, ci, co, count, token=token, held_until=held_until, now=now)
+                continue
             units = list(
                 RoomUnit.objects.available(now)
                 .select_for_update(skip_locked=True, of=("self",))
@@ -319,7 +367,9 @@ def create_component_booking(
         by_code = {}
         for unit in held:
             by_code.setdefault(unit.stay_type.code, []).append(unit)
-        if sorted(r["stay_type"] for r in quote.rooms) != sorted(u.stay_type.code for u in held):
+        dates = lambda code, ci, co: (code, str(ci) if co else "", str(co) if co else "")
+        if sorted(dates(r["stay_type"], r["check_in"], r.get("check_out")) for r in quote.rooms) \
+                != sorted(dates(u.stay_type.code, u.check_in, u.check_out) for u in held):
             raise QuoteError("Your room hold has expired or changed — please choose your rooms again.")
 
         lead_name = f"{contact['first_name']} {contact['last_name']}".strip()
@@ -418,6 +468,8 @@ def reassign_unit(unit, target):
         unit, target = (RoomUnit.objects.select_for_update().get(pk=u.pk) for u in (unit, target))
         if not unit.booking_id:
             raise IllegalTransition(f"{unit.label} has no booking to move.")
+        if unit.check_in:  # ponytail: dated stays can't move yet; cancel and rebook
+            raise IllegalTransition("Stay-only bookings are dated: cancel and rebook to move one.")
         if target.stay_type_id != unit.stay_type_id:
             raise IllegalTransition("Move to a unit of the same stay type (prices are per stay type).")
         if not RoomUnit.objects.available().filter(pk=target.pk).exists():
@@ -703,8 +755,6 @@ def available_component_addons(booking) -> list:
     travellers = list(booking.travellers.all())
     out = []
     for a in catalog.values():
-        if booking.mode == Booking.Mode.STAY and a.code not in transfer_codes:
-            continue  # event experiences need a Core ticket
         eligible = [
             str(t.id) for t in travellers
             if a.code not in t.experiences and (not a.requires_stay or t.unit_id)

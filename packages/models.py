@@ -581,13 +581,17 @@ class StayType(models.Model):
         default=1, help_text="e.g. 2 for a couple room that must be shared.",
     )
     price_per_night = models.DecimalField(max_digits=12, decimal_places=2, help_text="Per unit, package currency.")
-    nights = models.PositiveSmallIntegerField(default=4, help_text="Fixed package block; no single-night sales.")
+    nights = models.PositiveSmallIntegerField(
+        default=4, help_text="Fixed package block; no single-night sales. Stay-only: the minimum nights.",
+    )
     on_sale = models.BooleanField(default=False, help_text="Off until the rate and inclusions are confirmed.")
     note = models.CharField(max_length=300, blank=True, help_text="Customer-facing status, e.g. 'Rate awaiting confirmation'.")
-    # Stay only (client, 26 Oct 2026): Airbnbs without the event are sold on
-    # their own dates from their own units, so they never take an event room.
+    # Stay only (client, 26 and 28 Oct 2026): Airbnbs without the event, from
+    # their own units, on dates the guest chooses inside a window.
     stay_only = models.BooleanField(default=False, help_text="Sold only as a stay without the event, never with Core.")
-    check_in = models.DateField(null=True, blank=True, help_text="First night. Blank = the tour start date.")
+    check_in = models.DateField(null=True, blank=True,
+                                help_text="Stay-only: the earliest check-in. Blank = the tour start date.")
+    check_out_by = models.DateField(null=True, blank=True, help_text="Stay-only: the latest check-out.")
     # Shown on the Stays page (Change Request v4 §1). Display only: not part of the price list.
     bedding = models.CharField(max_length=200, blank=True, help_text="e.g. 'One king bed' or '2 queen beds'.")
     amenities = models.TextField(blank=True, help_text="One per line, e.g. Wi-Fi, air conditioning, pool.")
@@ -609,7 +613,7 @@ class StayType(models.Model):
         from django.utils import timezone
         now = now or timezone.now()
         free = RoomUnit.objects.available(now).filter(stay_type=self).count()
-        if not hold_token:
+        if not hold_token or self.stay_only:  # stay-only units are always free here; dates decide
             return free
         return free + self.units.filter(hold_token=hold_token, booking__isnull=True, held_until__gt=now).count()
 
@@ -636,7 +640,8 @@ class RoomUnitQuerySet(models.QuerySet):
         hold needs no sweeper to stop blocking a sale."""
         from django.utils import timezone
         now = now or timezone.now()
-        return self.filter(blocked=False).filter(
+        # Dated rows are stay-only bookings of a unit, never a unit to sell.
+        return self.filter(blocked=False, check_in__isnull=True).filter(
             models.Q(booking__isnull=True) | models.Q(held_until__isnull=False)
         ).exclude(held_until__gt=now)
 
@@ -657,6 +662,10 @@ class RoomUnit(models.Model):
     )
     hold_token = models.CharField(max_length=40, blank=True, db_index=True)
     held_until = models.DateTimeField(null=True, blank=True)
+    # Stay-only Airbnbs are booked by date: the unit itself stays undated and
+    # each stay is its own row with the same label (bookings.services.claim_dated).
+    check_in = models.DateField(null=True, blank=True)
+    check_out = models.DateField(null=True, blank=True)
 
     objects = RoomUnitQuerySet.as_manager()
 

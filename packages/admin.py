@@ -441,7 +441,7 @@ class StayTypeAdmin(ModelAdmin):
     readonly_fields = ["package", "code", "kind", "capacity", "price_per_night", "nights", "on_sale"]
     fieldsets = (
         ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note",
-                            "stay_only", "check_in")}),
+                            "stay_only", "check_in", "check_out_by")}),
         ("Shown on the Stays page", {"fields": ("bedding", "amenities", "breakfast", "location")}),
     )
     inlines = [StayImageInline]
@@ -504,15 +504,16 @@ def room_state(unit):
 class RoomUnitAdmin(ModelAdmin):
     """Room allocation (canvas: DjRooms). Units are allocated for the whole
     Accra stay (6–7 and 8–11 Jan); the included Crown Forest night is not a unit."""
-    list_display = ["label", "stay_name", "capacity", "state_badge", "booking_link", "occupants", "hold_expires"]
+    list_display = ["label", "stay_name", "capacity", "state_badge", "booking_link", "occupants", "hold_expires",
+                    "check_in", "check_out"]
     list_filter = [("stay_type", RelatedDropdownFilter), RoomStateFilter]
     list_filter_submit = True
     search_fields = ["label", "booking__reference", "occupants__full_name"]
     list_select_related = ["stay_type", "booking"]
     actions = ["release_holds", "block_units", "unblock_units", "move_allocation"]
     list_before_template = "admin/packages/room_summary.html"
-    fields = ["stay_type", "label", "blocked", "booking", "held_until"]
-    readonly_fields = ["booking", "held_until"]
+    fields = ["stay_type", "label", "blocked", "booking", "held_until", "check_in", "check_out"]
+    readonly_fields = ["booking", "held_until", "check_in", "check_out"]
     ordering = ["stay_type__package", "stay_type__order", "label"]
 
     def changelist_view(self, request, extra_context=None):

@@ -174,6 +174,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     travellers = serializers.SerializerMethodField()
     donation = serializers.SerializerMethodField()
     linked_bookings = serializers.SerializerMethodField()
+    check_out = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -199,6 +200,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             "package_id",
             "num_guests",
             "travel_date",
+            "check_out",
             "unit_price",
             "total_amount",
             "amount_paid",
@@ -229,6 +231,12 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     def _latest_payment(self, obj):
         payments = list(obj.payments.all())
         return payments[0] if payments else None  # Payment.Meta orders -created_at
+
+    def get_check_out(self, obj):
+        """A stay-only Airbnb's check-out; None for the event (its dates are the tour's)."""
+        from .services import stay_dates
+        dates = stay_dates((obj.quote_snapshot or {}).get("rooms"))
+        return dates[1] if dates else None
 
     def get_payment_status(self, obj):
         payment = self._latest_payment(obj)
@@ -416,6 +424,8 @@ class _TravellerInput(serializers.Serializer):
 class _RoomInput(serializers.Serializer):
     stay_type = serializers.CharField(max_length=60)
     occupants = serializers.ListField(child=serializers.IntegerField(min_value=0), max_length=10)
+    check_in = serializers.DateField(required=False, help_text="Stay-only Airbnb: the guest's dates.")
+    check_out = serializers.DateField(required=False)
 
 
 class ComponentQuoteSerializer(serializers.Serializer):
@@ -440,6 +450,8 @@ class ComponentQuoteSerializer(serializers.Serializer):
 class HoldSerializer(serializers.Serializer):
     package_id = serializers.UUIDField()
     stay_types = serializers.ListField(child=serializers.CharField(max_length=60), min_length=1, max_length=10)
+    check_in = serializers.DateField(required=False, help_text="Stay-only Airbnb: the guest's dates.")
+    check_out = serializers.DateField(required=False)
     replace_token = serializers.CharField(max_length=40, required=False, allow_blank=True)
 
 

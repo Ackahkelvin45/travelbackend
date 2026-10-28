@@ -468,7 +468,8 @@ def catalog_snapshot(package, *, everything_on_sale: bool = False) -> dict:
             {"code": s.code, "name": s.name, "kind": s.kind, "capacity": s.capacity, "min_occupancy": s.min_occupancy,
              "price_per_night": str(s.price_per_night), "nights": s.nights,
              "on_sale": s.on_sale or everything_on_sale, "note": s.note,
-             "stay_only": s.stay_only, "check_in": s.check_in.isoformat() if s.check_in else None}
+             "stay_only": s.stay_only, "check_in": s.check_in.isoformat() if s.check_in else None,
+             "check_out_by": s.check_out_by.isoformat() if s.check_out_by else None}
             for s in package.stay_types.order_by("kind", "order")  # Airbnb first, then hotel
         ],
         "experiences": [
@@ -497,7 +498,7 @@ class Catalog:
     group_discounts: list
 
 
-_STAY_DEFAULTS = {"stay_only": False, "check_in": None}
+_STAY_DEFAULTS = {"stay_only": False, "check_in": None, "check_out_by": None}
 _EXPERIENCE_DEFAULTS = {"unit": "per_person", "adults_only": False, "requires_stay": False, "vehicle_capacity": 2}
 
 
@@ -560,6 +561,34 @@ def acceptance_checks(package) -> list:
         except QuoteError as exc:
             results.append({"label": label, "expected": expected, "got": str(exc), "ok": False})
     return results
+
+
+def stay_window_dates(st, check_in, check_out):
+    """A stay-only Airbnb's chosen (check-in, check-out, nights) as ISO
+    strings and a count, inside the stay type's window and minimum nights."""
+    from datetime import date
+    as_date = lambda v: v if isinstance(v, date) else date.fromisoformat(str(v))
+    try:
+        start, end = as_date(check_in), as_date(check_out)
+    except (TypeError, ValueError):
+        raise QuoteError(f"Choose your check-in and check-out dates for {st.name}.")
+    first = as_date(st.check_in) if st.check_in else None  # a catalogue string, or the model's date
+    last = as_date(st.check_out_by) if st.check_out_by else None
+    if (first and start < first) or (last and end > last):
+        window = f" from {first.day} {first:%B}" if first else ""
+        window += f" to {last.day} {last:%B %Y}" if last else ""
+        raise QuoteError(f"{st.name} can be booked{window}.")
+    nights = (end - start).days
+    if nights < max(st.nights, 1):
+        raise QuoteError(f"{st.name} is at least {max(st.nights, 1)} night{'s' if st.nights > 1 else ''}.")
+    return start.isoformat(), end.isoformat(), nights
+
+
+def units_left_on(package, code: str, check_in: str, check_out: str, hold_token: str = "") -> int:
+    """Stay-only units free for these nights (this checkout's own hold doesn't count against it)."""
+    from bookings.services import free_dated_labels
+    st = package.stay_types.filter(code=code).first()
+    return len(free_dated_labels(st, check_in, check_out, hold_token=hold_token)) if st else 0
 
 
 def units_left(package, code: str, hold_token: str = "") -> int:
@@ -693,7 +722,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         list index is the traveller's id; each one is exactly one Core ticket.
         Experiences include at most one airport transfer (a per-vehicle item).
     rooms: [{"stay_type": code, "occupants": [traveller indexes]}] — each
-        entry is one unit, charged once whatever its occupancy.
+        entry is one unit, charged once whatever its occupancy. A stay-only
+        room also carries the guest's "check_in" and "check_out".
 
     Installment plan (Change Request v4 §6): Core, experiences and transfers
     are due in full now; each room needs accommodation_deposit_percent now.
@@ -722,8 +752,9 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
         raise QuoteError("Single is for one traveller — choose Couple or Group.")
     if mode == Booking.Mode.COUPLE and n != 2:
         raise QuoteError("A couple booking is for exactly two travellers.")
-    # Stay only (client, 24 and 26 Oct 2026): an Airbnb without the event, from
-    # its own stay-only units and dates, so no Core ticket and no event experiences.
+    # Stay only (client, 24, 26 and 28 Oct 2026): an Airbnb without the event,
+    # from its own units, for the nights the guest chooses; no Core ticket, but
+    # at least one experience (ENZO VIP or another) on the booking.
     stay_only = mode == Booking.Mode.STAY
     if stay_only and not rooms:
         raise QuoteError("Choose an Airbnb for your stay.")
@@ -769,8 +800,11 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             raise QuoteError(f"{st.name} sleeps at most {st.capacity}.")
         if len(occupants) < max(st.min_occupancy, 1):
             raise QuoteError(f"{st.name} needs {max(st.min_occupancy, 1)} guests.")
-        requested[st.code] = requested.get(st.code, 0) + 1
-        charge = quantize(st.price_per_night * st.nights)
+        nights, check_in, check_out = st.nights, st.check_in, None
+        if st.stay_only:
+            check_in, check_out, nights = stay_window_dates(st, room.get("check_in"), room.get("check_out"))
+        requested[(st.code, check_in, check_out)] = requested.get((st.code, check_in, check_out), 0) + 1
+        charge = quantize(st.price_per_night * nights)
         discount = quantize(charge * quote.discount_percent / Decimal("100"))
         deposit = quantize((charge - discount) * deposit_pct / Decimal("100"))
         for i, part, dep in zip(occupants, split_evenly(charge - discount, len(occupants)),
@@ -780,7 +814,8 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             shares[i]["room_deposit"] += dep
         quote.rooms.append({
             "stay_type": st.code, "name": st.name, "occupants": occupants,
-            "price_per_night": str(quantize(st.price_per_night)), "nights": st.nights, "check_in": st.check_in,
+            "price_per_night": str(quantize(st.price_per_night)), "nights": nights, "check_in": check_in,
+            "check_out": check_out,
             "charge": str(charge), "discount": str(discount), "deposit": str(deposit),
         })
         quote.rooms_total += charge
@@ -796,8 +831,9 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
                          "everyone, or make separate bookings.")
 
     if check_availability:
-        for code, count in requested.items():
-            left = units_left(package, code, hold_token)
+        for (code, check_in, check_out), count in requested.items():
+            left = (units_left_on(package, code, check_in, check_out, hold_token) if check_out
+                    else units_left(package, code, hold_token))
             if count > left:
                 raise QuoteError(
                     f"{stay_types[code].name} is sold out." if left == 0
@@ -814,8 +850,6 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             raise QuoteError(f"Unknown experience(s): {', '.join(unknown)}.")
         chosen = [addons[c] for c in codes]
         for a in chosen:
-            if stay_only and a.unit != "per_vehicle":
-                raise QuoteError(f"{a.name} is part of the event and needs a Core ticket.")
             if a.adults_only and t.get("adult") is not True:
                 raise QuoteError(f"{a.name} is for guests aged 18 or over — please confirm {label(i)} is 18+.")
             if a.requires_stay and i not in room_of:
@@ -839,6 +873,9 @@ def compute_component_quote(package, *, mode, travellers, rooms, payment_plan, c
             "experiences_subtotal": str(subtotal),
         })
         quote.experiences_total += subtotal
+    if stay_only and not quote.experiences_total:
+        options = " or ".join(a.name for a in addons.values() if a.unit != "per_vehicle") or "an experience"
+        raise QuoteError(f"A stay-only booking includes at least one experience: add {options}.")
 
     # ponytail: guests on one transfer share vehicles in booking order; ops
     # regroup by flight time. Per-flight vehicle planning if that matters.
@@ -906,6 +943,7 @@ def build_component_matrix(package, request=None) -> dict:
                 "min_occupancy": s.min_occupancy, "price_per_night": str(quantize(s.price_per_night)),
                 "nights": s.nights, "unit_total": str(quantize(s.price_per_night * s.nights)),
                 "on_sale": s.on_sale, "note": s.note, "stay_only": s.stay_only, "check_in": s.check_in,
+                "check_out_by": s.check_out_by,
                 "units_available": units_left(package, s.code) if s.on_sale else 0,
                 **shown.get(s.code, {"bedding": "", "breakfast": "", "location": "", "amenities": [], "images": [],
                                      "units_total": 0}),

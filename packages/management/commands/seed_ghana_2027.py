@@ -5,10 +5,10 @@ Wed 6 – Mon 11 Jan 2027 (Crown Forest night on the 7th included in Core),
 Airbnb as a fixed five-night block, Four Points as four paid nights,
 experiences per guest, airport transfers per vehicle.
 
-Anything the client has not confirmed is created switched OFF: the Four
-Points couple room. The 5% / 7% group discounts (whole price) are ON (client,
-26 Oct 2026). Stay-only Airbnbs are their own stay types, 20 to 31 January,
-with their own units. The old
+The Four Points couple room is on sale (client, 28 Oct 2026). The 5% / 7%
+group discounts (whole price) are ON (client, 26 Oct 2026). Stay-only Airbnbs
+are their own stay types with their own units, booked for any nights in
+January 2027, with at least one experience (client, 28 Oct 2026). The old
 farewell dinner add-on (now included in Core), hotel add-ons, Kozo and the
 whole-cart discount ladder are deactivated (kept for existing bookings).
 
@@ -47,7 +47,9 @@ PHOTOS = [
 # any as December offerings.
 RETIRED_SLUGS = ["ghana-flagship-tour-2027", "accra-city-tour", "akosombo-trip", "cape-coast-tour", "ada-tour", "aburi-tour"]
 
-STAY_ONLY_CHECK_IN = date(2027, 1, 20)  # 20 to 31 January (client, 26 Oct 2026)
+# Stay only: any nights the guest chooses in January 2027, at least one
+# (client, 28 Oct 2026, replacing the fixed 20 to 31 January block).
+STAY_ONLY_WINDOW = (date(2027, 1, 1), date(2027, 1, 31))
 
 # (code, name, kind, capacity, min_occupancy, $/night, nights, on_sale, units, note[, stay-only])
 # ponytail: unit counts are placeholders until the client confirms inventory; edit in admin.
@@ -56,10 +58,9 @@ STAYS = [
     ("airbnb_2bed", "Two-bedroom Airbnb", StayType.Kind.AIRBNB, 4, 1, "340.00", 5, True, 4, ""),
     ("fourpoints_standard", "Four Points standard room", StayType.Kind.HOTEL, 1, 1, "330.00", 4, True, 10,
      "Rate provisional"),
-    ("fourpoints_couple", "Four Points couple room", StayType.Kind.HOTEL, 2, 2, "380.00", 4, False, 5,
-     "Two-adult rate awaiting confirmation"),
-    ("airbnb_1bed_stay", "One-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 2, 1, "220.00", 11, True, 6, "", True),
-    ("airbnb_2bed_stay", "Two-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 4, 1, "340.00", 11, True, 4, "", True),
+    ("fourpoints_couple", "Four Points couple room", StayType.Kind.HOTEL, 2, 2, "380.00", 4, True, 5, ""),
+    ("airbnb_1bed_stay", "One-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 2, 1, "220.00", 1, True, 6, "", True),
+    ("airbnb_2bed_stay", "Two-bedroom Airbnb, stay only", StayType.Kind.AIRBNB, 4, 1, "340.00", 1, True, 4, "", True),
 ]
 
 # (code, name, $, unit, adults_only, requires_stay, description[, guests per vehicle])
@@ -112,7 +113,7 @@ FAQS = [
     ("Trip", "Will Michael Blackson be there the whole time?", "Michael's planned appearances are the Wednesday welcome dinner, the Thursday Academy visit and the Friday ENZO VIP night. Timings are subject to final confirmation, and a Jubilee House visit is possible but not confirmed."),
     ("Stays", "Do I have to book accommodation with you?", "No. You can arrange your own. If you add an Airbnb or a Four Points room, every guest in it needs their own Core ticket."),
     ("Stays", "How is accommodation priced?", "Per unit, for a fixed package. Airbnb is five nights, 6 to 11 January, and stays yours on the Crown Forest night for your luggage. Four Points is four paid nights, 6 and 8 to 10 January. A one-bedroom Airbnb sleeps up to 2 and a two-bedroom up to 4, and the unit is charged once however many guests share it."),
-    ("Stays", "Can I book just an Airbnb, without the event?", "Yes. Stay-only Airbnbs are for 20 to 31 January, eleven nights, at the same nightly rate. They don't include a Core ticket or event experiences, and you can add an airport transfer."),
+    ("Stays", "Can I book just an Airbnb, without the event?", "Yes. Choose your own check-in and check-out dates in January 2027, at the same nightly rate. A stay-only booking has no Core ticket, but includes at least one experience, such as the ENZO VIP night or the Waterfall Massage. You can add an airport transfer."),
     ("Stays", "Is breakfast included?", "Breakfast at Crown Forest on 7 January is included in Core. Four Points breakfast is still being confirmed with the hotel."),
     ("Prices", "Are there any discounts?", "Yes. Groups of 4 to 9 get 5% off the total price and groups of 10 or more get 7%. Bookings linked to the same lead count as one group, and the discount is shown before you pay. A booking keeps the discount it was paid at: if your group grows later, the new booking gets the higher rate and earlier ones stay as they are."),
     ("Prices", "Can my partner and I choose different experiences?", "Yes. Experiences are chosen per guest. ENZO VIP is for guests aged 18 and over."),
@@ -156,7 +157,8 @@ class Command(BaseCommand):
         for order, (code, name, kind, cap, min_occ, price, nights, on_sale, units, note, *only) in enumerate(STAYS):
             fields = dict(kind=kind, capacity=cap, min_occupancy=min_occ, price_per_night=Decimal(price),
                           nights=nights, order=order, stay_only=bool(only),
-                          check_in=STAY_ONLY_CHECK_IN if only else None)
+                          check_in=STAY_ONLY_WINDOW[0] if only else None,
+                          check_out_by=STAY_ONLY_WINDOW[1] if only else None)
             st, _ = StayType.objects.update_or_create(
                 package=pkg, code=code, defaults=fields,
                 create_defaults=dict(name=name, on_sale=on_sale, note=note, **fields),
@@ -206,7 +208,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f"{pkg.title}: component pricing, Core ${pkg.base_price_per_person}, "
             f"{pkg.stay_types.count()} stay types, {len(EXPERIENCES)} experiences and transfers, "
-            f"{retired} old add-ons retired. The couple room is OFF until the client confirms."
+            f"{retired} old add-ons retired."
         ))
 
     def _content(self, pkg):
