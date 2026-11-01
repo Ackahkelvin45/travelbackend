@@ -657,6 +657,7 @@ class HoldView(APIView):
         try:
             token, held_until, units = create_hold(
                 package, data["stay_types"], replace_token=data.get("replace_token", ""),
+                check_in=data.get("check_in"), check_out=data.get("check_out"),
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
