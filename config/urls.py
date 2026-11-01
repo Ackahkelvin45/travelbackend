@@ -6,7 +6,7 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path, include
 
-from bookings.reports import reports_view
+from bookings.reports import chat_analytics_view, reports_view
 from bookings import whatsapp
 from bookings.views import AssistantView, LeadCreateView, LeadUnsubscribeView, SiteSettingsView
 from payments.donations import DonationCreateView, DonationVerifyView
@@ -34,6 +34,7 @@ schema_view = get_schema_view(
 
 urlpatterns = [
     path("admin/reports/", admin.site.admin_view(reports_view), name="admin-reports"),
+    path("admin/chat-analytics/", admin.site.admin_view(chat_analytics_view), name="admin-chat-analytics"),
     # Staff password reset from the admin sign-in screen
     path("admin/password_reset/", auth_views.PasswordResetView.as_view(), name="admin_password_reset"),
     path("admin/password_reset/done/", auth_views.PasswordResetDoneView.as_view(), name="password_reset_done"),

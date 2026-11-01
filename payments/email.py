@@ -143,6 +143,10 @@ def _trip_dates(start, end=None) -> str:
     return f"{start:%a} {start.day} {start:%B} – {end:%a} {end.day} {end:%B %Y}"
 
 
+def _label(text: str) -> str:
+    return f'<p style="margin:0 0 8px;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:1px;">{text}</p>'
+
+
 def _build_html(booking, payment) -> str:
     """Canvas: Emails · 'You're booked!'. Also the written booking contract
     (Terms Part A): what was booked and the exact policy versions accepted."""
@@ -187,6 +191,16 @@ def _build_html(booking, payment) -> str:
         for a in booking.policy_acceptances.select_related("document")
     )
 
+    # Tickets and the programme: only with Core, so not for a stay-only booking.
+    tickets = itinerary = ""
+    if booking.mode and booking.mode != "stay":
+        tickets = _label("Your tickets") + _summary(
+            [(html.escape(t.full_name or f"Guest {i + 1}"), html.escape(t.ticket_code), "") for i, t in enumerate(booking.travellers.all())])
+        days = package.itineraries.order_by("day")
+        itinerary = (_label("Your itinerary") + _summary(
+            [(html.escape(d.title), html.escape(d.description[:140]) + ("…" if len(d.description) > 140 else ""), "") for d in days]
+        )) if days else ""
+
     # Privacy Policy: special requests can hold dietary/medical details, so
     # they are never echoed into email — the team confirms them privately.
     requests_note = _p("We've noted your special requests. Our team will confirm the arrangements with you directly.") \
@@ -197,8 +211,8 @@ def _build_html(booking, payment) -> str:
         + _p(f"Your booking for {dates} is confirmed for {guests} traveller{'s' if guests != 1 else ''}.")
         + _summary(summary)
         + cta
-        + '<p style="margin:0 0 8px;font-size:11px;color:#6B7280;text-transform:uppercase;letter-spacing:1px;">What you booked</p>'
-        + _summary(lines)
+        + _label("What you booked") + _summary(lines)
+        + tickets + itinerary
         + (_p(f"You accepted: {policy_links}. These versions form your booking contract.", small=True) if policy_links else "")
         + requests_note
     )
@@ -215,6 +229,27 @@ def send_booking_confirmation(booking, payment) -> None:
         return
     deliver("confirmation", booking.email, f"You're booked! {booking.reference} · {booking.package.title}",
             html_body, booking=booking)
+
+
+def send_coordinator_assigned(booking) -> None:
+    """Groups of 10+ get a named coordinator (Change Request v4 §8): tell the
+    organiser who it is. The guest's confirmation goes out before anyone is assigned."""
+    from bookings.services import linked_group
+    coordinator = booking.coordinator
+    if coordinator is None or max(booking.num_guests, linked_group(booking.package, booking.reference)[1]) < 10:
+        return
+    ops = _ops()
+    name = html.escape(coordinator.full_name.strip() or coordinator.first_name or "Your coordinator")
+    contact = [("Coordinator", f"<strong>{name}</strong>", ""), ("Booking reference", html.escape(booking.reference), "")]
+    if ops.whatsapp_number:
+        contact.append(("WhatsApp", html.escape(ops.whatsapp_number), ""))
+    if ops.contact_email:
+        contact.append(("Email", html.escape(ops.contact_email), ""))
+    body = (_h(f"Meet your coordinator, {html.escape(booking.first_name)}")
+            + _p(f"{name} is your group's dedicated coordinator for the {html.escape(booking.package.title)}.")
+            + _summary(contact) + _button(_url("/dashboard"), "Open my booking"))
+    deliver("coordinator_assigned", booking.email, f"Your coordinator – {booking.reference} | Azura Travels",
+            _shell("Your coordinator", body), booking=booking)
 
 
 def build_claim_token(booking) -> str:

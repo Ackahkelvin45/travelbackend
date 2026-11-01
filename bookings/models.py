@@ -190,6 +190,7 @@ class Booking(models.Model):
         related_name="coordinated_bookings", limit_choices_to={"is_staff": True},
     )
     coordinator_assigned_at = models.DateTimeField(null=True, blank=True)
+    referral_code = models.CharField(max_length=40, blank=True, help_text="From a ?ref= link. Attribution only, no discount.")
     lead_contacted_at = models.DateTimeField(null=True, blank=True)
     contact_alerted_at = models.DateTimeField(null=True, blank=True, help_text="Staff alerted the 24-hour contact was missed.")
     checklist = models.JSONField(default=dict, blank=True, help_text='e.g. {"travel_info": true, "flights": false}')
@@ -649,10 +650,26 @@ class Lead(models.Model):
 
 
 class ChatThread(models.Model):
-    """A WhatsApp conversation with the assistant. ``messages`` is the
-    text-only transcript the bot replays; ``bot_paused`` means staff own it."""
+    """A conversation with the assistant, on WhatsApp or the website chat.
+    ``messages`` is the text-only transcript; ``bot_paused`` means staff own a
+    WhatsApp thread. A website thread is a record only: there's no way to reply."""
 
-    wa_id = models.CharField(max_length=30, unique=True, help_text="Guest's WhatsApp number, digits only.")
+    class Channel(models.TextChoices):
+        WHATSAPP = "whatsapp", "WhatsApp"
+        SITE = "site", "Website chat"
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        FOLLOWING_UP = "following_up", "Following up"
+        CLOSED = "closed", "Closed"
+
+    class Intent(models.TextChoices):
+        HOT = "hot", "Ready to buy"
+        WARM = "warm", "Interested"
+        BROWSING = "browsing", "Browsing"
+
+    channel = models.CharField(max_length=10, choices=Channel.choices, default=Channel.WHATSAPP)
+    wa_id = models.CharField(max_length=30, unique=True, help_text="Guest's WhatsApp number, digits only; a website chat's session id.")
     name = models.CharField(max_length=200, blank=True, help_text="WhatsApp profile name.")
     messages = models.JSONField(default=list, blank=True)
     seen_ids = models.JSONField(default=list, blank=True, help_text="Recent Meta message ids, so retries aren't answered twice.")
@@ -661,13 +678,30 @@ class ChatThread(models.Model):
     )
     lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name="chat_threads")
     last_inbound_at = models.DateTimeField(null=True, blank=True)
+    # Follow-up by staff.
+    status = models.CharField(max_length=15, choices=Status.choices, default=Status.OPEN)
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="chat_threads", limit_choices_to={"is_staff": True},
+    )
+    staff_note = models.TextField(blank=True)
+    needs_person = models.BooleanField(default=False, help_text="The bot couldn't help and passed the guest to the team.")
+    # Worked out from what the guest wrote (bookings.chat_insights).
+    topics = models.JSONField(default=list, blank=True)
+    intent = models.CharField(max_length=10, choices=Intent.choices, default=Intent.BROWSING)
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=30, blank=True)
+    referral_code = models.CharField(max_length=40, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-last_inbound_at"]
+        verbose_name = "conversation"
 
     def __str__(self):
+        if self.channel == self.Channel.SITE:
+            return f"Website chat {self.created_at.day} {self.created_at:%b %Y, %H:%M}"
         return f"{self.name or 'WhatsApp'} +{self.wa_id}"
 
 

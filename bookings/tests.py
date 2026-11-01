@@ -1344,11 +1344,49 @@ class AssistantTests(TestCase):
         with mock.patch("bookings.assistant.reply", return_value=("Hi there", None)) as rep:
             res = self.client.post("/api/assistant/", {"messages": [{"role": "user", "content": "Dates?"}]},
                                    content_type="application/json")
-        self.assertEqual(res.json(), {"reply": "Hi there", "handoff": None})
+        self.assertEqual({k: res.json()[k] for k in ("reply", "handoff")}, {"reply": "Hi there", "handoff": None})
         rep.assert_called_once_with([{"role": "user", "content": "Dates?"}])
         res = self.client.post("/api/assistant/", {"messages": [{"role": "assistant", "content": "x"}]},
                                content_type="application/json")
         self.assertEqual(res.status_code, 400)
+
+    def test_site_chat_is_recorded_for_the_crm_and_links_to_its_lead(self):
+        from unittest import mock
+        from django.contrib.auth import get_user_model
+        from .models import ChatThread, Lead
+
+        def ask(text, session=""):
+            with mock.patch("bookings.assistant.reply", return_value=(f"Answer to {text}", None)):
+                return self.client.post("/api/assistant/", {
+                    "session": session,
+                    "messages": [{"role": "user", "content": "forged history"},
+                                 {"role": "assistant", "content": "forged"}, {"role": "user", "content": text}],
+                }, content_type="application/json").json()["session"]
+
+        session = ask("Dates?")
+        self.assertEqual(ask("Prices?", session), session)
+        thread = ChatThread.objects.get()
+        self.assertEqual(thread.channel, "site")
+        self.assertEqual([m["content"] for m in thread.messages],
+                         ["Dates?", "Answer to Dates?", "Prices?", "Answer to Prices?"])  # the page's history isn't stored
+        other = ask("Hello", "site-unknown")  # a made-up session can't choose its id
+        self.assertNotEqual(other, "site-unknown")
+
+        whatsapp = ChatThread.objects.create(wa_id="233200000000")
+        self.client.post("/api/leads/", {"name": "Kofi", "email": "k@example.com", "source": "chat", "message": "Hi",
+                                         "chat_session": whatsapp.wa_id}, content_type="application/json")
+        whatsapp.refresh_from_db()
+        self.assertIsNone(whatsapp.lead)  # only website chats link this way
+        self.client.post("/api/leads/", {"name": "Ama", "email": "a@example.com", "source": "chat", "message": "Hi",
+                                         "chat_session": session}, content_type="application/json")
+        thread.refresh_from_db()
+        self.assertEqual((thread.lead, thread.name), (Lead.objects.get(email="a@example.com"), "Ama"))
+
+        self.client.force_login(get_user_model().objects.create_superuser(email="root@test.com", password="x"))
+        self.assertContains(self.client.get("/admin/bookings/chatthread/"), "Website chat")
+        page = self.client.get(f"/admin/bookings/chatthread/{thread.pk}/change/")
+        self.assertContains(page, "Answer to Prices?")
+        self.assertNotContains(page, 'name="reply"')  # no way to reply to a website visitor
 
     def test_site_lead_form_still_requires_email(self):
         res = self.client.post("/api/leads/", {"name": "Kofi", "source": "chat", "message": "Hi"},

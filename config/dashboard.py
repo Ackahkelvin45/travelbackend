@@ -108,6 +108,11 @@ def dashboard_callback(request, context):
     from payments.models import Payment
     from reviews.models import Review
 
+    # Totals and revenue are for staff who can see payments.
+    if not request.user.has_perm("payments.view_payment"):
+        context.update({"limited_dashboard": True, "greeting_name": request.user.first_name or "team"})
+        return context
+
     today = timezone.now().date()
     now = timezone.now()
     thirty_days_ago = today - timedelta(days=29)
@@ -492,6 +497,12 @@ def badge_bookings(request):
 def badge_leads(request):
     from bookings.models import Lead
     n = Lead.objects.filter(replied_at__isnull=True, reply_due_at__lt=timezone.now()).exclude(stage__in=["won", "lost"]).count()
+    return str(n) if n else ""
+
+
+def badge_chats(request):
+    from bookings.models import ChatThread
+    n = ChatThread.objects.filter(needs_person=True, status=ChatThread.Status.OPEN).count()
     return str(n) if n else ""
 
 

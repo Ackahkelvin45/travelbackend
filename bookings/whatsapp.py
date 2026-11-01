@@ -25,6 +25,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .assistant import reply
+from .chat_insights import note_guest_message, transcript
 from .models import ChatThread, Lead
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ def record_inbound(msg, name):
         thread.messages = (thread.messages + [{"role": "user", "content": text}])[-KEEP_MESSAGES:]
         thread.name = name or thread.name
         thread.last_inbound_at = timezone.now()
+        note_guest_message(thread)
         thread.save()
     return None if thread.bot_paused else thread.id
 
@@ -126,7 +128,7 @@ def respond(thread_id):
         thread = ChatThread.objects.select_for_update().get(id=thread_id)
         thread.messages = (thread.messages + [{"role": "assistant", "content": text}])[-KEEP_MESSAGES:]
         if handoff is not None:
-            thread.bot_paused = True
+            thread.bot_paused = thread.needs_person = True
             thread.lead = hand_off(thread, handoff)
         thread.save()
 
@@ -134,10 +136,12 @@ def respond(thread_id):
 def hand_off(thread, summary):
     from payments.models import OpsConfig
 
-    transcript = "\n".join(f"{'Guest' if m['role'] == 'user' else 'Azura'}: {m['content']}"
-                           for m in thread.messages[-CONTEXT_MESSAGES:])
+    text = f"{summary}\n\n{transcript(thread, CONTEXT_MESSAGES)}"
+    if thread.lead_id:  # captured earlier in the chat
+        Lead.objects.filter(pk=thread.lead_id).update(message=text)
+        return thread.lead
     return Lead.objects.create(
         name=thread.name or f"+{thread.wa_id}", phone=f"+{thread.wa_id}", source=Lead.Source.WHATSAPP,
-        message=f"{summary}\n\n{transcript}",
+        message=text,
         reply_due_at=timezone.now() + timedelta(hours=OpsConfig.get().lead_reply_hours),
     )
