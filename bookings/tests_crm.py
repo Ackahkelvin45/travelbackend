@@ -117,3 +117,81 @@ class CrmFollowupTests(TestCase):
             self.assertEqual(site_label(), "LOCAL")
         with override_settings(FRONTEND_URL="https://azuratravels.live"):
             self.assertEqual(site_label(), "")
+
+
+class CrmDocumentGapTests(TestCase):
+    """Change Request v4 §8: referral tracking, opt-out, abandoned checkouts
+    after a chat, the confirmation's contents and the 10+ coordinator."""
+
+    setUpTestData = pricing_tests.ComponentPricingTests.__dict__["setUpTestData"]
+    checkout = pricing_tests.ComponentPricingTests.checkout
+
+    def setUp(self):
+        OpsConfig.objects.update_or_create(pk=OpsConfig.get().pk, defaults={"reminder_schedule_hours": [24]})
+
+    def booked(self, **kwargs):
+        from .services import create_hold
+        token, _, _ = create_hold(self.pkg, ["airbnb_1bed"])
+        return self.checkout(token, **kwargs)
+
+    def age(self, booking):
+        Booking.objects.filter(pk=booking.pk).update(created_at=timezone.now() - timedelta(hours=2))
+
+    def test_referral_code_follows_the_chat_and_the_paid_booking_into_the_report(self):
+        from .assistant import record_site_chat
+        from .reports import build_report
+        record_site_chat("", "I'm ama@example.com", "Thanks", None, "MICHAEL")
+        self.assertEqual(Lead.objects.get().referral_code, "MICHAEL")
+        booking = self.booked(referral_code="MICHAEL")
+        Booking.objects.filter(pk=booking.pk).update(status=Booking.Status.CONFIRMED)
+        today = timezone.localdate()
+        self.assertEqual(build_report(today, today)["referrals"],
+                         [{"code": "MICHAEL", "leads": 1, "quotes": 0, "bookings": 1}])
+
+    def test_unsubscribing_covers_the_person_not_one_lead(self):
+        from .crm import checkout_leads, unsubscribe, unsubscribe_url
+        first = Lead.objects.create(name="Ama", email="ama@example.com", marketing_consent=True, quote={"total": "1"})
+        other = Lead.objects.create(name="Ama", email="AMA@example.com", marketing_consent=True, stage=Lead.Stage.LOST)
+        booking = self.booked(marketing_consent=True)
+        unsubscribe(unsubscribe_url(first).split("token=")[1])
+        other.refresh_from_db()
+        booking.refresh_from_db()
+        self.assertFalse(other.marketing_consent or booking.marketing_consent)
+        Lead.objects.all().delete()
+        self.age(booking)
+        checkout_leads()
+        self.assertFalse(Lead.objects.get().marketing_consent)  # a later lead doesn't bring consent back
+
+    def test_a_chat_lead_gets_the_abandoned_checkout_instead_of_blocking_it(self):
+        from .crm import checkout_leads
+        chat = Lead.objects.create(name="Ama", email="ama@example.com", source=Lead.Source.CHAT)
+        booking = self.booked(marketing_consent=True)
+        self.age(booking)
+        self.assertEqual(checkout_leads(), 1)
+        chat.refresh_from_db()
+        self.assertEqual(Lead.objects.count(), 1)
+        self.assertEqual((chat.quote["abandoned_booking"], chat.marketing_consent, chat.stage),
+                         (booking.reference, True, Lead.Stage.QUOTED))
+        self.assertEqual(checkout_leads(), 0)
+
+    def test_confirmation_has_tickets_and_itinerary(self):
+        from packages.models import Itinerary
+        from payments.email import _build_html
+        Itinerary.objects.create(package=self.pkg, day=1, title="Wed 6 Jan", description="Welcome dinner", activities=[])
+        booking = self.booked()
+        html_body = _build_html(booking, None)
+        self.assertIn(f"{booking.reference}-T1", html_body)
+        self.assertIn("Welcome dinner", html_body)
+
+    def test_a_coordinator_is_announced_to_groups_of_ten_or_more_only(self):
+        from django.contrib.auth import get_user_model
+        from payments.email import send_coordinator_assigned
+        booking = self.booked()
+        booking.coordinator = get_user_model().objects.create_user(email="c@test.com", first_name="Esi", last_name="Mensah")
+        with mock.patch("payments.email.deliver") as deliver:
+            send_coordinator_assigned(booking)
+            deliver.assert_not_called()
+            booking.num_guests = 10
+            send_coordinator_assigned(booking)
+        self.assertIn("Esi Mensah", deliver.call_args.args[3])
+

@@ -184,3 +184,37 @@ class LoginThrottleTests(TestCase):
                      for i in range(11)]
         cache.clear()
         self.assertEqual(codes[-1], 429)
+
+
+class AdminSidebarPermissionTests(TestCase):
+    def staff(self, *codenames):
+        from django.contrib.auth.models import Permission
+        user = User.objects.create_user(email="crm@test.com", password="x", is_staff=True)
+        user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+        self.client.force_login(user)
+        return User.objects.get(pk=user.pk)
+
+    def test_crm_only_staff_see_and_open_only_the_crm(self):
+        from types import SimpleNamespace
+        from config.settings import _sidebar
+        user = self.staff("view_lead", "change_lead", "view_chatthread", "change_chatthread")
+        groups = _sidebar(SimpleNamespace(user=user))
+        self.assertEqual([[str(i["title"]) for i in g["items"]] for g in groups],
+                         [["Dashboard"], ["Leads & quotes", "Chat conversations", "Chat analytics"]])
+
+        html = self.client.get("/admin/").content.decode()
+        self.assertIn("/admin/bookings/lead/", html)
+        for hidden in ("Newsletter", "Refunds", "Packages by Category"):
+            self.assertNotIn(hidden, html)
+        self.assertEqual(self.client.get("/admin/bookings/lead/").status_code, 200)
+        self.assertEqual(self.client.get("/admin/reports/").status_code, 403)
+
+    def test_superusers_keep_the_whole_menu(self):
+        from types import SimpleNamespace
+        from config.settings import SIDEBAR_GROUPS, _sidebar
+        admin = User.objects.create_superuser(email="root@test.com", password="x")
+        self.assertEqual(sum(len(g["items"]) for g in _sidebar(SimpleNamespace(user=admin))),
+                         sum(len(g["items"]) for g in SIDEBAR_GROUPS))
+        self.client.force_login(admin)
+        self.assertIn("Packages by Category", self.client.get("/admin/").content.decode())
+        self.assertEqual(self.client.get("/admin/reports/").status_code, 200)

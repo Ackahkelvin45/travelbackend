@@ -466,6 +466,7 @@ class ComponentCheckoutSerializer(ComponentQuoteSerializer):
     marketing_consent = serializers.BooleanField(default=False)
     pay_separately = serializers.BooleanField(default=False, help_text="Group: each member pays their own share.")
     whatsapp_updates = serializers.BooleanField(default=False, help_text="Opt in to confirmations on WhatsApp.")
+    referral_code = serializers.CharField(max_length=40, required=False, allow_blank=True)
     expected_total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
 
 
@@ -484,11 +485,12 @@ class LeadSerializer(serializers.ModelSerializer):
     """Public lead capture. A saved quote sends its trip-builder ``selection``
     and the server prices it — a client-supplied total is never stored."""
     selection = ComponentQuoteSerializer(required=False, write_only=True)
+    chat_session = serializers.CharField(max_length=30, required=False, allow_blank=True, write_only=True)
 
     class Meta:
         model = Lead
         fields = ["name", "email", "phone", "source", "message", "marketing_consent", "package",
-                  "referral_code", "selection"]
+                  "referral_code", "selection", "chat_session"]
         # Optional on the model (WhatsApp leads), still required from the site.
         extra_kwargs = {"email": {"required": True, "allow_blank": False}}
 
@@ -505,6 +507,8 @@ class AssistantTurnSerializer(serializers.Serializer):
 
 class AssistantSerializer(serializers.Serializer):
     messages = AssistantTurnSerializer(many=True, min_length=1, max_length=30)
+    session = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    referral_code = serializers.CharField(max_length=40, required=False, allow_blank=True)
 
     def validate_messages(self, value):
         if value[0]["role"] != "user" or value[-1]["role"] != "user":

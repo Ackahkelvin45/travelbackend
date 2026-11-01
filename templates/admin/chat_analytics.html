@@ -1,0 +1,70 @@
+{% extends "admin/base.html" %}
+{% block title %}Chat analytics | {{ site_title }}{% endblock %}
+{% block content %}
+<div class="py-6">
+  <div class="az-section__head">
+    <div><h1 class="font-bold text-2xl text-important">Chat analytics</h1>
+      <p class="text-sm text-subtle">{{ r.start|date:"j M Y" }} – {{ r.end|date:"j M Y" }} · conversations started in this range</p></div>
+    <form method="get" class="az-range">
+      {% for p in presets %}<a href="?from={{ p.from }}&to={{ p.to }}" class="az-pill{% if p.on %} az-pill--on{% endif %}">{{ p.label }}</a>{% endfor %}
+      <label>From <input type="date" name="from" value="{{ r.start|date:'Y-m-d' }}"></label>
+      <label>To <input type="date" name="to" value="{{ r.end|date:'Y-m-d' }}"></label>
+      <button type="submit" class="az-btn">Apply</button>
+      <a class="az-link" href="?from={{ r.start|date:'Y-m-d' }}&to={{ r.end|date:'Y-m-d' }}&export=csv">Export CSV</a>
+    </form>
+  </div>
+
+  <div class="az-summary">
+    {% for k in r.kpis %}<div class="az-kpi"><span>{{ k.label }}</span><strong>{{ k.value }}</strong><span>{{ k.note }}</span></div>{% endfor %}
+  </div>
+
+  <section class="az-card" style="margin-bottom:24px">
+    <div class="az-section__head"><h2>Conversations per day</h2></div>
+    <div style="display:flex;align-items:flex-end;gap:2px;height:120px" role="img" aria-label="Conversations per day">
+      {% for d in r.days %}<div title="{{ d.date|date:'j M' }}: {{ d.n }}" style="flex:1;min-width:2px;height:{{ d.height }}%;background:var(--color-primary-500);border-radius:2px 2px 0 0"></div>{% endfor %}
+    </div>
+  </section>
+
+  <div class="az-grid3">
+    <section class="az-card">
+      <div class="az-section__head"><h2>From chat to booking</h2></div>
+      {% for f in r.funnel %}
+        <div class="az-roomrow"><div><strong>{{ f.label }}</strong></div>
+          <span class="az-stack" style="width:160px"><i class="sold" style="width:{% widthratio f.n r.funnel_max 100 %}%"></i></span><b>{{ f.n }}</b></div>
+      {% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>What guests ask about</h2><span>and the leads it brings</span></div>
+      {% for t in r.topics %}
+        <div class="az-roomrow"><div><strong><a href="/admin/bookings/chatthread/?topic={{ t.label|urlencode }}">{{ t.label }}</a></strong><span>{{ t.n }} chat{{ t.n|pluralize }} · {{ t.leads }} lead{{ t.leads|pluralize }}</span></div>
+          <span class="az-stack"><i class="sold" style="width:{{ t.pct }}%"></i></span><b>{{ t.pct }}%</b></div>
+      {% empty %}<p class="az-note">No conversations in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Channels</h2></div>
+      {% for c in r.channels %}
+        <div class="az-roomrow"><div><strong>{{ c.label }}</strong><span>{{ c.n }} chat{{ c.n|pluralize }}</span></div>
+          <span class="az-stack"><i class="sold" style="width:{{ c.pct }}%"></i></span><b>{{ c.pct }}%</b></div>
+      {% empty %}<p class="az-note">No conversations in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Most asked first questions</h2></div>
+      {% for q in r.questions %}
+        <div class="az-roomrow"><div><strong>{{ q.label|capfirst }}</strong></div><b>{{ q.n }}</b></div>
+      {% empty %}<p class="az-note">No questions in this range.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Waiting for a person</h2><span>the bot couldn't help</span></div>
+      {% for u in r.unanswered %}
+        <div class="az-roomrow"><div><strong><a href="/admin/bookings/chatthread/{{ u.thread.pk }}/change/">{{ u.question|truncatechars:90 }}</a></strong><span>{{ u.thread.get_channel_display }} · {{ u.thread.created_at|date:"j M" }}</span></div></div>
+      {% empty %}<p class="az-note">Nobody is waiting.</p>{% endfor %}
+    </section>
+    <section class="az-card">
+      <div class="az-section__head"><h2>Busiest hours</h2></div>
+      {% for h in r.hours %}
+        <div class="az-roomrow"><div><strong>{{ h.label }}</strong></div><b>{{ h.n }}</b></div>
+      {% empty %}<p class="az-note">No conversations in this range.</p>{% endfor %}
+    </section>
+  </div>
+</div>
+{% endblock %}

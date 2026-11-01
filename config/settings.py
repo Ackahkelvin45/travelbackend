@@ -93,11 +93,29 @@ def _nav(title, items, separator=True):
     return {
         "title": _(title), "separator": separator, "collapsible": False,
         "items": [
-            {"title": _(label), "icon": icon, "link": link,
-             "permission": lambda request: request.user.is_staff, **({"badge": badge} if badge else {})}
+            {"title": _(label), "icon": icon, "link": link, **({"badge": badge} if badge else {})}
             for label, icon, link, badge in items
         ],
     }
+
+
+def _can_open(user, link):
+    """Would this sidebar link open for this user? Same rule as the admin:
+    view or change permission on the model the link points at."""
+    if link == "/admin/":
+        return True
+    if link == "/admin/reports/":
+        return user.has_perm("payments.view_payment")
+    if link == "/admin/chat-analytics/":
+        return user.has_perm("bookings.view_chatthread")
+    app, model = link.strip("/").split("/")[1:3]
+    return user.has_perm(f"{app}.view_{model}") or user.has_perm(f"{app}.change_{model}")
+
+
+def _sidebar(request):
+    """Only what this user can open; a group with nothing left is dropped."""
+    groups = [{**g, "items": [i for i in g["items"] if _can_open(request.user, i["link"])]} for g in SIDEBAR_GROUPS]
+    return [g for g in groups if g["items"]]
 
 
 def _tabs(base, param, items):
@@ -107,6 +125,48 @@ def _tabs(base, param, items):
          "active": (lambda v: lambda request: request.GET.get(param, "") == v)(value)}
         for label, value in items
     ]
+
+# Grouped by job (canvas: Django admin row). Badges count work waiting.
+SIDEBAR_GROUPS = [
+    _nav("Overview", [
+        ("Dashboard", "dashboard", "/admin/", None),
+        ("Reports", "bar_chart", "/admin/reports/", None),
+    ], separator=False),
+    _nav("Sales & CRM", [
+        ("Leads & quotes", "group", "/admin/bookings/lead/", "config.dashboard.badge_leads"),
+        ("Chat conversations", "forum", "/admin/bookings/chatthread/", "config.dashboard.badge_chats"),
+        ("Chat analytics", "insights", "/admin/chat-analytics/", None),
+        ("Newsletter", "mail", "/admin/newsletter/newslettersubscriber/", None),
+    ]),
+    _nav("Bookings", [
+        ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
+        ("Room allocation", "bed", "/admin/packages/roomunit/", None),
+        ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
+        ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
+    ]),
+    _nav("Money", [
+        ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
+        ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
+        ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
+        ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
+    ]),
+    _nav("Catalogue", [
+        ("Packages & pricing", "luggage", "/admin/packages/travelpackage/", None),
+        ("Trip updates", "campaign", "/admin/packages/tripupdate/", None),
+        ("Destinations", "place", "/admin/packages/destination/", None),
+    ]),
+    _nav("Content", [
+        ("Policy documents", "gavel", "/admin/bookings/policydocument/", None),
+        ("Reviews", "star", "/admin/reviews/review/", None),
+        ("Blog posts", "article", "/admin/blog/blog/", None),
+        ("Blog approvals", "rate_review", "/admin/blog/pendingblog/", None),
+    ]),
+    _nav("System", [
+        ("Users & staff", "people", "/admin/accounts/user/", None),
+        ("Settings", "settings", "/admin/payments/opsconfig/", None),
+        ("Scheduled tasks", "schedule", "/admin/payments/scheduledtask/", None),
+    ]),
+]
 
 UNFOLD = {
     "SITE_TITLE": "Azura Travels Admin",
@@ -151,45 +211,7 @@ UNFOLD = {
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": True,
-        # Grouped by job (canvas: Django admin row). Badges count work waiting.
-        "navigation": [
-            _nav("Overview", [
-                ("Dashboard", "dashboard", "/admin/", None),
-                ("Reports", "bar_chart", "/admin/reports/", None),
-            ], separator=False),
-            _nav("Sales & CRM", [
-                ("Leads & quotes", "group", "/admin/bookings/lead/", "config.dashboard.badge_leads"),
-                ("Newsletter", "mail", "/admin/newsletter/newslettersubscriber/", None),
-            ]),
-            _nav("Bookings", [
-                ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
-                ("Room allocation", "bed", "/admin/packages/roomunit/", None),
-                ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
-                ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
-            ]),
-            _nav("Money", [
-                ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
-                ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
-                ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
-                ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
-            ]),
-            _nav("Catalogue", [
-                ("Packages & pricing", "luggage", "/admin/packages/travelpackage/", None),
-                ("Trip updates", "campaign", "/admin/packages/tripupdate/", None),
-                ("Destinations", "place", "/admin/packages/destination/", None),
-            ]),
-            _nav("Content", [
-                ("Policy documents", "gavel", "/admin/bookings/policydocument/", None),
-                ("Reviews", "star", "/admin/reviews/review/", None),
-                ("Blog posts", "article", "/admin/blog/blog/", None),
-                ("Blog approvals", "rate_review", "/admin/blog/pendingblog/", None),
-            ]),
-            _nav("System", [
-                ("Users & staff", "people", "/admin/accounts/user/", None),
-                ("Settings", "settings", "/admin/payments/opsconfig/", None),
-                ("Scheduled tasks", "schedule", "/admin/payments/scheduledtask/", None),
-            ]),
-        ],
+        "navigation": _sidebar,
     },
     # Work-queue tabs above the bookings and leads lists.
     "TABS": [
@@ -199,6 +221,10 @@ UNFOLD = {
         ])},
         {"models": ["bookings.lead"], "items": _tabs("/admin/bookings/lead/", "stage__exact", [
             ("All", ""), ("New", "new"), ("Contacted", "contacted"), ("Saved quotes", "quoted"), ("Converted", "won"), ("Lost", "lost"),
+        ])},
+        {"models": ["bookings.chatthread"], "items": _tabs("/admin/bookings/chatthread/", "queue", [
+            ("All", ""), ("Needs a person", "needs_person"), ("Ready to buy", "hot"), ("No lead yet", "no_lead"),
+            ("Unassigned", "unassigned"), ("Closed", "closed"),
         ])},
         {"models": ["payments.payment"], "items": _tabs("/admin/payments/payment/", "needs_review__exact", [
             ("All", ""), ("Needs review", "1"),

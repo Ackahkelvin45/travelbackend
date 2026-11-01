@@ -286,3 +286,33 @@ def reply(history):
         text = (text + "\n\n" if text else "") + "I'm passing this to our team" + (
             f". They're available {hours}." if hours else " and they'll be in touch.")
     return text or fallback_text(), handoff
+
+
+SITE_CHAT_MAX_MESSAGES = 200
+
+
+def record_site_chat(session: str, question: str, answer: str, handoff=None, referral_code="") -> str:
+    """Add one exchange to a website chat's record for the CRM and return its
+    session id. Only this turn is stored, never the history the page sends, so
+    a page can't rewrite a transcript; an unknown session starts a new chat."""
+    import secrets
+
+    from django.db import transaction
+    from django.utils import timezone
+
+    from .chat_insights import note_guest_message
+    from .models import ChatThread
+
+    turn = [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+    with transaction.atomic():
+        thread = ChatThread.objects.select_for_update().filter(
+            channel=ChatThread.Channel.SITE, wa_id=session).first() if session else None
+        if thread is None:
+            thread = ChatThread(channel=ChatThread.Channel.SITE, wa_id=f"site-{secrets.token_hex(12)}")
+        thread.messages = (thread.messages + turn)[-SITE_CHAT_MAX_MESSAGES:]
+        thread.last_inbound_at = timezone.now()
+        thread.needs_person = thread.needs_person or handoff is not None
+        thread.referral_code = thread.referral_code or referral_code
+        note_guest_message(thread)
+        thread.save()
+    return thread.wa_id

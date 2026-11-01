@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
@@ -58,10 +59,12 @@ def build_report(start, end) -> dict:
                 sales[line["name"]]["revenue"] += Decimal(str(line.get("line_total", "0")))
 
     referrals = []
-    for code in leads.exclude(referral_code="").values_list("referral_code", flat=True).distinct():
+    codes = set(leads.exclude(referral_code="").values_list("referral_code", flat=True)) \
+        | set(bookings.exclude(referral_code="").values_list("referral_code", flat=True))
+    for code in sorted(codes):
         group = leads.filter(referral_code=code)
         referrals.append({"code": code, "leads": group.count(), "quotes": group.exclude(quote={}).count(),
-                          "bookings": group.filter(stage=Lead.Stage.WON).count()})
+                          "bookings": paid.filter(referral_code=code).count()})
 
     pct = lambda a, b: round(a / b * 100) if b else 0
     return {
@@ -84,6 +87,34 @@ def build_report(start, end) -> dict:
     }
 
 
+def chat_analytics_view(request):
+    from .chat_insights import build_chat_report
+    if not request.user.has_perm("bookings.view_chatthread"):
+        raise PermissionDenied
+    start, end = _range(request)
+    report = build_chat_report(start, end)
+    if request.GET.get("export") == "csv":
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="azura-chats-{start}-{end}.csv"'
+        w = csv.writer(response)
+        w.writerow(["Azura chat analytics", start, end])
+        w.writerow([]); w.writerow(["Measure", "Count", "Note"])
+        w.writerows([[k["label"], k["value"], k["note"]] for k in report["kpis"]])
+        w.writerow([]); w.writerow(["Topic", "Conversations", "%", "Leads"])
+        w.writerows([[t["label"], t["n"], t["pct"], t["leads"]] for t in report["topics"]])
+        w.writerow([]); w.writerow(["First question", "Times asked"])
+        w.writerows([[q["label"], q["n"]] for q in report["questions"]])
+        return response
+    today = timezone.localdate()
+    presets = [("Last 7 days", today - timedelta(days=6)), ("Last 30 days", today - timedelta(days=29)),
+               ("Last 90 days", today - timedelta(days=89))]
+    return TemplateResponse(request, "admin/chat_analytics.html", {
+        **admin.site.each_context(request), "title": "Chat analytics", "r": report,
+        "presets": [{"label": l, "from": s.isoformat(), "to": today.isoformat(),
+                     "on": s == start and end == today} for l, s in presets],
+    })
+
+
 def _csv(report) -> HttpResponse:
     response = HttpResponse(content_type="text/csv")
     response["Content-Disposition"] = f'attachment; filename="azura-report-{report["start"]}-{report["end"]}.csv"'
@@ -103,6 +134,8 @@ def _csv(report) -> HttpResponse:
 
 
 def reports_view(request):
+    if not request.user.has_perm("payments.view_payment"):
+        raise PermissionDenied
     start, end = _range(request)
     report = build_report(start, end)
     if request.GET.get("export") == "csv":

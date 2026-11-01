@@ -12,6 +12,10 @@
     <p class="mt-1 text-sm text-subtle">{% now "l j F Y" %}{% if days_to_trip is not None %} · {{ days_to_trip }} days to the {{ trip_title }}{% endif %}</p>
   </div>
 
+  {% if limited_dashboard %}
+    <p class="text-sm text-subtle">Use the menu to open your work.</p>
+  {% else %}
+
   {% include "admin/partials/work_queue.html" %}
 
   {# ── KPI Cards (built in config/dashboard.py) ────────────────────────────── #}
@@ -198,5 +202,6 @@
     {% endif %}
   </div>
 
+  {% endif %}
 </div>
 {% endblock %}

@@ -39,9 +39,13 @@ def unsubscribe(token: str):
         return None
     lead = Lead.objects.filter(pk=pk).first()
     if lead and lead.marketing_consent:
-        lead.marketing_consent = False
         lead.notes = (lead.notes + "\n" if lead.notes else "") + f"Unsubscribed {timezone.now():%d %b %Y %H:%M} GMT."
-        lead.save(update_fields=["marketing_consent", "notes", "updated_at"])
+        lead.save(update_fields=["notes", "updated_at"])
+    if lead and lead.email:
+        # Opting out covers the person, not one lead: a later abandoned
+        # checkout mustn't bring the consent back.
+        Lead.objects.filter(email__iexact=lead.email).update(marketing_consent=False)
+        Booking.objects.filter(email__iexact=lead.email).update(marketing_consent=False)
     return lead
 
 
@@ -62,13 +66,23 @@ def checkout_leads(now=None) -> int:
     for b in unpaid:
         if Lead.objects.filter(quote__abandoned_booking=b.reference).exists() or _has_paid_booking(b.email):
             continue
-        if Lead.objects.filter(email__iexact=b.email).exclude(stage__in=[Lead.Stage.WON, Lead.Stage.LOST]).exists():
+        quote = {**(b.quote_snapshot or {}), "abandoned_booking": b.reference}
+        message = f"Started checkout ({b.reference}) but didn't pay."
+        existing = Lead.objects.filter(email__iexact=b.email).exclude(stage__in=[Lead.Stage.WON, Lead.Stage.LOST]).first()
+        if existing and existing.quote:
             continue  # already being followed up
+        if existing:  # a chat or contact lead: it now has a quote, and the guest's checkout consent
+            existing.quote, existing.stage, existing.package = quote, Lead.Stage.QUOTED, b.package
+            existing.marketing_consent = existing.marketing_consent or b.marketing_consent
+            existing.referral_code = existing.referral_code or b.referral_code
+            existing.message = f"{message}\n\n{existing.message}".strip()
+            existing.save()
+            made += 1
+            continue
         Lead.objects.create(
             name=b.full_name, email=b.email, phone=b.phone or "", source=Lead.Source.CHECKOUT,
             marketing_consent=b.marketing_consent, stage=Lead.Stage.QUOTED, package=b.package,
-            quote={**(b.quote_snapshot or {}), "abandoned_booking": b.reference},
-            message=f"Started checkout ({b.reference}) but didn't pay.",
+            quote=quote, message=message, referral_code=b.referral_code,
             reply_due_at=now + timedelta(hours=OpsConfig.get().lead_reply_hours),
         )
         made += 1

@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from .models import Booking, Lead
+from .models import Booking, ChatThread, Lead
 from .pricing import QuoteError, compute_component_quote, compute_configurable_quote, compute_quote
 from .serializers import (
     AssistantSerializer,
@@ -727,6 +727,7 @@ class ComponentCheckoutView(APIView):
                 whatsapp_updates=data["whatsapp_updates"],
                 user=request.user if request.user.is_authenticated else None,
                 ip_address=request.META.get("REMOTE_ADDR"), group_size=group_size,
+                referral_code=data.get("referral_code", ""),
             )
         except QuoteError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -828,6 +829,7 @@ class LeadCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         data = dict(serializer.validated_data)
         selection = data.pop("selection", None)
+        chat_session = data.pop("chat_session", "")
         quote = {}
         if selection:
             package = _component_package(selection["package_id"])
@@ -841,10 +843,20 @@ class LeadCreateView(APIView):
             except QuoteError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             data["package"] = package
-        lead = Lead.objects.create(
-            **data, quote=quote,
-            reply_due_at=timezone.now() + timedelta(hours=OpsConfig.get().lead_reply_hours),
-        )
+        thread = ChatThread.objects.filter(channel=ChatThread.Channel.SITE, wa_id=chat_session).select_related("lead").first() \
+            if chat_session else None
+        if thread and thread.lead:  # already captured from the chat: the form completes that lead
+            lead = thread.lead
+            lead.name, lead.email, lead.message = data["name"], data["email"], data.get("message", "")
+            lead.marketing_consent = lead.marketing_consent or data.get("marketing_consent", False)
+            lead.save(update_fields=["name", "email", "message", "marketing_consent", "updated_at"])
+        else:
+            lead = Lead.objects.create(
+                **data, quote=quote,
+                reply_due_at=timezone.now() + timedelta(hours=OpsConfig.get().lead_reply_hours),
+            )
+        if thread:
+            ChatThread.objects.filter(pk=thread.pk).update(lead=lead, name=lead.name, needs_person=True)
         if quote:
             from payments.email import send_saved_quote
             send_saved_quote(lead)  # never raises; the attempt is logged against the lead
@@ -862,12 +874,15 @@ class AssistantView(APIView):
     throttle_scope = "assistant"
 
     def post(self, request):
-        from .assistant import reply
+        from .assistant import record_site_chat, reply
 
         serializer = AssistantSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        text, handoff = reply([dict(m) for m in serializer.validated_data["messages"]])
-        return Response({"reply": text, "handoff": handoff})
+        messages = [dict(m) for m in serializer.validated_data["messages"]]
+        text, handoff = reply(messages)
+        session = record_site_chat(serializer.validated_data.get("session", ""), messages[-1]["content"], text, handoff,
+                                   serializer.validated_data.get("referral_code", ""))
+        return Response({"reply": text, "handoff": handoff, "session": session})
 
 
 class SiteSettingsView(APIView):

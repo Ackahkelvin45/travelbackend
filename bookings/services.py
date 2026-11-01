@@ -314,7 +314,7 @@ def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
     pay_separately: bool = False, whatsapp_updates: bool = False, user=None, ip_address: str | None = None,
-    group_size: int = 0,
+    group_size: int = 0, referral_code: str = "",
 ) -> Booking:
     """Turn a room hold into a priced, snapshotted booking with one
     BookingTraveller (= one Core ticket) per guest. The units stay held only
@@ -390,7 +390,7 @@ def create_component_booking(
             price_list_version=quote.price_list_version,
             refund_tiers_snapshot=package.refund_tiers,
             deposit_required=deposit_required, pay_separately=pay_separately,
-            whatsapp_updates=whatsapp_updates and bool(contact.get("phone")),
+            whatsapp_updates=whatsapp_updates and bool(contact.get("phone")), referral_code=referral_code,
         )
         held_until = now + timedelta(minutes=OpsConfig.get().hold_minutes)
         unit_of = {}

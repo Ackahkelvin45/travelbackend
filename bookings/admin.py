@@ -393,6 +393,9 @@ class BookingAdmin(ModelAdmin):
             from django.contrib import messages
             self.message_user(request, "Deadline extended without a reason — please add one.", messages.WARNING)
         super().save_model(request, obj, form, change)
+        if "coordinator" in form.changed_data:
+            from payments.email import send_coordinator_assigned
+            send_coordinator_assigned(obj)
 
     # ── List columns ────────────────────────────────────────────────────────
     @display(description="Reference", ordering="created_at", header=True)
@@ -503,7 +506,12 @@ class BookingAdmin(ModelAdmin):
             if user is None:
                 self.message_user(request, "Choose a coordinator.", messages.WARNING)
                 return None
+            from payments.email import send_coordinator_assigned
+            bookings = list(queryset.exclude(coordinator=user))
             n = queryset.update(coordinator=user, coordinator_assigned_at=timezone.now())
+            for b in bookings:
+                b.coordinator = user
+                send_coordinator_assigned(b)
             self.message_user(request, f"{n} booking(s) assigned to {user.full_name or user.email}.", messages.SUCCESS)
             return None
         return TemplateResponse(request, "admin/bookings/assign_coordinator.html", {
@@ -1006,19 +1014,149 @@ class ChatThreadForm(forms.ModelForm):
 
     class Meta:
         model = ChatThread
-        fields = ["bot_paused"]
+        fields = ["bot_paused", "status", "assigned_to", "staff_note"]
+
+
+class ChatQueueFilter(admin.SimpleListFilter):
+    """The work queues behind the conversation tabs."""
+    title = "queue"
+    parameter_name = "queue"
+
+    def lookups(self, request, model_admin):
+        return [("needs_person", "Needs a person"), ("hot", "Ready to buy"), ("no_lead", "No lead yet"),
+                ("unassigned", "Unassigned"), ("closed", "Closed")]
+
+    def queryset(self, request, queryset):
+        v = self.value()
+        if v == "closed":
+            return queryset.filter(status=ChatThread.Status.CLOSED)
+        live = queryset.exclude(status=ChatThread.Status.CLOSED)
+        if v == "needs_person":
+            return live.filter(needs_person=True)
+        if v == "hot":
+            return live.filter(intent=ChatThread.Intent.HOT)
+        if v == "no_lead":
+            return live.filter(lead__isnull=True)
+        if v == "unassigned":
+            return live.filter(assigned_to__isnull=True)
+        return queryset
+
+
+class ChatTopicFilter(admin.SimpleListFilter):
+    title = "topic"
+    parameter_name = "topic"
+
+    def lookups(self, request, model_admin):
+        from .chat_insights import TOPICS
+        return [(t, t) for t in TOPICS]
+
+    def queryset(self, request, queryset):
+        if not self.value():
+            return queryset
+        # ponytail: filtered in Python; a JSON lookup isn't available on every database.
+        return queryset.filter(pk__in=[t.pk for t in queryset.only("topics") if self.value() in t.topics])
 
 
 @admin.register(ChatThread)
 class ChatThreadAdmin(ModelAdmin):
-    """WhatsApp conversations. After a hand-off the bot is paused and staff
-    reply from here; untick "Bot paused" to give the thread back to the bot."""
+    """WhatsApp and website chatbot conversations: read them, assign them,
+    follow up, and turn them into leads. After a WhatsApp hand-off the bot is
+    paused and staff reply from here; untick "Bot paused" to give the thread
+    back to the bot. A website visitor can't be replied to from here."""
     form = ChatThreadForm
-    list_display = ["__str__", "bot_paused", "lead", "last_inbound_at"]
-    list_filter = ["bot_paused"]
-    search_fields = ["wa_id", "name"]
-    readonly_fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript"]
-    fields = ["wa_id", "name", "lead", "last_inbound_at", "transcript", "reply", "bot_paused"]
+    list_display = ["guest_cell", "channel", "intent_badge", "topics_cell", "status", "assigned_to", "lead_cell", "last_inbound_at"]
+    list_filter = [ChatQueueFilter, ChatTopicFilter, "channel", "intent", "status", ("assigned_to", RelatedDropdownFilter)]
+    list_filter_submit = True
+    search_fields = ["wa_id", "name", "contact_email", "contact_phone", "lead__email", "staff_note"]
+    list_select_related = ["assigned_to", "lead"]
+    actions = ["assign_to_me", "mark_following_up", "mark_closed", "capture_leads", "export_csv"]
+    actions_detail = ["detail_capture_lead"]
+    readonly_fields = ["wa_id", "name", "channel", "intent", "topics_cell", "contact_email", "contact_phone",
+                       "needs_person", "lead", "last_inbound_at", "transcript"]
+    fields = ["channel", "wa_id", "name", "contact_email", "contact_phone", "intent", "topics_cell", "needs_person",
+              "lead", "last_inbound_at", "status", "assigned_to", "staff_note", "transcript", "reply", "bot_paused"]
+
+    def get_fields(self, request, obj=None):
+        if obj and obj.channel == ChatThread.Channel.SITE:
+            return [f for f in self.fields if f not in ("wa_id", "reply", "bot_paused")]
+        return self.fields
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "assigned_to":
+            from django.contrib.auth import get_user_model
+            kwargs["queryset"] = get_user_model().objects.filter(is_staff=True, is_active=True)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    @display(description="Guest", header=True, ordering="last_inbound_at")
+    def guest_cell(self, obj):
+        contact = obj.contact_email or obj.contact_phone
+        if obj.channel == ChatThread.Channel.WHATSAPP:
+            contact = contact or f"+{obj.wa_id}"
+        return obj.name or str(obj), contact or "No contact details yet"
+
+    @display(description="Intent", label={"Ready to buy": "success", "Interested": "warning", "Browsing": "info"})
+    def intent_badge(self, obj):
+        return obj.get_intent_display()
+
+    @admin.display(description="Topics")
+    def topics_cell(self, obj):
+        return ", ".join(obj.topics) or "—"
+
+    @admin.display(description="Lead")
+    def lead_cell(self, obj):
+        return obj.lead.name if obj.lead else "—"
+
+    @admin.action(description="Assign to me")
+    def assign_to_me(self, request, queryset):
+        self.message_user(request, f"{queryset.update(assigned_to=request.user)} conversation(s) assigned to you.")
+
+    @admin.action(description="Mark following up")
+    def mark_following_up(self, request, queryset):
+        self.message_user(request, f"{queryset.update(status=ChatThread.Status.FOLLOWING_UP)} marked following up.")
+
+    @admin.action(description="Close")
+    def mark_closed(self, request, queryset):
+        self.message_user(request, f"{queryset.update(status=ChatThread.Status.CLOSED)} closed.")
+
+    def _capture(self, thread):
+        from .chat_insights import capture_lead
+        lead = capture_lead(thread)
+        if lead:
+            thread.save(update_fields=["lead", "updated_at"])
+        return lead
+
+    @admin.action(description="Create leads")
+    def capture_leads(self, request, queryset):
+        from django.contrib import messages
+        results = [self._capture(t) for t in queryset]
+        made = sum(1 for r in results if r)
+        self.message_user(request, f"{made} conversation(s) have a lead.")
+        if made < len(results):
+            self.message_user(request, f"{len(results) - made} skipped: the guest left no email or phone.", messages.WARNING)
+
+    @admin.action(description="Export selected to CSV")
+    def export_csv(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="azura-chats.csv"'
+        w = csv.writer(response)
+        w.writerow(["Started", "Channel", "Name", "Email", "Phone", "Intent", "Topics", "Status", "Assigned to", "Lead"])
+        for t in queryset.select_related("assigned_to", "lead"):
+            w.writerow([t.created_at.date(), t.get_channel_display(), t.name, t.contact_email, t.contact_phone,
+                        t.get_intent_display(), ", ".join(t.topics), t.get_status_display(), t.assigned_to or "",
+                        t.lead.name if t.lead else ""])
+        return response
+
+    @action(description="Create lead", url_path="capture-lead")
+    def detail_capture_lead(self, request, object_id):
+        from django.contrib import messages
+        from django.shortcuts import redirect
+        lead = self._capture(ChatThread.objects.get(pk=object_id))
+        if lead is None:
+            self.message_user(request, "No lead created: the guest left no email or phone.", messages.WARNING)
+            return redirect("admin:bookings_chatthread_change", object_id)
+        return redirect("admin:bookings_lead_change", lead.pk)
 
     def has_add_permission(self, request):
         return False
@@ -1050,6 +1188,7 @@ class ChatThreadAdmin(ModelAdmin):
             obj.seen_ids, obj.messages = fresh.seen_ids, fresh.messages
             if text:
                 obj.messages = obj.messages + [{"role": "assistant", "content": text, "staff": True}]
+                obj.status = ChatThread.Status.FOLLOWING_UP
                 if "bot_paused" not in form.changed_data:
                     obj.bot_paused = True  # a staff reply takes the thread over
             super().save_model(request, obj, form, change)
