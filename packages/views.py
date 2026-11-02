@@ -74,11 +74,13 @@ class TripUpdatesView(APIView):
 
 
 class IsAdminOrReadOnly(permissions.BasePermission):
-    """Allow anyone to read; only admins can write."""
+    """Allow anyone to read; only superusers can write."""
     def has_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
             return True
-        return request.user and request.user.is_staff
+        # These edit live prices and content with no per-model permission
+        # check, so staff work in the admin, which has one.
+        return bool(request.user and request.user.is_superuser)
 
 
 # ──────────────────────────────────────────
@@ -212,8 +214,8 @@ class GalleryImagesView(generics.GenericAPIView):
 
 def _base_package_qs():
     return TravelPackage.objects.annotate(
-        avg_rating=Avg("reviews__rating"),
-        review_count=Count("reviews", distinct=True),
+        avg_rating=Avg("reviews__rating", filter=Q(reviews__is_visible=True)),
+        review_count=Count("reviews", distinct=True, filter=Q(reviews__is_visible=True)),
     )
 
 
@@ -289,8 +291,8 @@ class TravelPackageDetailView(generics.RetrieveUpdateDestroyAPIView):
     DELETE /api/packages/{id}/  — delete (admin only)
     """
     queryset = TravelPackage.objects.annotate(
-        avg_rating=Avg("reviews__rating"),
-        review_count=Count("reviews", distinct=True),
+        avg_rating=Avg("reviews__rating", filter=Q(reviews__is_visible=True)),
+        review_count=Count("reviews", distinct=True, filter=Q(reviews__is_visible=True)),
     )
     serializer_class = TravelPackageDetailSerializer
     permission_classes = [IsAdminOrReadOnly]

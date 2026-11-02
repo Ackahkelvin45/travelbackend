@@ -13,6 +13,8 @@ from decimal import Decimal
 
 from django.db import models, transaction
 
+from types import SimpleNamespace
+
 from .models import Booking, BookingTraveller, PolicyAcceptance, PolicyDocument
 from .pricing import (
     QuoteError, assert_capacity, compute_component_quote, compute_configurable_quote, compute_quote,
@@ -310,6 +312,14 @@ def release_hold(token: str) -> int:
     return RoomUnit.objects.filter(hold_token=token, booking__isnull=True).update(hold_token="", held_until=None)
 
 
+def _checkout_portions(quote, pay_separately) -> list:
+    """What the checkout payment covers: everything due now, or — when members
+    pay separately — the organiser's own part plus every room deposit, so
+    rooms are secured by the first payment (Change Request v4 §4, §6)."""
+    return [Decimal(t["due_now"]) if (i == 0 or not pay_separately) else Decimal(t["room_deposit"])
+            for i, t in enumerate(quote.travellers)]
+
+
 def create_component_booking(
     *, package, mode: str, travellers: list, rooms: list, payment_plan: str, hold_token: str,
     contact: dict, accepted_policy_types: list, marketing_consent: bool = False,
@@ -338,13 +348,7 @@ def create_component_booking(
     if pay_separately and mode != Booking.Mode.GROUP:
         raise QuoteError("Paying separately is for group bookings.")
 
-    # What the checkout payment covers: everything due now, or — when members
-    # pay separately — the organiser's own part plus every room deposit, so
-    # rooms are secured by the first payment (Change Request v4 §4, §6).
-    portions = [
-        Decimal(t["due_now"]) if (i == 0 or not pay_separately) else Decimal(t["room_deposit"])
-        for i, t in enumerate(quote.travellers)
-    ]
+    portions = _checkout_portions(quote, pay_separately)
     deposit_required = sum(portions, Decimal("0")) if (pay_separately or quote.deposit_required) else None
 
     documents = required_policy_documents()
@@ -468,8 +472,15 @@ def reassign_unit(unit, target):
         unit, target = (RoomUnit.objects.select_for_update().get(pk=u.pk) for u in (unit, target))
         if not unit.booking_id:
             raise IllegalTransition(f"{unit.label} has no booking to move.")
-        if unit.check_in:  # ponytail: dated stays can't move yet; cancel and rebook
-            raise IllegalTransition("Stay-only bookings are dated: cancel and rebook to move one.")
+        if unit.check_in:
+            # A dated stay keeps its row and takes the other Airbnb's label.
+            if target.stay_type_id != unit.stay_type_id or target.check_in or target.blocked:
+                raise IllegalTransition("Choose a free unit of the same stay type.")
+            if target.label not in free_dated_labels(unit.stay_type, unit.check_in, unit.check_out):
+                raise IllegalTransition(f"{target.label} is taken on those dates.")
+            unit.label = target.label
+            unit.save(update_fields=["label"])
+            return
         if target.stay_type_id != unit.stay_type_id:
             raise IllegalTransition("Move to a unit of the same stay type (prices are per stay type).")
         if not RoomUnit.objects.available().filter(pk=target.pk).exists():
@@ -526,6 +537,11 @@ def cancel_booking(booking, *, reason: str, refund_reason: str = "", at=None) ->
         # Rooms go back on sale; the quote snapshot keeps what was booked.
         booking.travellers.update(unit=None)
         booking.room_units.update(booking=None, hold_token="", held_until=None)
+        # Nothing left to decide on a request the booking has outrun.
+        booking.cancellation_requests.filter(status="pending").update(
+            status="approved", resolved_at=timezone.now(),
+            staff_note="Closed: staff cancelled the booking.",
+        )
 
         legs = []
         if booking.amount_paid > booking.amount_refunded:
@@ -874,18 +890,34 @@ def check_in_ticket(traveller, *, by) -> None:
         traveller.save(update_fields=["checked_in_at", "checked_in_by"])
 
 
-def forfeit_ticket(traveller) -> None:
-    """Record a ticket as forfeited for non-payment at event start. Moves no
-    money and cancels nothing else; refunds follow the policy via staff."""
+def forfeit_ticket(traveller, by=None) -> None:
+    """Record a ticket as forfeited for non-payment at event start (Change
+    Request v4 §6: never in advance). Moves no money and cancels nothing else;
+    refunds follow the policy via staff."""
     from django.utils import timezone
 
+    booking = traveller.booking
+    start = booking.package.available_from or booking.travel_date
+    if start and timezone.localdate() < start:
+        raise IllegalTransition(f"{traveller.full_name}: tickets can only be forfeited once the event starts.")
     if traveller.checked_in_at:
         raise IllegalTransition(f"{traveller.full_name} is already checked in.")
     if traveller.access_exception or ticket_outstanding(traveller) <= 0:
         raise IllegalTransition(f"{traveller.full_name} is paid or has an exception.")
     if not traveller.forfeited_at:
-        traveller.forfeited_at = timezone.now()
-        traveller.save(update_fields=["forfeited_at"])
+        traveller.forfeited_at, traveller.forfeited_by = timezone.now(), by
+        traveller.save(update_fields=["forfeited_at", "forfeited_by"])
+
+
+def undo_check_in(traveller) -> None:
+    """Correct a mis-scan."""
+    traveller.checked_in_at, traveller.checked_in_by = None, None
+    traveller.save(update_fields=["checked_in_at", "checked_in_by"])
+
+
+def undo_forfeit(traveller) -> None:
+    traveller.forfeited_at, traveller.forfeited_by = None, None
+    traveller.save(update_fields=["forfeited_at", "forfeited_by"])
 
 
 TRANSFER_CUTOFF_DAYS = 14
@@ -980,3 +1012,380 @@ def linked_group(package, reference: str):
         status__in=[Booking.Status.PENDING, Booking.Status.CONFIRMED], amount_paid__gt=0,
     )
     return first, sum(b.num_guests for b in members)
+
+
+# ── Staff changes to a booking's price ───────────────────────────────────────
+#
+# A change never does its own arithmetic: the booking is priced again by
+# compute_component_quote, the engine checkout uses, from the guests and rooms
+# it has now. Totals, shares, deposits, transfers and discounts then can't
+# drift apart, however many changes are made.
+
+# Lines staff or the guest caused after checkout, which no quote can rebuild.
+CARRIED_LINES = ("price_adjustment", "guest_removal_fee")
+
+
+def _is_carried(line) -> bool:
+    return line.get("code") in CARRIED_LINES or str(line.get("code", "")).endswith("_cancellation_fee")
+
+
+def _open_for_changes(booking):
+    if booking.status not in (Booking.Status.PENDING, Booking.Status.CONFIRMED):
+        raise IllegalTransition(f"A {booking.status} booking cannot be changed.")
+    if booking.pending_cancellation:
+        raise IllegalTransition("A cancellation request is under review. Resolve it first.")
+    if booking.refunds.filter(status="pending").exists():
+        raise IllegalTransition("This booking has a refund waiting. Process or reject it first, so the two don't cross.")
+    if booking.payments.filter(disputed=True).exists():
+        raise IllegalTransition("A chargeback is open on this booking. Resolve it first: the bank may be returning that money.")
+    if not booking.price_list_version_id:
+        raise IllegalTransition("This booking has no price list, so it can't be re-priced here.")
+
+
+def _refuse_empty_rooms(booking) -> None:
+    """A room with nobody in it can't be priced, but the guest is still paying
+    for it. Staff say what happens to it first."""
+    held = set(booking.travellers.values_list("unit_id", flat=True))
+    empty = [u.label for u in booking.room_units.all() if u.pk not in held]
+    if empty:
+        raise IllegalTransition(f"{', '.join(empty)} has no guests in it. Release it on Change room type, or move someone in.")
+
+
+def _bought_later(booking, guests) -> dict:
+    """{guest pk: {code: what they paid}} for add-ons bought after checkout.
+    These keep the price paid, whatever the price list says."""
+    from .pricing import split_evenly
+
+    by_id = {str(g.pk): g for g in guests}
+    bought = {}
+    # "refunded" too: the add-on is still on the booking at the price it cost.
+    for payment in booking.payments.filter(purpose="addon", status__in=["success", "refunded"]).exclude(addon_travellers=[]):
+        holders = payment.addon_travellers
+        for tid, part in zip(holders, split_evenly(payment.amount, len(holders))):
+            guest = by_id.get(str(tid))
+            if guest and payment.addon_code in guest.experiences:
+                bought.setdefault(guest.pk, {})[payment.addon_code] = part
+    return bought
+
+
+def _spread(guests, amount) -> None:
+    """Apply a change in price to shares: a rise goes to the lead, a cut comes
+    off each guest in turn, so no share goes below zero."""
+    from payments.money import quantize
+
+    if amount > 0 and guests:
+        guests[0].share = quantize(guests[0].share + amount)
+    left = -amount
+    for guest in guests:
+        if left <= 0:
+            break
+        take = min(guest.share, left)
+        guest.share, left = quantize(guest.share - take), quantize(left - take)
+
+
+def _requote(booking, guests, rooms, mode, extra_stay=None):
+    """Price these guests and rooms at the booking's own price list and its
+    booked group discount: a guest dropping out doesn't change the percent
+    (client, 26 Oct 2026: "once you pay and check out that's it")."""
+    from .pricing import _catalog, compute_component_quote, installments_open, live_catalog
+
+    version = booking.price_list_version
+    catalog = _catalog(version.snapshot, version) if version else live_catalog(booking.package)
+    if extra_stay is not None:
+        # The booking's own price if its list has this stay; a room already on
+        # the booking must not move with today's price.
+        listed = catalog.stay_types.get(extra_stay.code, extra_stay)
+        catalog.stay_types = {**catalog.stay_types, extra_stay.code: SimpleNamespace(**{**vars(listed), "on_sale": True})}
+    snapshot = booking.quote_snapshot or {}
+    percent = Decimal(str(snapshot.get("discount_percent") or "0"))
+    if Decimal(str(snapshot.get("discount_total") or "0")) > 0 and not percent:
+        raise IllegalTransition("This booking's discount can't be read, so it can't be re-priced here.")
+    bought = _bought_later(booking, guests)
+    catalog.group_discounts = [(percent, snapshot.get("discount_name", ""), 1)] if percent else []
+    plan = booking.payment_plan
+    if plan == Booking.PaymentPlan.INSTALLMENT and not installments_open(booking.package):
+        plan = Booking.PaymentPlan.FULL  # past the deadline: the old deposit is kept as it stands
+    try:
+        return compute_component_quote(
+            booking.package, mode=mode, rooms=rooms, payment_plan=plan, check_availability=False, catalog=catalog,
+            travellers=[{"name": g.full_name, "experiences": [c for c in g.experiences if c not in bought.get(g.pk, {})],
+                          "adult": True} for g in guests],
+        )
+    except QuoteError as exc:
+        raise IllegalTransition(str(exc))
+
+
+def _rooms_input(guests, units, *, swap=None, new_code=""):
+    """The quote's room list for these units, with occupants by guest index."""
+    rooms = []
+    for unit in units:
+        occupants = [i for i, g in enumerate(guests) if g.unit_id == unit.pk]
+        if not occupants:
+            continue
+        room = {"stay_type": new_code if swap and unit.pk == swap.pk else unit.stay_type.code, "occupants": occupants}
+        if unit.check_in:
+            room.update(check_in=unit.check_in, check_out=unit.check_out)
+        rooms.append(room)
+    return rooms
+
+
+def _apply_quote(booking, quote, guests, labels, *, change: dict, log="addon_changes", extra_lines=()) -> Decimal:
+    """Make the booking match a new quote. Returns the change in total."""
+    from django.utils import timezone
+
+    from payments.money import quantize
+
+    carried = [*(l for l in (booking.addons or []) if _is_carried(l)), *extra_lines]
+    carried_total = sum((Decimal(str(l["line_total"])) for l in carried), Decimal("0"))
+    bought = _bought_later(booking, guests)
+    extras = _bought_lines(booking, bought)
+    for room, label in zip(quote.rooms, labels):
+        room["unit"] = label
+    portions = _checkout_portions(quote, booking.pay_separately)
+    for guest, row, portion in zip(guests, quote.travellers, portions):
+        paid_part = sum(bought.get(guest.pk, {}).values(), Decimal("0"))
+        guest.share, guest.checkout_portion = Decimal(row["share"]) + paid_part, portion + paid_part
+    _spread(guests, carried_total)
+    for guest in guests:
+        guest.checkout_portion = min(guest.checkout_portion, guest.share)
+        guest.save(update_fields=["share", "checkout_portion", "unit"])
+
+    old_total = booking.total_amount
+    booking.num_guests = quote.num_guests
+    booking.mode = quote.mode
+    booking.addons = [*quote.booking_addons(), *extras, *carried]
+    booking.quote_snapshot = quote.as_dict()
+    booking.total_amount = quantize(_new_total(quote, booking, guests))
+    booking.discount_amount, booking.discount_note = quote.discount_total, quote.discount_note()
+    if booking.pay_separately or quote.deposit_required:
+        booking.deposit_required = sum(portions, Decimal("0"))
+    elif booking.deposit_required:
+        booking.deposit_required = min(booking.deposit_required, booking.total_amount)
+    entry = {**change, "old_total": str(old_total), "new_total": str(booking.total_amount),
+             "at": timezone.now().isoformat()}
+    setattr(booking, log, [*(getattr(booking, log) or []), entry])
+    booking.save(update_fields=["num_guests", "mode", "addons", "quote_snapshot", "total_amount", "discount_amount",
+                                "discount_note", "deposit_required", log, "updated_at"])
+    return quantize(booking.total_amount - old_total)
+
+
+def _bought_lines(booking, bought) -> list:
+    """Booking lines for add-ons bought later, at the price paid."""
+    from payments.money import quantize
+
+    lines = {}
+    known = {l.get("code"): l for l in booking.addons or []}
+    for parts in bought.values():
+        for code, part in parts.items():
+            line = known.get(code, {})
+            row = lines.setdefault(code, {"code": code, "name": line.get("name", code), "unit": line.get("unit", "per_person"),
+                                          "unit_price": str(part), "quantity": 0, "line_total": "0.00",
+                                          "refundable": line.get("refundable", True)})
+            row["quantity"] += 1
+            row["line_total"] = str(quantize(Decimal(row["line_total"]) + part))
+    return list(lines.values())
+
+
+def _new_total(quote, booking, guests) -> Decimal:
+    """The quote, plus what no quote can rebuild."""
+    bought = _bought_later(booking, guests)
+    later = sum((part for parts in bought.values() for part in parts.values()), Decimal("0"))
+    return quote.total + later + sum((Decimal(str(l["line_total"])) for l in booking.addons or [] if _is_carried(l)), Decimal("0"))
+
+
+def _overpaid(booking):
+    from payments.money import quantize
+
+    pending = sum((r.amount for r in booking.refunds.filter(status="pending")), Decimal("0"))
+    return max(quantize(booking.amount_paid - booking.amount_refunded - pending - booking.total_amount), Decimal("0"))
+
+
+def lower_total(booking, amount, *, label: str, by_email: str, note: str = "") -> None:
+    """Take money off what the guest owes, as a logged line, so a goodwill
+    refund or a dropped extra doesn't leave them looking in debt."""
+    from django.utils import timezone
+
+    from payments.money import quantize
+
+    amount = quantize(amount)
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        old = booking.total_amount
+        booking.addons = [*(booking.addons or []), {
+            "code": "price_adjustment", "name": label, "unit": "per_booking", "unit_price": str(-amount), "quantity": 1,
+            "line_total": str(-amount), "refundable": True,
+        }]
+        booking.total_amount = quantize(old - amount)
+        booking.addon_changes = [*(booking.addon_changes or []), {
+            "kind": "price adjustment", "name": label, "old_total": str(old), "new_total": str(booking.total_amount),
+            "note": note, "at": timezone.now().isoformat(), "by": by_email,
+        }]
+        booking.save(update_fields=["addons", "total_amount", "addon_changes", "updated_at"])
+        guests = list(booking.travellers.order_by("-is_lead", "position"))
+        _spread(guests, -amount)
+        for guest in guests:
+            guest.checkout_portion = min(guest.checkout_portion, guest.share)
+            guest.save(update_fields=["share", "checkout_portion"])
+
+
+def change_room_type(booking, unit, new_code: str, *, by_email: str, note: str = "") -> Decimal:
+    """Move one room to another stay type. The guests stay together. The
+    difference goes on the balance, or becomes a pending refund if they've now
+    overpaid. Returns the change in price."""
+    from packages.models import RoomUnit
+    from payments.refunds import create_fixed_refund
+    from .pricing import live_catalog
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        _open_for_changes(booking)
+        unit = RoomUnit.objects.select_for_update().select_related("stay_type").get(pk=unit.pk)
+        if unit.booking_id != booking.pk:
+            raise IllegalTransition("That room isn't on this booking.")
+        if unit.check_in:
+            raise IllegalTransition("Stay-only bookings are sold by the night. Move the stay to another unit instead.")
+        stay = live_catalog(booking.package).stay_types.get(new_code)
+        if stay is None or not stay.on_sale or stay.stay_only:
+            raise IllegalTransition("That stay isn't on sale.")
+        if stay.code == unit.stay_type.code:
+            raise IllegalTransition("The room is already that type.")
+
+        _refuse_empty_rooms(booking)
+        guests = list(booking.travellers.order_by("position"))
+        units = list(booking.room_units.select_related("stay_type").order_by("label"))
+        quote = _requote(booking, guests, _rooms_input(guests, units, swap=unit, new_code=new_code), booking.mode, extra_stay=stay)
+        new = (RoomUnit.objects.available().select_for_update(skip_locked=True, of=("self",))
+               .filter(stay_type__package=booking.package, stay_type__code=new_code).first())
+        if new is None:
+            raise IllegalTransition(f"{stay.name} is sold out.")
+        new.booking, new.held_until, new.hold_token = booking, unit.held_until, ""
+        new.save(update_fields=["booking", "held_until", "hold_token"])
+        RoomUnit.objects.filter(pk=unit.pk).update(booking=None, held_until=None, hold_token="")
+        for guest in guests:
+            if guest.unit_id == unit.pk:
+                guest.unit = new
+        labels = [new.label if u.pk == unit.pk else u.label for u in units
+                  if u.pk == unit.pk or any(g.unit_id == u.pk for g in guests)]
+        delta = _apply_quote(booking, quote, guests, labels, change={
+            "kind": "room change", "from": unit.label, "to": new.label, "note": note, "by": by_email})
+        create_fixed_refund(booking, _overpaid(booking), reason=f"Room changed to {stay.name}")
+    return delta
+
+
+def release_empty_room(booking, unit, *, by_email: str, note: str = "") -> Decimal:
+    """Give back a room staff have moved everyone out of, and any other empty
+    room with it: they go back on sale and off the bill together. Any
+    overpayment becomes a pending refund."""
+    from packages.models import RoomUnit
+    from payments.refunds import create_fixed_refund
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+        _open_for_changes(booking)
+        unit = RoomUnit.objects.select_for_update().select_related("stay_type").get(pk=unit.pk)
+        if unit.booking_id != booking.pk:
+            raise IllegalTransition("That room isn't on this booking.")
+        if unit.occupants.exists():
+            raise IllegalTransition(f"{unit.label} still has guests. Move them out first.")
+        guests = list(booking.travellers.order_by("position"))
+        units = list(booking.room_units.select_related("stay_type").order_by("label"))
+        kept = [u for u in units if any(g.unit_id == u.pk for g in guests)]
+        released = [u for u in units if u not in kept]
+        quote = _requote(booking, guests, _rooms_input(guests, kept), booking.mode)
+        names = ", ".join(u.label for u in released)
+        delta = _apply_quote(booking, quote, guests, [u.label for u in kept], change={
+            "kind": "room released", "from": names, "note": note, "by": by_email})
+        RoomUnit.objects.filter(pk__in=[u.pk for u in released]).update(booking=None, held_until=None, hold_token="")
+        create_fixed_refund(booking, _overpaid(booking), reason=f"{names} released")
+    return delta
+
+
+def _own_money(traveller) -> Decimal:
+    """What this guest paid themselves and hasn't had back."""
+    from payments.money import quantize
+
+    total = Decimal("0")
+    for payment in traveller.booking.payments.filter(status="success", traveller=traveller, disputed=False):
+        held = sum((r.amount for r in payment.refunds.exclude(status="rejected")), Decimal("0"))
+        total += payment.amount - held
+    return quantize(total)
+
+
+def _without_guest(traveller):
+    """(remaining guests, their rooms' labels, the booking's new quote)."""
+    booking = traveller.booking
+    _refuse_empty_rooms(booking)
+    guests = list(booking.travellers.exclude(pk=traveller.pk).order_by("-is_lead", "position"))
+    units = list(booking.room_units.select_related("stay_type").order_by("label"))
+    rooms = _rooms_input(guests, units)
+    n = len(guests)
+    mode = booking.mode if booking.mode == Booking.Mode.STAY or n > 2 else Booking.Mode.SINGLE if n == 1 else Booking.Mode.COUPLE
+    labels = [u.label for u in units if any(g.unit_id == u.pk for g in guests)]
+    return guests, labels, _requote(booking, guests, rooms, mode)
+
+
+def guest_removal_amount(traveller):
+    """{off: what comes off the total, due: the most they can get back, why:
+    what stops the removal}. With `why`, the amounts are None."""
+    from payments.money import quantize
+
+    booking = traveller.booking
+    try:
+        _open_for_changes(booking)
+        guests, _, quote = _without_guest(traveller)
+    except IllegalTransition as exc:
+        return {"off": None, "due": None, "why": str(exc)}
+    total = _new_total(quote, booking, guests)
+    paid = booking.amount_paid - booking.amount_refunded
+    return {"off": quantize(booking.total_amount - total), "due": max(quantize(paid - total), _own_money(traveller), Decimal("0")),
+            "why": None}
+
+
+def remove_guest(traveller, *, by_email: str, note: str = "", refund=None) -> Decimal:
+    """Take one guest off a booking: their ticket, extras and transfer go, and
+    their room if they had it alone. A shared room is charged once, so it stays
+    with the roommates. What's due back is any overpayment, or the guest's own
+    payments if that's more, so nobody else's share is paid with their money.
+    ``refund`` is how much of that they get, for staff to apply the refund
+    policy; the rest is kept as a logged fee. Their own payments are refunded
+    first. Returns what came off the total."""
+    from packages.models import RoomUnit
+    from payments.models import Payment
+    from payments.money import quantize
+    from payments.refunds import create_fixed_refund
+
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().get(pk=traveller.booking_id)
+        traveller = booking.travellers.select_related("unit").get(pk=traveller.pk)
+        _open_for_changes(booking)
+        if traveller.is_lead:
+            raise IllegalTransition("The lead guest can't be removed. Use Change lead contact, or cancel the booking.")
+        if traveller.checked_in_at:
+            raise IllegalTransition(f"{traveller.full_name} is already checked in.")
+        traveller.booking = booking
+        guests, labels, quote = _without_guest(traveller)
+        name, unit, old_total = traveller.full_name, traveller.unit, booking.total_amount
+        own_money = _own_money(traveller)
+        change = {"kind": "guest removed", "from": name, "note": note, "by": by_email}
+        _apply_quote(booking, quote, guests, labels, change=change, log="traveller_changes")
+
+        due_back = max(_overpaid(booking), own_money)
+        keep = quantize(due_back - refund) if refund is not None and refund < due_back else Decimal("0")
+        if keep > 0:
+            line = {"code": "guest_removal_fee", "name": f"Cancellation fee: {name}", "unit": "per_booking",
+                    "unit_price": str(keep), "quantity": 1, "line_total": str(keep), "refundable": False}
+            booking.addons = [*booking.addons, line]
+            booking.total_amount = quantize(booking.total_amount + keep)
+            booking.traveller_changes = [*booking.traveller_changes[:-1], {
+                **booking.traveller_changes[-1], "fee": str(keep), "new_total": str(booking.total_amount)}]
+            booking.save(update_fields=["addons", "total_amount", "traveller_changes", "updated_at"])
+            _spread(guests, keep)
+            guests[0].save(update_fields=["share"])
+
+        create_fixed_refund(booking, quantize(due_back - keep), reason=f"{name} removed from the booking", first_traveller=traveller)
+        for payment in booking.payments.filter(traveller=traveller):
+            Payment.objects.filter(pk=payment.pk).update(note=f"{payment.note or ''} [paid for {name}, since removed]".strip())
+        if unit and unit.pk and not any(g.unit_id == unit.pk for g in guests):
+            RoomUnit.objects.filter(pk=unit.pk).update(booking=None, held_until=None, hold_token="")
+        traveller.delete()  # ticket numbers stay as issued: they come from `position`
+    return quantize(old_total - booking.total_amount)

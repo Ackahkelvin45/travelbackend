@@ -55,8 +55,13 @@ class AfterBookingTests(TestCase):
         member.save()
         check_in_ticket(member, by=staff)
 
-        forfeit_ticket(other)
+        with self.assertRaises(IllegalTransition):  # never before the event starts
+            forfeit_ticket(other)
+        type(booking.package).objects.filter(pk=booking.package_id).update(available_from="2026-01-01")
+        other = booking.travellers.select_related("booking__package").get(pk=other.pk)
+        forfeit_ticket(other, by=staff)
         self.assertIsNotNone(other.forfeited_at)
+        self.assertEqual(other.forfeited_by, staff)
         with self.assertRaises(IllegalTransition):
             check_in_ticket(other, by=staff)
         booking.refresh_from_db()

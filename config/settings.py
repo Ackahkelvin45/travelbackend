@@ -142,11 +142,11 @@ SIDEBAR_GROUPS = [
         ("Bookings", "book_online", "/admin/bookings/booking/", "config.dashboard.badge_bookings"),
         ("Room allocation", "bed", "/admin/packages/roomunit/", None),
         ("Event check-in", "how_to_reg", "/admin/bookings/eventticket/", None),
-        ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", None),
+        ("Cancellation requests", "event_busy", "/admin/bookings/cancellationrequest/", "config.dashboard.badge_cancellations"),
     ]),
     _nav("Money", [
         ("Payments", "payments", "/admin/payments/payment/", "config.dashboard.badge_payments"),
-        ("Refunds", "currency_exchange", "/admin/payments/refund/", None),
+        ("Refunds", "currency_exchange", "/admin/payments/refund/", "config.dashboard.badge_refunds"),
         ("Academy donations", "volunteer_activism", "/admin/payments/donation/", None),
         ("Exchange rates", "trending_up", "/admin/payments/fxrate/", None),
     ]),
@@ -483,3 +483,5 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "https://azuratravelsbackend.cc")
 # Framework emails (admin password reset) go through Resend like every other email.
 EMAIL_BACKEND = "config.email_backend.ResendEmailBackend"
 DEFAULT_FROM_EMAIL = RESEND_FROM_EMAIL
+
+TEST_RUNNER = "config.test_runner.CleanCacheRunner"

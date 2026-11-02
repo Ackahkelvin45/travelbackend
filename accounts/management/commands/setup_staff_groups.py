@@ -9,6 +9,8 @@ portal enforce exactly these permissions, so this file is the single place the
                 approve/reject cancellation requests, see special requests
   Finance     + mark refunds processed, cancel bookings (guest bands),
                 cancel as organizer (full refund)
+  Content     trip updates, destinations, blog, reviews, newsletter
+  Check-in    the event door: tickets only
 
 Staff accounts also need is_staff=True to open /admin (set on the user).
 Developers/owners stay superusers and are unaffected.
@@ -19,9 +21,14 @@ from django.core.management.base import BaseCommand
 
 VIEWER = [
     "bookings.view_booking", "bookings.view_policyacceptance", "bookings.view_cancellationrequest",
-    "payments.view_payment", "payments.view_refund",
+    "payments.view_payment", "payments.view_refund", "payments.view_emaillog",
+    "bookings.view_bookingtraveller", "bookings.view_lead", "bookings.view_chatthread", "bookings.view_eventticket",
+    "packages.view_roomunit", "packages.view_travelpackage", "packages.view_staytype",
 ]
 OPERATIONS = VIEWER + [
+    # The coordinator's day: guests and rooms, leads, chats, check-in.
+    "bookings.change_bookingtraveller", "bookings.change_lead", "bookings.change_chatthread",
+    "bookings.change_eventticket", "packages.change_roomunit",
     "bookings.change_booking",            # open the change form / save inlines
     "bookings.view_special_requests",     # dietary / access needs — restricted
     "bookings.extend_deadline",
@@ -33,14 +40,30 @@ OPERATIONS = VIEWER + [
 FINANCE = OPERATIONS + [
     "payments.change_refund",
     "payments.process_refund",
+    "payments.view_donation",
+    "payments.view_fxrate",
     "bookings.cancel_booking",
     "bookings.cancel_as_organizer",
 ]
+
+# Website content only: no guests' bookings, and no packages, because their
+# forms hold prices, deposits and refund terms.
+CONTENT = [
+    "packages.view_tripupdate", "packages.add_tripupdate", "packages.change_tripupdate", "packages.delete_tripupdate",
+    "packages.view_destination", "packages.add_destination", "packages.change_destination",
+    "reviews.view_review", "reviews.change_review", "newsletter.view_newslettersubscriber",
+    "newsletter.change_newslettersubscriber", "blog.view_blog", "blog.add_blog", "blog.change_blog",
+    "blog.view_pendingblog", "blog.change_pendingblog",
+]
+# The door at the event: tickets and nothing else.
+CHECK_IN = ["bookings.view_eventticket", "bookings.change_eventticket"]
 
 GROUPS = {
     "Azura Viewer": VIEWER,
     "Azura Operations": OPERATIONS,
     "Azura Finance": FINANCE,
+    "Azura Content": CONTENT,
+    "Azura Check-in": CHECK_IN,
 }
 
 

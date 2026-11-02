@@ -181,7 +181,12 @@ class BlogAdmin(ModelAdmin):
     ]
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-created_at"]
-    actions = ["approve_selected"]
+    actions = ["approve_selected", "unpublish_selected"]
+
+    @admin.action(description="Unpublish", permissions=["change"])
+    def unpublish_selected(self, request, queryset):
+        updated = queryset.filter(status=Blog.Status.PUBLISHED).update(status=Blog.Status.DRAFT)
+        self.message_user(request, f"{updated} blog(s) moved back to draft.")
 
     fieldsets = (
         (
@@ -228,12 +233,13 @@ class BlogAdmin(ModelAdmin):
     # Actions
     # ------------------------------------------------------------------
 
-    @admin.action(description="Approve selected blogs (publish immediately)")
+    @admin.action(description="Approve selected blogs (publish immediately)", permissions=["change"])
     def approve_selected(self, request, queryset):
-        updated = queryset.filter(status=Blog.Status.DRAFT).update(
-            status=Blog.Status.PUBLISHED
-        )
-        self.message_user(request, f"{updated} blog(s) approved and published.")
+        drafts = list(queryset.filter(status=Blog.Status.DRAFT))
+        for blog in drafts:
+            blog.status = Blog.Status.PUBLISHED
+            blog.save()  # stamps published_at, which the site's lists rely on
+        self.message_user(request, f"{len(drafts)} blog(s) approved and published.")
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +390,7 @@ class PendingBlogAdmin(ModelAdmin):
     # Actions
     # ------------------------------------------------------------------
 
-    @admin.action(description="Approve selected blogs (publish immediately)")
+    @admin.action(description="Approve selected blogs (publish immediately)", permissions=["change"])
     def approve_selected(self, request, queryset):
         from django.utils import timezone
 

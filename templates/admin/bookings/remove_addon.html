@@ -3,7 +3,7 @@
 <div class="az-panel">
   <h1 class="font-bold text-xl text-important">Remove an add-on · {{ booking.reference }}</h1>
   <p class="text-subtle">50% of the add-on's price is kept as a cancellation fee (booking terms). Any over-payment becomes a pending refund for Finance.</p>
-  {% if choices or lines %}
+  {% if choices or lines and not booking.mode %}
   <form method="post">{% csrf_token %}
     <fieldset class="az-field">
       {% if booking.mode %}
@@ -19,7 +19,7 @@
     </div>
   </form>
   {% else %}
-  <p>This booking has no add-ons that can be removed. Rooms and airport transfers are changed by staff in the guests and rooms tab.</p>
+  <p>This booking has no experiences that can be removed here. Rooms are moved on the Guests &amp; rooms tab. To take an airport transfer off, use Create a refund with the reason: it lowers the total.</p>
   <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Back to the booking</a>
   {% endif %}
 </div>

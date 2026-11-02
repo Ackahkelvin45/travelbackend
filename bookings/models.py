@@ -334,18 +334,23 @@ class Booking(models.Model):
         Untagged money (the organiser's) covers each traveller's checkout
         portion first — whatever they later paid themselves — then what is
         left of each share, in booking order.
-        ponytail: refunds are not attributed per person; staff handle those."""
+        Money refunded or queued to be refunded no longer covers anyone, so
+        what guests owe adds up to what the booking owes."""
         from decimal import Decimal
         from django.db.models import Sum
         from payments.money import quantize
 
         travellers = list(self.travellers.all())
-        tagged = dict(
-            self.payments.filter(status="success", traveller__isnull=False)
-            .values_list("traveller").annotate(total=Sum("amount"))
-        )
-        own = {t.pk: quantize(tagged.get(t.pk) or 0) for t in travellers}
-        untagged = max(self.amount_paid - sum(own.values(), Decimal("0")), Decimal("0"))
+        own = {t.pk: Decimal("0") for t in travellers}
+        untagged = Decimal("0")
+        for payment in self.payments.filter(status__in=["success", "refunded"]):
+            back = payment.refunds.exclude(status="rejected").aggregate(t=Sum("amount"))["t"] or 0
+            net = quantize(payment.amount - back)
+            if payment.traveller_id in own:
+                own[payment.traveller_id] += net
+            else:
+                untagged += net  # the organiser's, or a guest's since removed
+        untagged = max(untagged, Decimal("0"))
         covered = {t.pk: Decimal("0") for t in travellers}
         for t in travellers:  # 1. the checkout payment's portion for each guest
             covered[t.pk] = min(t.checkout_portion, untagged)
@@ -553,6 +558,9 @@ class BookingTraveller(models.Model):
         default=False, help_text="Allow check-in with a balance outstanding (record why below).",
     )
     access_note = models.CharField(max_length=300, blank=True, help_text="Who approved the exception, and why.")
+    forfeited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
     forfeited_at = models.DateTimeField(
         null=True, blank=True, help_text="Ticket forfeited under the booking terms (unpaid at event start).",
     )
@@ -585,8 +593,7 @@ class BookingTraveller(models.Model):
     @property
     def ticket_code(self) -> str:
         """Core ticket number shown to guests and staff, e.g. AZT-1A2B3C4D-T2."""
-        ids = list(self.booking.travellers.values_list("pk", flat=True))
-        return f"{self.booking.reference}-T{ids.index(self.pk) + 1}"
+        return f"{self.booking.reference}-T{self.position + 1}"
 
     class Meta:
         ordering = ["position", "created_at"]

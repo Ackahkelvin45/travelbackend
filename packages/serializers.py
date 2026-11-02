@@ -244,14 +244,14 @@ class TravelPackageListSerializer(serializers.ModelSerializer):
         if hasattr(obj, "avg_rating"):
             val = obj.avg_rating
             return round(val, 1) if val is not None else None
-        result = obj.reviews.aggregate(avg=Avg("rating"))
+        result = obj.reviews.filter(is_visible=True).aggregate(avg=Avg("rating"))
         val = result["avg"]
         return round(val, 1) if val is not None else None
 
     def get_review_count(self, obj):
         if hasattr(obj, "review_count"):
             return obj.review_count
-        return obj.reviews.count()
+        return obj.reviews.filter(is_visible=True).count()
 
 
 class TravelPackageDetailSerializer(serializers.ModelSerializer):
@@ -349,11 +349,11 @@ class TravelPackageDetailSerializer(serializers.ModelSerializer):
         if hasattr(obj, "avg_rating"):
             val = obj.avg_rating
             return round(val, 1) if val is not None else None
-        result = obj.reviews.aggregate(avg=Avg("rating"))
+        result = obj.reviews.filter(is_visible=True).aggregate(avg=Avg("rating"))
         val = result["avg"]
         return round(val, 1) if val is not None else None
 
     def get_review_count(self, obj):
         if hasattr(obj, "review_count"):
             return obj.review_count
-        return obj.reviews.count()
+        return obj.reviews.filter(is_visible=True).count()

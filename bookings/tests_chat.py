@@ -141,7 +141,7 @@ class StaffToolsTests(TestCase):
 
     def test_create_lead_button_opens_the_lead(self):
         thread = site_chat("Hi", contact_phone="+233244123456")
-        res = self.client.get(f"/admin/bookings/chatthread/{thread.pk}/capture-lead/")
+        res = self.client.post(f"/admin/bookings/chatthread/{thread.pk}/capture-lead/")
         thread.refresh_from_db()
         self.assertRedirects(res, f"/admin/bookings/lead/{thread.lead_id}/change/", fetch_redirect_response=False)
 

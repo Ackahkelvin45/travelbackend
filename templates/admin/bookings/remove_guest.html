@@ -1,0 +1,24 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Remove a guest · {{ booking.reference }}</h1>
+  <p class="text-subtle">Their ticket and extras go, and their room if they had it alone. If they shared, the room's price stays and moves to their roommates. The booking's group discount stays as booked. Any overpayment becomes a pending refund. The guest isn't emailed automatically: tell them.</p>
+  {% if options %}
+  <form method="post">{% csrf_token %}
+    <fieldset class="az-field">
+      {% for o in options %}<label><input type="radio" name="guest" value="{{ o.guest.pk }}" required{% if o.off is None %} disabled{% endif %}> {{ o.guest.full_name|default:"Guest" }} · {% if o.off is None %}can't be removed yet: {{ o.why }}{% else %}{{ booking.currency }} {{ o.off }} comes off the total, up to {{ booking.currency }} {{ o.due }} can go back to the guest{% endif %}</label>{% endfor %}
+    </fieldset>
+    <label class="az-field">Refund to the guest ({{ booking.currency }}) <input name="refund" type="number" step="0.01" min="0" required></label>
+    <p class="text-subtle">The refund policy gives {{ policy }}% today. Enter what they get back, up to the amount above; the rest is kept as a cancellation fee on the booking. Enter 0 if nothing.</p>
+    <label class="az-field">Note <input name="note" maxlength="300" placeholder="Why, and who asked"></label>
+    <div class="az-actions">
+      <button type="submit" class="az-btn">Remove guest</button>
+      <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <p>There's no one to remove: the lead guest stays on the booking. Use Change lead contact, or cancel the booking.</p>
+  <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Back to the booking</a>
+  {% endif %}
+</div>
+{% endblock %}

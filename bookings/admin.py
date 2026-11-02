@@ -1,10 +1,15 @@
+from decimal import Decimal, InvalidOperation
+
 from django import forms
 from django.contrib import admin
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from unfold.admin import ModelAdmin, TabularInline
 from unfold.contrib.filters.admin import ChoicesDropdownFilter, RangeDateFilter, RelatedDropdownFilter
 from unfold.decorators import action, display
 from unfold.widgets import UnfoldAdminTextareaWidget
 
+from config.admin_tools import post_only, safe_csv
 from config.unfold_theme import BOOKING_STAGE_BADGE, BOOKING_STATUS_BADGE, LEAD_STAGE_BADGE, PAYMENT_STATE_BADGE
 from payments.models import EmailLog, Payment
 from payments.services import record_offline_payment
@@ -35,6 +40,11 @@ class OfflinePaymentInlineForm(forms.ModelForm):
         amount = self.cleaned_data["amount"]
         if amount is None or amount <= 0:
             raise forms.ValidationError("Amount must be positive.")
+        booking = self.instance.booking
+        if booking.status in (Booking.Status.CANCELLED, Booking.Status.COMPLETED):
+            return amount  # money that really arrived late: recorded and flagged for a refund
+        if amount > booking.balance:
+            raise forms.ValidationError(f"That is more than the {booking.balance} {booking.currency} balance.")
         return amount
 
 
@@ -192,6 +202,16 @@ class BookingAdminForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields["checklist_items"].initial = [k for k, v in (self.instance.checklist or {}).items() if v]
 
+    def clean(self):
+        cleaned = super().clean()
+        for field in ("marketing_consent", "photo_consent"):
+            if field in self.changed_data and cleaned.get(field):
+                self.add_error(field, "Only the guest can opt in. Staff can record an opt-out here.")
+        if "payment_deadline_override" in self.changed_data and cleaned.get("payment_deadline_override") \
+                and not cleaned.get("payment_deadline_override_reason"):
+            self.add_error("payment_deadline_override_reason", "Every deadline extension needs a written reason.")
+        return cleaned
+
     def save(self, commit=True):
         from django.utils import timezone
         booking = super().save(commit=False)
@@ -265,7 +285,8 @@ class BookingAdmin(ModelAdmin):
     actions = ["assign_coordinator", "send_balance_reminders", "export_csv",
                "mark_arrived", "cancel_with_refund", "cancel_as_organizer", "mark_completed"]
     actions_detail = ["detail_send_reminder", "detail_resend_confirmation", "detail_mark_contacted",
-                      "detail_change_contact", "detail_remove_addon"]
+                      "detail_change_contact", "detail_remove_addon", "detail_change_room", "detail_remove_guest",
+                      "detail_create_refund", "detail_cancel"]
     list_display = ["reference_cell", "lead_cell", "stay_cell", "total_cell", "paid_cell",
                     "due_cell", "coordinator_cell", "stage_badge"]
     list_filter = [
@@ -292,9 +313,29 @@ class BookingAdmin(ModelAdmin):
         "effective_deadline_display", "cancelled_at", "cancellation_reason",
         "reminders_sent", "overdue_notice_sent_at", "cure_deadline_display",
         "arrived_at", "created_at", "updated_at",
-        "coordinator_assigned_at", "lead_contacted_at", "contact_sla", "linked_group",
+        "coordinator_assigned_at", "lead_contacted_at", "contact_sla", "linked_group", "change_log",
     ]
     ordering = ["-created_at"]
+
+    def has_add_permission(self, request):
+        return False  # bookings come from checkout, which prices and holds rooms
+
+    # Status, money and who/what was booked change only through the services
+    # (Cancel, Change lead contact, add-ons), which keep tickets, rooms, refunds
+    # and the audit trail right.
+    LOCKED = ["status", "mode", "num_guests", "package", "travel_date", "payment_plan", "currency", "user",
+              "first_name", "last_name", "email", "phone"]
+
+    @admin.display(description="Changes")
+    def change_log(self, obj):
+        """Renames, replacements and add-on removals, oldest first."""
+        from django.utils.html import format_html_join
+        rows = sorted([*(obj.traveller_changes or []), *(obj.addon_changes or [])], key=lambda c: c.get("at", ""))
+        skip = ("at", "by")
+        return format_html_join("", "<p><strong>{}</strong> · {} · {}</p>", (
+            (str(c.get("at", ""))[:16].replace("T", " "), c.get("by", ""),
+             ", ".join(f"{k}: {v}" for k, v in c.items() if k not in skip)) for c in rows
+        )) or "No changes recorded."
 
     @admin.display(description="Linked bookings")
     def linked_group(self, obj):
@@ -315,6 +356,10 @@ class BookingAdmin(ModelAdmin):
             "fields": ("reference", "status", "user", ("first_name", "last_name"), ("email", "phone"),
                        "country", ("mode", "num_guests"), "package", "option", "travel_date",
                        "linked_group", "arrived_at", "special_requests"),
+        }),
+        ("Change log", {
+            "classes": ["tab"],
+            "fields": ("change_log",),
         }),
         ("Coordinator", {
             "classes": ["tab"],
@@ -375,7 +420,7 @@ class BookingAdmin(ModelAdmin):
         )
 
     def get_readonly_fields(self, request, obj=None):
-        ro = list(super().get_readonly_fields(request, obj))
+        ro = [*super().get_readonly_fields(request, obj), *self.LOCKED]
         if not request.user.has_perm("bookings.extend_deadline"):
             ro += ["payment_deadline_override", "payment_deadline_override_reason"]
         return ro
@@ -387,11 +432,6 @@ class BookingAdmin(ModelAdmin):
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     def save_model(self, request, obj, form, change):
-        # Policy: every deadline extension is recorded in writing.
-        if "payment_deadline_override" in form.changed_data and obj.payment_deadline_override \
-                and not obj.payment_deadline_override_reason:
-            from django.contrib import messages
-            self.message_user(request, "Deadline extended without a reason — please add one.", messages.WARNING)
         super().save_model(request, obj, form, change)
         if "coordinator" in form.changed_data:
             from payments.email import send_coordinator_assigned
@@ -493,7 +533,7 @@ class BookingAdmin(ModelAdmin):
         return obj.effective_payment_deadline or "—"
 
     # ── Bulk actions ────────────────────────────────────────────────────────
-    @admin.action(description="Assign coordinator")
+    @admin.action(description="Assign coordinator", permissions=["change"])
     def assign_coordinator(self, request, queryset):
         from django.contrib import messages
         from django.contrib.auth import get_user_model
@@ -507,12 +547,13 @@ class BookingAdmin(ModelAdmin):
                 self.message_user(request, "Choose a coordinator.", messages.WARNING)
                 return None
             from payments.email import send_coordinator_assigned
-            bookings = list(queryset.exclude(coordinator=user))
-            n = queryset.update(coordinator=user, coordinator_assigned_at=timezone.now())
+            active = queryset.exclude(status=Booking.Status.CANCELLED)
+            bookings = list(active.exclude(coordinator=user))
+            n = active.update(coordinator=user, coordinator_assigned_at=timezone.now())
             for b in bookings:
                 b.coordinator = user
                 send_coordinator_assigned(b)
-            self.message_user(request, f"{n} booking(s) assigned to {user.full_name or user.email}.", messages.SUCCESS)
+            self.message_user(request, f"{n} booking(s) assigned to {user.full_name.strip() or user.email}.", messages.SUCCESS)
             return None
         return TemplateResponse(request, "admin/bookings/assign_coordinator.html", {
             **self.admin_site.each_context(request), "title": "Assign coordinator",
@@ -520,7 +561,7 @@ class BookingAdmin(ModelAdmin):
             "action_checkbox_name": admin.helpers.ACTION_CHECKBOX_NAME,
         })
 
-    @admin.action(description="Send balance reminder (skips paid and cancelled)")
+    @admin.action(description="Send balance reminder (skips paid and cancelled)", permissions=["change"])
     def send_balance_reminders(self, request, queryset):
         from django.contrib import messages
         from .services import send_balance_reminder
@@ -531,11 +572,10 @@ class BookingAdmin(ModelAdmin):
 
     @admin.action(description="Export selected to CSV")
     def export_csv(self, request, queryset):
-        import csv
         from django.http import HttpResponse
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="bookings.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Reference", "Created", "Lead guest", "Email", "Phone", "Mode", "Guests", "Stay", "Status",
                     "Currency", "Total", "Paid", "Refunded", "Balance", "Balance due", "Coordinator"])
         for b in queryset.select_related("coordinator", "package"):
@@ -550,7 +590,7 @@ class BookingAdmin(ModelAdmin):
     def mark_arrived(self, request, queryset):
         from django.contrib import messages
         from django.utils import timezone
-        updated = queryset.filter(arrived_at__isnull=True).update(arrived_at=timezone.now())
+        updated = queryset.filter(arrived_at__isnull=True, status=Booking.Status.CONFIRMED).update(arrived_at=timezone.now())
         self.message_user(request, f"{updated} booking(s) marked arrived.", messages.SUCCESS)
 
     @admin.action(description="Cancel as ORGANIZER — full refund of everything paid",
@@ -591,21 +631,29 @@ class BookingAdmin(ModelAdmin):
                 messages.SUCCESS,
             )
 
-    @admin.action(description="Mark completed (trip has taken place)")
+    @admin.action(description="Mark completed (trip has taken place)", permissions=["change"])
     def mark_completed(self, request, queryset):
         from django.contrib import messages
 
-        updated = queryset.filter(status=Booking.Status.CONFIRMED).update(
-            status=Booking.Status.COMPLETED
-        )
+        from django.utils import timezone
+        ready = queryset.filter(status=Booking.Status.CONFIRMED, travel_date__lte=timezone.localdate())
+        from .services import ticket_outstanding
+        settled = lambda b: b.is_paid or all(t.forfeited_at or ticket_outstanding(t) <= 0 for t in b.travellers.all())
+        ready = ready.filter(pk__in=[b.pk for b in ready if settled(b)])
+        skipped = queryset.count() - ready.count()
+        updated = ready.update(status=Booking.Status.COMPLETED)
         self.message_user(request, f"{updated} booking(s) marked completed.", messages.SUCCESS)
+        if skipped:
+            self.message_user(request, f"{skipped} skipped: only confirmed bookings whose trip has started, paid in full or with unpaid tickets forfeited.",
+                              messages.WARNING)
 
     # ── Detail buttons ──────────────────────────────────────────────────────
     def _back(self, object_id):
         from django.shortcuts import redirect
         return redirect("admin:bookings_booking_change", object_id)
 
-    @action(description="Send balance reminder now", url_path="send-reminder")
+    @action(description="Send balance reminder now", url_path="send-reminder", permissions=["bookings.change_booking"])
+    @post_only
     def detail_send_reminder(self, request, object_id):
         from django.contrib import messages
         from .services import send_balance_reminder
@@ -616,7 +664,8 @@ class BookingAdmin(ModelAdmin):
             self.message_user(request, "No reminder sent: the booking is paid, not confirmed or has no deadline.", messages.WARNING)
         return self._back(object_id)
 
-    @action(description="Resend confirmation and receipt", url_path="resend-confirmation")
+    @action(description="Resend confirmation and receipt", url_path="resend-confirmation", permissions=["bookings.change_booking"])
+    @post_only
     def detail_resend_confirmation(self, request, object_id):
         from django.contrib import messages
         from payments.email import send_booking_confirmation
@@ -629,7 +678,8 @@ class BookingAdmin(ModelAdmin):
             self.message_user(request, f"Confirmation and receipt resent to {booking.email}.", messages.SUCCESS)
         return self._back(object_id)
 
-    @action(description="Mark lead guest contacted", url_path="mark-contacted")
+    @action(description="Mark lead guest contacted", url_path="mark-contacted", permissions=["bookings.change_booking"])
+    @post_only
     def detail_mark_contacted(self, request, object_id):
         from django.contrib import messages
         from django.utils import timezone
@@ -639,6 +689,119 @@ class BookingAdmin(ModelAdmin):
         booking.save(update_fields=["lead_contacted_at", "checklist", "updated_at"])
         self.message_user(request, "Contact recorded.", messages.SUCCESS)
         return self._back(object_id)
+
+    @action(description="Cancel booking", url_path="cancel-booking", permissions=["bookings.cancel_booking"])
+    @post_only
+    def detail_cancel(self, request, object_id):
+        from django.contrib import messages
+        from .services import IllegalTransition, cancel_booking
+        try:
+            cancel_booking(Booking.objects.get(pk=object_id), reason=Booking.CancellationReason.ADMIN)
+        except (IllegalTransition, ValueError) as exc:
+            self.message_user(request, str(exc), messages.WARNING)
+        else:
+            self.message_user(request, "Booking cancelled. Any refunds are waiting in Refunds.", messages.SUCCESS)
+        return self._back(object_id)
+
+    @action(description="Create a refund", url_path="create-refund", permissions=["bookings.cancel_booking"])
+    def detail_create_refund(self, request, object_id):
+        """A goodwill or partial refund, an overpayment, or money that reached
+        a closed booking. Queued in Refunds; nothing moves until it's processed."""
+        from django.contrib import messages
+        from payments.money import quantize
+        from payments.refunds import create_fixed_refund, refundable_amount
+        from .services import _overpaid, lower_total
+        booking = Booking.objects.get(pk=object_id)
+        if request.method == "POST":
+            reason = request.POST.get("reason", "").strip()
+            try:
+                amount = Decimal(request.POST.get("amount", ""))
+                amount = quantize(amount) if amount.is_finite() else Decimal("0")
+            except (InvalidOperation, ValueError):
+                amount = Decimal("0")
+            with transaction.atomic():  # the lock makes a repeated submit wait, then see the first one
+                booking = Booking.objects.select_for_update().get(pk=object_id)
+                if request.POST.get("version") != str(booking.refunds.count()):
+                    self.message_user(request, "That refund was already created.", messages.WARNING)
+                    return self._back(object_id)
+                available, overpaid = refundable_amount(booking), _overpaid(booking)
+                is_open = booking.status != Booking.Status.CANCELLED
+                if amount <= 0 or amount > available:
+                    self.message_user(request, f"Enter an amount up to {available} {booking.currency}.", messages.ERROR)
+                elif not reason:
+                    self.message_user(request, "Give a reason: it goes on the refund's record.", messages.ERROR)
+                elif is_open and booking.payments.filter(disputed=True).exists():
+                    self.message_user(request, "A chargeback is open on this booking. Resolve it first.", messages.ERROR)
+                else:
+                    # Beyond any overpayment, the guest is being let off part of
+                    # the price: lower it, so they don't end up owing it again.
+                    price_cut = max(amount - overpaid, Decimal("0")) if is_open else Decimal("0")
+                    if price_cut:
+                        lower_total(booking, price_cut, label=f"Adjustment: {reason}"[:120], by_email=request.user.email)
+                    create_fixed_refund(booking, amount, reason=f"{reason} [{request.user.email}]")
+                    self.message_user(request, f"Refund of {amount} {booking.currency} is waiting in Refunds.", messages.SUCCESS)
+                    return self._back(object_id)
+        available, overpaid = refundable_amount(booking), _overpaid(booking)
+        open_booking, version = booking.status != Booking.Status.CANCELLED, booking.refunds.count()
+        return self._form_page(request, booking, "admin/bookings/create_refund.html", "Create a refund",
+                               available=available, overpaid=overpaid, open_booking=open_booking, version=version,
+                               form=request.POST)
+
+    @action(description="Change room type", url_path="change-room", permissions=["bookings.change_booking"])
+    def detail_change_room(self, request, object_id):
+        from django.contrib import messages
+        from .pricing import live_catalog
+        from .services import IllegalTransition, change_room_type, release_empty_room
+        booking = Booking.objects.get(pk=object_id)
+        if request.method == "POST":
+            unit = booking.room_units.filter(pk=request.POST.get("unit") or None).select_related("stay_type").first()
+            note = request.POST.get("note", "")[:300]
+            try:
+                if unit is None:
+                    raise IllegalTransition("Choose the room to change.")
+                if request.POST.get("stay") == "release":
+                    delta = release_empty_room(booking, unit, by_email=request.user.email, note=note)
+                else:
+                    delta = change_room_type(booking, unit, request.POST.get("stay", ""), by_email=request.user.email, note=note)
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                change = f"{booking.currency} {abs(delta):,.2f} {'added to' if delta >= 0 else 'taken off'} the total"
+                self.message_user(request, f"Room changed: {change}. Any overpayment is waiting in Refunds.", messages.SUCCESS)
+                return self._back(object_id)
+        stays = [s for s in live_catalog(booking.package).stay_types.values() if s.on_sale and not s.stay_only] if booking.mode else []
+        return self._form_page(request, booking, "admin/bookings/change_room.html", "Change room type",
+                               units=booking.room_units.filter(check_in__isnull=True).select_related("stay_type"), stays=stays)
+
+    @action(description="Remove a guest", url_path="remove-guest", permissions=["bookings.change_booking"])
+    def detail_remove_guest(self, request, object_id):
+        from django.contrib import messages
+        from .services import IllegalTransition, guest_removal_amount, remove_guest
+        booking = Booking.objects.get(pk=object_id)
+        guests = booking.travellers.filter(is_lead=False).select_related("unit", "booking") if booking.mode else []
+        if request.method == "POST":
+            guest = booking.travellers.filter(pk=request.POST.get("guest") or None, is_lead=False).first()
+            try:
+                if guest is None:
+                    raise IllegalTransition("Choose the guest to remove.")
+                try:
+                    refund = Decimal(request.POST.get("refund", "").strip())
+                except InvalidOperation:
+                    raise IllegalTransition("Enter what the guest gets back. Use 0 if nothing.")
+                if not refund.is_finite() or refund < 0:
+                    raise IllegalTransition("Enter what the guest gets back. Use 0 if nothing.")
+                amount = remove_guest(guest, by_email=request.user.email, note=request.POST.get("note", "")[:300], refund=refund)
+            except IllegalTransition as exc:
+                self.message_user(request, str(exc), messages.WARNING)
+            else:
+                self.message_user(request, f"Guest removed: {booking.currency} {amount:,.2f} taken off the total. "
+                                           "Any refund is waiting in Refunds.", messages.SUCCESS)
+                return self._back(object_id)
+        options = [{**guest_removal_amount(g), "guest": g} for g in guests]
+        from payments.refunds import compute_refund
+        policy = compute_refund(booking)["breakdown"]["percent"] if options else None
+        return self._form_page(request, booking, "admin/bookings/remove_guest.html", "Remove a guest",
+                               options=options, policy=policy)
 
     def _form_page(self, request, booking, template, title, **ctx):
         from django.template.response import TemplateResponse
@@ -683,7 +846,10 @@ class BookingAdmin(ModelAdmin):
             traveller, code = None, request.POST.get("code", "")
             if booking.mode and ":" in code:
                 tid, code = code.split(":", 1)
-                traveller = booking.travellers.filter(pk=tid).first()
+                try:
+                    traveller = booking.travellers.filter(pk=tid).first()
+                except (ValueError, ValidationError):
+                    traveller = None
             try:
                 remove_addon(booking, code=code, by_email=request.user.email, traveller=traveller,
                              note=request.POST.get("note", "")[:300])
@@ -706,7 +872,7 @@ class BookingAdmin(ModelAdmin):
 
         instances = formset.save(commit=False)
         for obj in instances:
-            if obj.pk is None:
+            if obj._state.adding:  # a UUID pk is set before saving
                 record_offline_payment(
                     form.instance,
                     amount=obj.amount,
@@ -721,6 +887,8 @@ class BookingAdmin(ModelAdmin):
         from django.utils import timezone
         from .services import IllegalTransition, move_traveller
 
+        # Saved by hand below; the admin's change message still reads these.
+        formset.new_objects, formset.changed_objects, formset.deleted_objects = [], [], []
         changes = []
         for f in formset.forms:
             if not f.has_changed() or not f.instance.pk:
@@ -779,7 +947,7 @@ class PolicyDocumentAdmin(ModelAdmin):
             return ["type", "version", "body", "published_at", "created_at"]
         return ["published_at", "created_at"]
 
-    @admin.action(description="Publish and make current")
+    @admin.action(description="Publish and make current", permissions=["change"])
     def publish_documents(self, request, queryset):
         from django.contrib import messages
         from django.utils import timezone
@@ -802,9 +970,30 @@ class CancellationRequestAdmin(ModelAdmin):
     readonly_fields = ["booking", "requested_at", "reason", "status", "refund_quote", "resolved_at", "resolved_by"]
     fields = ["booking", "requested_at", "reason", "status", "refund_quote", "staff_note", "resolved_at", "resolved_by"]
     actions = ["approve", "reject"]
+    actions_detail = ["detail_approve", "detail_reject"]
 
     def has_add_permission(self, request):
         return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False  # the guest's dated request is the evidence for their refund band
+
+    def _resolve_one(self, request, object_id, fn, verb):
+        from django.shortcuts import redirect
+        self._resolve(request, CancellationRequest.objects.filter(pk=object_id), fn, verb)
+        return redirect("admin:bookings_cancellationrequest_change", object_id)
+
+    @action(description="Approve", url_path="approve", permissions=["bookings.resolve_cancellation"])
+    @post_only
+    def detail_approve(self, request, object_id):
+        from .services import approve_cancellation
+        return self._resolve_one(request, object_id, approve_cancellation, "approved")
+
+    @action(description="Reject", url_path="reject", permissions=["bookings.resolve_cancellation"])
+    @post_only
+    def detail_reject(self, request, object_id):
+        from .services import reject_cancellation
+        return self._resolve_one(request, object_id, reject_cancellation, "rejected")
 
     @admin.display(description="Quoted refund")
     def quoted_refund(self, obj):
@@ -818,8 +1007,8 @@ class CancellationRequestAdmin(ModelAdmin):
             try:
                 fn(req, by_user=request.user, note=req.staff_note)
                 done += 1
-            except IllegalTransition as exc:
-                self.message_user(request, f"{req.booking.reference}: {exc}", messages.WARNING)
+            except (IllegalTransition, ValueError) as exc:
+                self.message_user(request, f"{req.booking.reference}: {exc} Then come back to this request.", messages.WARNING)
         if done:
             self.message_user(request, f"{done} request(s) {verb}.", messages.SUCCESS)
 
@@ -882,7 +1071,7 @@ class LeadAdmin(ModelAdmin):
     list_filter_submit = True
     search_fields = ["name", "email", "phone", "referral_code", "message"]
     list_select_related = ["assigned_to", "booking", "package"]
-    actions = ["mark_replied", "assign_to_me", "mark_lost", "export_csv"]
+    actions = ["mark_replied", "assign_to_me", "mark_lost", "reopen", "export_csv"]
     actions_detail = ["detail_mark_replied", "detail_send_reminder"]
     readonly_fields = ["timeline", "quote_summary", "booking", "created_at", "updated_at"]
     fieldsets = (
@@ -944,28 +1133,32 @@ class LeadAdmin(ModelAdmin):
         return format_html('<ul class="az-timeline">{}</ul>', format_html_join(
             "", "<li><span>{}</span>{}</li>", ((t.strftime("%d %b %Y %H:%M"), text) for t, text in sorted(events))))
 
-    @admin.action(description="Mark replied")
+    @admin.action(description="Mark replied", permissions=["change"])
     def mark_replied(self, request, queryset):
         from django.utils import timezone
-        n = queryset.filter(replied_at__isnull=True).update(replied_at=timezone.now())
-        queryset.filter(stage=Lead.Stage.NEW).update(stage=Lead.Stage.CONTACTED)
+        pks = list(queryset.values_list("pk", flat=True))  # the "waiting" filter empties once they're replied
+        n = Lead.objects.filter(pk__in=pks, replied_at__isnull=True).update(replied_at=timezone.now())
+        Lead.objects.filter(pk__in=pks, stage=Lead.Stage.NEW).update(stage=Lead.Stage.CONTACTED)
         self.message_user(request, f"{n} lead(s) marked replied.")
 
-    @admin.action(description="Assign to me")
+    @admin.action(description="Assign to me", permissions=["change"])
     def assign_to_me(self, request, queryset):
         self.message_user(request, f"{queryset.update(assigned_to=request.user)} lead(s) assigned to you.")
 
-    @admin.action(description="Mark lost")
+    @admin.action(description="Mark lost", permissions=["change"])
     def mark_lost(self, request, queryset):
         self.message_user(request, f"{queryset.exclude(stage=Lead.Stage.WON).update(stage=Lead.Stage.LOST)} lead(s) closed as lost.")
 
+    @admin.action(description="Reopen", permissions=["change"])
+    def reopen(self, request, queryset):
+        self.message_user(request, f"{queryset.filter(stage=Lead.Stage.LOST).update(stage=Lead.Stage.NEW)} lead(s) reopened.")
+
     @admin.action(description="Export selected to CSV")
     def export_csv(self, request, queryset):
-        import csv
         from django.http import HttpResponse
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="leads.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Created", "Name", "Email", "Phone", "Source", "Stage", "Quote total", "Marketing consent",
                     "Referral code", "Reply due", "Replied", "Booking"])
         for l in queryset.select_related("booking"):
@@ -978,7 +1171,8 @@ class LeadAdmin(ModelAdmin):
         from django.shortcuts import redirect
         return redirect("admin:bookings_lead_change", object_id)
 
-    @action(description="Mark replied", url_path="mark-replied")
+    @action(description="Mark replied", url_path="mark-replied", permissions=["bookings.change_lead"])
+    @post_only
     def detail_mark_replied(self, request, object_id):
         from django.utils import timezone
         lead = Lead.objects.get(pk=object_id)
@@ -988,7 +1182,8 @@ class LeadAdmin(ModelAdmin):
         self.message_user(request, "Marked replied.")
         return self._back(object_id)
 
-    @action(description="Send quote reminder", url_path="send-reminder")
+    @action(description="Send quote reminder", url_path="send-reminder", permissions=["bookings.change_lead"])
+    @post_only
     def detail_send_reminder(self, request, object_id):
         from django.contrib import messages
         from payments.email import send_saved_quote
@@ -999,9 +1194,12 @@ class LeadAdmin(ModelAdmin):
             self.message_user(request, "Not sent: no marketing consent. Reply only to their direct enquiry.", messages.WARNING)
         elif not lead.quote:
             self.message_user(request, "Not sent: this lead has no saved quote.", messages.WARNING)
-        else:
-            send_saved_quote(lead)
+        elif not lead.email:
+            self.message_user(request, "Not sent: this lead has no email address.", messages.WARNING)
+        elif send_saved_quote(lead, reminder=True):
             self.message_user(request, f"Quote reminder sent to {lead.email}.", messages.SUCCESS)
+        else:
+            self.message_user(request, "The email couldn't be sent. Check Email log and try again.", messages.ERROR)
         return self._back(object_id)
 
 
@@ -1069,7 +1267,7 @@ class ChatThreadAdmin(ModelAdmin):
     list_filter_submit = True
     search_fields = ["wa_id", "name", "contact_email", "contact_phone", "lead__email", "staff_note"]
     list_select_related = ["assigned_to", "lead"]
-    actions = ["assign_to_me", "mark_following_up", "mark_closed", "capture_leads", "export_csv"]
+    actions = ["assign_to_me", "mark_following_up", "mark_closed", "reopen", "capture_leads", "export_csv"]
     actions_detail = ["detail_capture_lead"]
     readonly_fields = ["wa_id", "name", "channel", "intent", "topics_cell", "contact_email", "contact_phone",
                        "needs_person", "lead", "last_inbound_at", "transcript"]
@@ -1106,17 +1304,21 @@ class ChatThreadAdmin(ModelAdmin):
     def lead_cell(self, obj):
         return obj.lead.name if obj.lead else "—"
 
-    @admin.action(description="Assign to me")
+    @admin.action(description="Assign to me", permissions=["change"])
     def assign_to_me(self, request, queryset):
         self.message_user(request, f"{queryset.update(assigned_to=request.user)} conversation(s) assigned to you.")
 
-    @admin.action(description="Mark following up")
+    @admin.action(description="Mark following up", permissions=["change"])
     def mark_following_up(self, request, queryset):
         self.message_user(request, f"{queryset.update(status=ChatThread.Status.FOLLOWING_UP)} marked following up.")
 
-    @admin.action(description="Close")
+    @admin.action(description="Close", permissions=["change"])
     def mark_closed(self, request, queryset):
         self.message_user(request, f"{queryset.update(status=ChatThread.Status.CLOSED)} closed.")
+
+    @admin.action(description="Reopen", permissions=["change"])
+    def reopen(self, request, queryset):
+        self.message_user(request, f"{queryset.update(status=ChatThread.Status.OPEN)} reopened.")
 
     def _capture(self, thread):
         from .chat_insights import capture_lead
@@ -1125,7 +1327,7 @@ class ChatThreadAdmin(ModelAdmin):
             thread.save(update_fields=["lead", "updated_at"])
         return lead
 
-    @admin.action(description="Create leads")
+    @admin.action(description="Create leads", permissions=["change"])
     def capture_leads(self, request, queryset):
         from django.contrib import messages
         results = [self._capture(t) for t in queryset]
@@ -1136,11 +1338,10 @@ class ChatThreadAdmin(ModelAdmin):
 
     @admin.action(description="Export selected to CSV")
     def export_csv(self, request, queryset):
-        import csv
         from django.http import HttpResponse
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="azura-chats.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Started", "Channel", "Name", "Email", "Phone", "Intent", "Topics", "Status", "Assigned to", "Lead"])
         for t in queryset.select_related("assigned_to", "lead"):
             w.writerow([t.created_at.date(), t.get_channel_display(), t.name, t.contact_email, t.contact_phone,
@@ -1148,7 +1349,8 @@ class ChatThreadAdmin(ModelAdmin):
                         t.lead.name if t.lead else ""])
         return response
 
-    @action(description="Create lead", url_path="capture-lead")
+    @action(description="Create lead", url_path="capture-lead", permissions=["bookings.change_chatthread"])
+    @post_only
     def detail_capture_lead(self, request, object_id):
         from django.contrib import messages
         from django.shortcuts import redirect
@@ -1217,8 +1419,21 @@ class AccessFilter(admin.SimpleListFilter):
         return queryset
 
 
+class EventTicketForm(forms.ModelForm):
+    class Meta:
+        model = EventTicket
+        fields = ["access_exception", "access_note"]
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get("access_exception") and not cleaned.get("access_note"):
+            self.add_error("access_note", "Say who approved this exception and why.")
+        return cleaned
+
+
 @admin.register(EventTicket)
 class EventTicketAdmin(ModelAdmin):
+    _can_open_bookings = False
     """Event-start check-in (Change Request v4 §6): one row per Core ticket.
     Unpaid guests get no badge or participation; staff take payment, record an
     exception, or mark the ticket forfeited. Nothing is cancelled automatically."""
@@ -1228,13 +1443,38 @@ class EventTicketAdmin(ModelAdmin):
     list_filter_submit = True
     search_fields = ["full_name", "booking__reference", "booking__email", "booking__last_name"]
     fields = ["full_name", "booking_link", "room", "owed", "access", "access_exception", "access_note",
-              "checked_in_at", "checked_in_by", "forfeited_at"]
+              "checked_in_at", "checked_in_by", "forfeited_at", "forfeited_by"]
     readonly_fields = ["full_name", "booking_link", "room", "owed", "access", "checked_in_at", "checked_in_by",
-                       "forfeited_at"]
+                       "forfeited_at", "forfeited_by"]
+    form = EventTicketForm
     actions = ["check_in", "forfeit"]
-    actions_detail = ["detail_check_in"]
+    actions_detail = ["detail_check_in", "detail_undo_check_in", "detail_undo_forfeit"]
+
+    def save_model(self, request, obj, form, change):
+        if "access_exception" in form.changed_data and obj.access_exception:
+            obj.access_note = f"{obj.access_note} [set by {request.user.email}]"[:300]
+        super().save_model(request, obj, form, change)
+
+    def _ticket_back(self, object_id):
+        from django.shortcuts import redirect
+        return redirect("admin:bookings_eventticket_change", object_id)
+
+    @action(description="Undo check-in", url_path="undo-check-in", permissions=["bookings.change_eventticket"])
+    @post_only
+    def detail_undo_check_in(self, request, object_id):
+        from .services import undo_check_in
+        self._run(request, EventTicket.objects.filter(pk=object_id, checked_in_at__isnull=False), undo_check_in, "back to not checked in")
+        return self._ticket_back(object_id)
+
+    @action(description="Undo forfeit", url_path="undo-forfeit", permissions=["bookings.change_eventticket"])
+    @post_only
+    def detail_undo_forfeit(self, request, object_id):
+        from .services import undo_forfeit
+        self._run(request, EventTicket.objects.filter(pk=object_id, forfeited_at__isnull=False), undo_forfeit, "restored")
+        return self._ticket_back(object_id)
 
     def get_queryset(self, request):
+        self._can_open_bookings = request.user.has_perm("bookings.view_booking")
         return (super().get_queryset(request)
                 .filter(booking__status__in=[Booking.Status.CONFIRMED, Booking.Status.COMPLETED])
                 .exclude(booking__mode__in=["", Booking.Mode.STAY])  # stay-only guests have no event ticket
@@ -1255,6 +1495,8 @@ class EventTicketAdmin(ModelAdmin):
     def booking_link(self, obj):
         from django.urls import reverse
         from django.utils.html import format_html
+        if not self._can_open_bookings:
+            return obj.booking.reference
         return format_html('<a href="{}">{}</a>', reverse("admin:bookings_booking_change", args=[obj.booking_id]),
                            obj.booking.reference)
 
@@ -1295,17 +1537,18 @@ class EventTicketAdmin(ModelAdmin):
         for reason in refused[:10]:
             self.message_user(request, reason, messages.WARNING)
 
-    @admin.action(description="Check in selected guests")
+    @admin.action(description="Check in selected guests", permissions=["change"])
     def check_in(self, request, queryset):
         from .services import check_in_ticket
         self._run(request, queryset, lambda t: check_in_ticket(t, by=request.user), "checked in")
 
-    @admin.action(description="Mark forfeited (unpaid at event start)")
+    @admin.action(description="Mark forfeited (unpaid at event start)", permissions=["change"])
     def forfeit(self, request, queryset):
         from .services import forfeit_ticket
-        self._run(request, queryset, forfeit_ticket, "marked forfeited")
+        self._run(request, queryset, lambda t: forfeit_ticket(t, by=request.user), "marked forfeited")
 
-    @action(description="Check in", url_path="check-in")
+    @action(description="Check in", url_path="check-in", permissions=["bookings.change_eventticket"])
+    @post_only
     def detail_check_in(self, request, object_id):
         from django.shortcuts import redirect
         from .services import check_in_ticket
