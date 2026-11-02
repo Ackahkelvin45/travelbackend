@@ -218,3 +218,127 @@ class AdminSidebarPermissionTests(TestCase):
         self.client.force_login(admin)
         self.assertIn("Packages by Category", self.client.get("/admin/").content.decode())
         self.assertEqual(self.client.get("/admin/reports/").status_code, 200)
+
+
+class StaffManagingUsersTests(TestCase):
+    """An account with user permissions can manage staff but not raise its own access."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.staff = User.objects.create_user(email="manager@test.com", password="x", is_staff=True)
+        self.staff.user_permissions.add(*Permission.objects.filter(
+            codename__in=["view_user", "add_user", "change_user", "delete_user"]))
+        self.root = User.objects.create_superuser(email="root@test.com", password="root-pass")
+        self.client.force_login(self.staff)
+
+    def form(self, user, **extra):
+        return {"email": user.email, "first_name": "", "last_name": "", "phone_number": "", "country": "",
+                "is_active": "on", "is_staff": "on", **extra}
+
+    def test_can_open_the_add_page(self):
+        self.assertEqual(self.client.get("/admin/accounts/user/add/").status_code, 200)
+
+    def test_cannot_make_itself_superuser_or_grant_permissions(self):
+        from django.contrib.auth.models import Permission
+        settings_perm = Permission.objects.get(codename="change_opsconfig")
+        self.client.post(f"/admin/accounts/user/{self.staff.pk}/change/",
+                         self.form(self.staff, is_superuser="on", user_permissions=[settings_perm.pk]))
+        self.staff = User.objects.get(pk=self.staff.pk)
+        self.assertFalse(self.staff.is_superuser)
+        self.assertFalse(self.staff.has_perm("payments.change_opsconfig"))
+        self.assertTrue(self.staff.has_perm("accounts.change_user"))  # the save didn't wipe its access
+
+    def test_cannot_take_over_or_delete_a_superuser(self):
+        self.assertEqual(self.client.post(f"/admin/accounts/user/{self.root.pk}/password/", {
+            "password1": "Taken-Over-1", "password2": "Taken-Over-1"}).status_code, 403)
+        self.assertEqual(self.client.post(f"/admin/accounts/user/{self.root.pk}/delete/", {"post": "yes"}).status_code, 403)
+        self.root.refresh_from_db()
+        self.assertTrue(self.root.check_password("root-pass"))
+
+
+
+class AdminModuleActionTests(TestCase):
+    """Every module can be managed: activate, deactivate, publish, hide, reopen."""
+
+    def setUp(self):
+        self.root = User.objects.create_superuser(email="root@test.com", password="x")
+        self.client.force_login(self.root)
+
+    def act(self, url, action, *objects):
+        return self.client.post(url, {"action": action, "index": 0, "_selected_action": [str(o.pk) for o in objects]}, follow=True)
+
+    def test_users_are_deactivated_but_never_yourself(self):
+        other = User.objects.create_user(email="other@test.com", password="x")
+        self.act("/admin/accounts/user/", "deactivate_users", other, self.root)
+        other.refresh_from_db()
+        self.root.refresh_from_db()
+        self.assertEqual((other.is_active, self.root.is_active), (False, True))
+        self.act("/admin/accounts/user/", "activate_users", other)
+        other.refresh_from_db()
+        self.assertTrue(other.is_active)
+
+    def test_newsletter_and_reviews(self):
+        from bookings.tests import make_package
+        from newsletter.models import NewsletterSubscriber
+        from reviews.models import Review
+        sub = NewsletterSubscriber.objects.create(email="n@test.com")
+        self.act("/admin/newsletter/newslettersubscriber/", "deactivate", sub)
+        sub.refresh_from_db()
+        self.assertFalse(sub.is_active)
+        self.assertEqual(self.act("/admin/newsletter/newslettersubscriber/", "export_csv", sub).status_code, 200)
+
+        pkg = make_package()
+        review = Review.objects.create(package=pkg, reviewer_name="A", reviewer_email="a@test.com", rating=1, body="x")
+        self.assertEqual(self.client.get(f"/api/packages/{pkg.id}/reviews/").json()["count"], 1)
+        self.act("/admin/reviews/review/", "hide_reviews", review)
+        self.assertEqual(self.client.get(f"/api/packages/{pkg.id}/reviews/").json()["count"], 0)
+        review.refresh_from_db()
+        self.assertFalse(review.is_visible)  # kept on record
+
+    def test_packages_and_trip_updates(self):
+        from bookings.tests import make_package
+        from packages.models import TripUpdate
+        pkg = make_package()
+        self.act("/admin/packages/travelpackage/", "deactivate_packages", pkg)
+        pkg.refresh_from_db()
+        self.assertFalse(pkg.is_active)
+        update = TripUpdate.objects.create(package=pkg, title="T", body="B")
+        self.act("/admin/packages/tripupdate/", "publish_updates", update)
+        update.refresh_from_db()
+        self.assertTrue(update.is_published)
+        self.assertIsNotNone(update.published_at)
+
+    def test_a_room_or_stay_in_use_cannot_be_deleted(self):
+        from bookings.models import Booking
+        from bookings.tests import make_package
+        from packages.models import RoomUnit, StayType
+        pkg = make_package()
+        stay = StayType.objects.create(package=pkg, code="s", name="S", kind="airbnb", capacity=2, price_per_night=1)
+        free = RoomUnit.objects.create(stay_type=stay, label="free")
+        used = RoomUnit.objects.create(stay_type=stay, label="used")
+        self.assertEqual(self.client.get(f"/admin/packages/roomunit/{free.pk}/delete/").status_code, 200)
+        booking = Booking.objects.create(package=pkg, first_name="A", last_name="B", email="a@test.com", num_guests=1,
+                                         travel_date="2027-01-06", unit_price=1, total_amount=1, currency="USD")
+        RoomUnit.objects.filter(pk=used.pk).update(booking=booking)
+        self.assertEqual(self.client.post(f"/admin/packages/roomunit/{used.pk}/delete/", {"post": "yes"}).status_code, 403)
+        self.assertEqual(self.client.post(f"/admin/packages/staytype/{stay.pk}/delete/", {"post": "yes"}).status_code, 403)
+        self.assertTrue(RoomUnit.objects.filter(pk=used.pk).exists())
+
+    def test_lost_leads_and_closed_chats_reopen_and_tasks_pause(self):
+        from bookings.models import ChatThread, Lead
+        from payments.models import ScheduledTask
+        lead = Lead.objects.create(name="A", email="a@test.com", stage="lost")
+        chat = ChatThread.objects.create(wa_id="233200000000", status="closed")
+        task = ScheduledTask.objects.create(name="refresh_fx_rates")
+        self.act("/admin/bookings/lead/", "reopen", lead)
+        self.act("/admin/bookings/chatthread/", "reopen", chat)
+        self.act("/admin/payments/scheduledtask/", "pause", task)
+        lead.refresh_from_db(); chat.refresh_from_db(); task.refresh_from_db()
+        self.assertEqual((lead.stage, chat.status, task.is_enabled), ("new", "open", False))
+
+    def test_view_only_staff_do_not_get_the_actions(self):
+        from django.contrib.auth.models import Permission
+        viewer = User.objects.create_user(email="v@test.com", password="x", is_staff=True)
+        viewer.user_permissions.add(Permission.objects.get(codename="view_user"))
+        self.client.force_login(viewer)
+        self.assertNotContains(self.client.get("/admin/accounts/user/"), "deactivate_users")

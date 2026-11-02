@@ -1,6 +1,9 @@
+from datetime import date
+
 from django import forms
 from django.contrib import admin
 from django.utils.html import format_html
+from config.admin_tools import post_only
 from unfold.admin import ModelAdmin, TabularInline, StackedInline
 from unfold.contrib.filters.admin import ChoicesDropdownFilter, RelatedDropdownFilter
 from unfold.decorators import action, display
@@ -254,12 +257,20 @@ class ItineraryInline(StackedInline):
 @admin.register(TravelPackage)
 class TravelPackageAdmin(ModelAdmin):
     form = TravelPackageForm
-    actions = ["send_newsletter_announcement"]
+    actions = ["activate_packages", "deactivate_packages", "send_newsletter_announcement"]
     actions_detail = ["publish_prices"]
+
+    @admin.action(description="Open for booking", permissions=["change"])
+    def activate_packages(self, request, queryset):
+        self.message_user(request, f"{queryset.update(is_active=True)} package(s) open for booking.")
+
+    @admin.action(description="Take off the site", permissions=["change"])
+    def deactivate_packages(self, request, queryset):
+        self.message_user(request, f"{queryset.update(is_active=False)} package(s) taken off the site. Existing bookings are kept.")
     change_form_before_template = "admin/packages/price_list_panel.html"
     list_display = ["title", "category", "pricing_model", "from_price_display", "price_list_display", "currency", "is_featured", "is_active"]
     list_filter = [("category", ChoicesDropdownFilter), "is_active", "is_featured"]
-    list_editable = ["is_featured", "is_active"]
+    list_editable = ["is_featured"]
     search_fields = ["title", "destinations__name", "description"]
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["-is_featured", "title"]
@@ -345,7 +356,9 @@ class TravelPackageAdmin(ModelAdmin):
         live = obj.price_lists.filter(status=PriceListVersion.Status.LIVE).first()
         return f"v{live.number} live" if live else ("Draft only" if obj.pricing_model == "component" else "—")
 
-    @action(description="Publish price list", url_path="publish-prices", icon="publish")
+    @action(description="Publish price list", url_path="publish-prices", icon="publish",
+            permissions=["packages.change_travelpackage"])
+    @post_only
     def publish_prices(self, request, object_id):
         from django.contrib import messages
         from django.shortcuts import redirect
@@ -362,7 +375,7 @@ class TravelPackageAdmin(ModelAdmin):
     def destinations_display(self, obj):
         return ", ".join(destination.name for destination in obj.destinations.all()) or "-"
 
-    @admin.action(description="Send newsletter announcement to subscribers")
+    @admin.action(description="Send newsletter announcement to subscribers", permissions=["change"])
     def send_newsletter_announcement(self, request, queryset):
         """Deliberate replacement for the old post_save auto-announcement:
         announcements only go out when an admin explicitly triggers them,
@@ -411,6 +424,19 @@ class TripUpdateAdmin(ModelAdmin):
     search_fields = ["title", "body"]
     fields = ["package", "title", "body", "is_published", "published_at"]
     readonly_fields = ["published_at"]
+    actions = ["publish_updates", "unpublish_updates"]
+
+    @admin.action(description="Publish", permissions=["change"])
+    def publish_updates(self, request, queryset):
+        updates = list(queryset.filter(is_published=False))
+        for update in updates:
+            update.is_published = True
+            update.save()  # sets published_at
+        self.message_user(request, f"{len(updates)} update(s) published.")
+
+    @admin.action(description="Unpublish", permissions=["change"])
+    def unpublish_updates(self, request, queryset):
+        self.message_user(request, f"{queryset.update(is_published=False)} update(s) unpublished.")
 
 
 # ── Component pricing: stays, rooms, price lists (Change Request v2) ────────
@@ -419,6 +445,7 @@ class StayTypeInline(TabularInline):
     model = StayType
     extra = 0
     tab = True
+    can_delete = False  # delete from the stay's own page, which refuses a stay with guests
     verbose_name_plural = "Stays"
     fields = ["code", "name", "kind", "capacity", "min_occupancy", "price_per_night", "nights",
               "on_sale", "note", "order"]
@@ -439,6 +466,7 @@ class StayTypeAdmin(ModelAdmin):
     list_display = ["name", "package", "kind", "photo_count", "on_sale"]
     list_filter = [("package", RelatedDropdownFilter)]
     readonly_fields = ["package", "code", "kind", "capacity", "price_per_night", "nights", "on_sale"]
+    actions = ["put_on_sale", "take_off_sale"]
     fieldsets = (
         ("Stay", {"fields": ("package", "code", "name", "kind", "capacity", "price_per_night", "nights", "on_sale", "note",
                             "stay_only", "check_in", "check_out_by")}),
@@ -452,6 +480,25 @@ class StayTypeAdmin(ModelAdmin):
 
     def has_add_permission(self, request):
         return False  # stays are added on the package
+
+    def has_delete_permission(self, request, obj=None):
+        # Deleting a stay deletes its rooms: never one with a guest in it.
+        if obj is not None and obj.units.filter(booking__isnull=False).exists():
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop("delete_selected", None)  # one at a time, so the check above always runs
+        return actions
+
+    @admin.action(description="Put on sale", permissions=["change"])
+    def put_on_sale(self, request, queryset):
+        self.message_user(request, f"{queryset.update(on_sale=True)} stay(s) on sale. Publish the price list for guests to see it.")
+
+    @admin.action(description="Take off sale", permissions=["change"])
+    def take_off_sale(self, request, queryset):
+        self.message_user(request, f"{queryset.update(on_sale=False)} stay(s) off sale. Publish the price list for guests to see it.")
 
 
 class PriceListVersionInline(TabularInline):
@@ -511,17 +558,41 @@ class RoomUnitAdmin(ModelAdmin):
     search_fields = ["label", "booking__reference", "occupants__full_name"]
     list_select_related = ["stay_type", "booking"]
     actions = ["release_holds", "block_units", "unblock_units", "move_allocation"]
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and (obj.booking_id or self._live_stays(obj).exists()):
+            return False  # move or cancel the booking first
+        return super().has_delete_permission(request, obj)
+
+    def _live_stays(self, unit):
+        """Dated stays booked on this Airbnb (same stay type and label)."""
+        return RoomUnit.objects.filter(stay_type=unit.stay_type, label=unit.label, check_in__isnull=False,
+                                       booking__isnull=False, check_out__gte=date.today())
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop("delete_selected", None)  # one at a time, so the check above always runs
+        return actions
     list_before_template = "admin/packages/room_summary.html"
     fields = ["stay_type", "label", "blocked", "booking", "held_until", "check_in", "check_out"]
     readonly_fields = ["booking", "held_until", "check_in", "check_out"]
     ordering = ["stay_type__package", "stay_type__order", "label"]
 
+    def get_queryset(self, request):
+        # A dated stay that was released or lapsed is no longer anything to manage.
+        from django.db.models import Q
+        from django.utils import timezone
+        dead = Q(check_in__isnull=False, booking__isnull=True) & (Q(held_until__isnull=True) | Q(held_until__lte=timezone.now()))
+        return super().get_queryset(request).exclude(dead)
+
     def changelist_view(self, request, extra_context=None):
         from django.utils import timezone
         rows = []
         for st in StayType.objects.select_related("package").order_by("package__title", "kind", "order"):
-            states = [room_state(u)[0] for u in st.units.all()]
-            rows.append({"stay": st, "total": len(states), **{k: states.count(k) for k in ("sold", "held", "free", "blocked")}})
+            # Dated rows are stays in a unit, not more units.
+            states = [room_state(u)[0] for u in st.units.filter(check_in__isnull=True)]
+            rows.append({"stay": st, "total": len(states), "stays": st.units.filter(check_in__isnull=False, booking__isnull=False).count(),
+                         **{k: states.count(k) for k in ("sold", "held", "free", "blocked")}})
         return super().changelist_view(request, {**(extra_context or {}), "room_rows": rows, "now": timezone.now()})
 
     @admin.display(description="Stay type", ordering="stay_type__order")
@@ -555,26 +626,26 @@ class RoomUnitAdmin(ModelAdmin):
             return obj.held_until.strftime("%d %b %H:%M")
         return "—"
 
-    @admin.action(description="Release checkout holds (not unpaid bookings)")
+    @admin.action(description="Release checkout holds (not unpaid bookings)", permissions=["change"])
     def release_holds(self, request, queryset):
         from django.contrib import messages
         n = queryset.filter(booking__isnull=True, held_until__isnull=False).update(hold_token="", held_until=None)
         self.message_user(request, f"{n} hold(s) released.", messages.SUCCESS)
 
-    @admin.action(description="Block (stop selling these units)")
+    @admin.action(description="Block (stop selling these units)", permissions=["change"])
     def block_units(self, request, queryset):
         from django.contrib import messages
+        sold = sum(1 for u in queryset if u.booking_id or self._live_stays(u).exists())
         n = queryset.update(blocked=True)
-        sold = queryset.filter(booking__isnull=False).count()
         self.message_user(request, f"{n} unit(s) blocked." + (f" {sold} still have a booking — move them first." if sold else ""),
                           messages.WARNING if sold else messages.SUCCESS)
 
-    @admin.action(description="Unblock")
+    @admin.action(description="Unblock", permissions=["change"])
     def unblock_units(self, request, queryset):
         from django.contrib import messages
         self.message_user(request, f"{queryset.update(blocked=False)} unit(s) back on sale.", messages.SUCCESS)
 
-    @admin.action(description="Move allocation to a free unit of the same type")
+    @admin.action(description="Move allocation to a free unit of the same type", permissions=["change"])
     def move_allocation(self, request, queryset):
         from django.contrib import messages
         from django.template.response import TemplateResponse

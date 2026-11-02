@@ -139,7 +139,17 @@ def gateway_share(payment, already_refunded, leg):
     return upto(already_refunded + leg) - upto(already_refunded)
 
 
-def create_fixed_refund(booking, amount, *, reason: str, breakdown: dict | None = None) -> list:
+def refundable_amount(booking):
+    """Received and not yet refunded or queued to be, leaving out charges under
+    a chargeback (the bank may already be returning those)."""
+    total = Decimal("0")
+    for payment in booking.payments.filter(status=Payment.Status.SUCCESS, disputed=False):
+        held = payment.refunds.exclude(status=Refund.Status.REJECTED).aggregate(t=Sum("amount"))["t"] or 0
+        total += payment.amount - held
+    return quantize(total)
+
+
+def create_fixed_refund(booking, amount, *, reason: str, breakdown: dict | None = None, first_traveller=None) -> list:
     """Owe the guest a specific amount (e.g. an over-payment after an add-on is
     removed): decompose it into pending legs newest-charge-first, skipping
     disputed payments, exactly like a policy refund."""
@@ -149,12 +159,15 @@ def create_fixed_refund(booking, amount, *, reason: str, breakdown: dict | None 
         return legs
     remaining = amount
     with transaction.atomic():
-        for payment in booking.payments.filter(status=Payment.Status.SUCCESS).order_by("-paid_at", "-created_at"):
+        payments = list(booking.payments.filter(status=Payment.Status.SUCCESS).order_by("-paid_at", "-created_at"))
+        if first_traveller is not None:  # that guest's own payments first: money returns to whoever paid
+            payments.sort(key=lambda p: p.traveller_id != first_traveller.pk)
+        for payment in payments:
             if remaining <= 0:
                 break
             if payment.disputed:
                 continue
-            refunded = quantize(payment.refunds.filter(status=Refund.Status.PROCESSED).aggregate(t=Sum("amount"))["t"] or 0)
+            refunded = quantize(payment.refunds.exclude(status=Refund.Status.REJECTED).aggregate(t=Sum("amount"))["t"] or 0)
             capacity = quantize(payment.amount - refunded)
             if capacity <= 0:
                 continue

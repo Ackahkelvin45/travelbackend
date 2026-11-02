@@ -4,7 +4,6 @@ accommodation uptake, experience sales and referral attribution for a date
 range, with CSV export. Staff-only via admin_site.admin_view.
 """
 
-import csv
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
@@ -14,6 +13,8 @@ from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.template.response import TemplateResponse
 from django.utils import timezone
+
+from config.admin_tools import safe_csv
 
 from .models import Booking, BookingTraveller, Lead
 
@@ -96,7 +97,7 @@ def chat_analytics_view(request):
     if request.GET.get("export") == "csv":
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = f'attachment; filename="azura-chats-{start}-{end}.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Azura chat analytics", start, end])
         w.writerow([]); w.writerow(["Measure", "Count", "Note"])
         w.writerows([[k["label"], k["value"], k["note"]] for k in report["kpis"]])
@@ -118,7 +119,7 @@ def chat_analytics_view(request):
 def _csv(report) -> HttpResponse:
     response = HttpResponse(content_type="text/csv")
     response["Content-Disposition"] = f'attachment; filename="azura-report-{report["start"]}-{report["end"]}.csv"'
-    w = csv.writer(response)
+    w = safe_csv(response)
     w.writerow(["Azura report", report["start"], report["end"]])
     w.writerow([]); w.writerow(["Funnel", "Count"])
     w.writerows([[r["label"], r["n"]] for r in report["funnel"]])

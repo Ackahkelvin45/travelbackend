@@ -135,8 +135,8 @@ def dashboard_callback(request, context):
     total_revenue = revenue_rows[0]["total"] if revenue_rows else 0
 
     total_users = User.objects.count()
-    published_reviews = Review.objects.count()
-    avg_rating_agg = Review.objects.aggregate(avg=Avg("rating"))
+    published_reviews = Review.objects.filter(is_visible=True).count()
+    avg_rating_agg = Review.objects.filter(is_visible=True).aggregate(avg=Avg("rating"))
     avg_rating = round(avg_rating_agg["avg"] or 0, 1)
 
     bookings_this_month = Booking.objects.filter(
@@ -414,9 +414,9 @@ def work_queue_context(request):
     """Change Request v2 dashboard: today's work, owner figures, rooms, uptake, health."""
     from django.db.models import Count, Sum
     from django.urls import reverse
-    from bookings.models import Booking, BookingTraveller, Lead
+    from bookings.models import Booking, BookingTraveller, CancellationRequest, Lead
     from packages.models import RoomUnit, StayType, TravelPackage
-    from payments.models import FxRate, OpsConfig, Payment, ScheduledTask
+    from payments.models import Donation, FxRate, OpsConfig, Payment, Refund, ScheduledTask
 
     now = timezone.now()
     today = timezone.localdate()
@@ -427,23 +427,39 @@ def work_queue_context(request):
     queue = [
         {"count": confirmed.filter(coordinator__isnull=True).count(), "title": "Paid bookings without a coordinator",
          "note": "Assign someone to contact the lead guest", "tone": "danger", "href": f"{bookings_url}?queue=needs_coordinator"},
-        {"count": len(contact_overdue_ids()), "title": "Lead guest not contacted in 24 h",
+        {"count": len(contact_overdue_ids()), "title": f"Lead guest not contacted in {OpsConfig.get().coordinator_contact_hours} h",
          "note": "Coordinator contact is overdue", "tone": "danger", "href": f"{bookings_url}?queue=contact_overdue"},
         {"count": len(due_soon), "title": "Balances due within 14 days",
-         "note": "Reminders go out 14, 7 and 1 days before", "tone": "warning", "href": f"{bookings_url}?queue=balance_due"},
+         "note": "Reminders go out automatically before the deadline", "tone": "warning", "href": f"{bookings_url}?queue=balance_due"},
         {"count": Lead.objects.filter(replied_at__isnull=True, reply_due_at__lt=now).exclude(stage__in=["won", "lost"]).count(),
          "title": "Leads waiting past the reply target", "note": "Reply or mark replied", "tone": "warning",
          "href": reverse("admin:bookings_lead_changelist") + "?reply=overdue"},
         {"count": Payment.objects.filter(needs_review=True).count(), "title": "Payments needing review",
          "note": "Mismatches and overpayments", "tone": "danger", "href": reverse("admin:payments_payment_changelist") + "?needs_review__exact=1"},
+        {"count": CancellationRequest.objects.filter(status="pending").count(), "title": "Cancellation requests to decide",
+         "note": "Payments are paused until each is resolved", "tone": "danger",
+         "href": reverse("admin:bookings_cancellationrequest_changelist") + "?status__exact=pending"},
+        {"count": Refund.objects.filter(status="pending").count(), "title": "Refunds waiting to be paid",
+         "note": "Pay out, then mark processed", "tone": "warning", "href": reverse("admin:payments_refund_changelist")},
+        {"count": confirmed.filter(num_guests__gte=10, coordinator__isnull=True).count(), "title": "Groups of 10+ without a coordinator",
+         "note": "These need a named coordinator", "tone": "danger", "href": f"{bookings_url}?queue=needs_coordinator"},
+        {"count": Donation.objects.filter(needs_review=True).count(), "title": "Donations needing review",
+         "note": "Check them, then mark reviewed", "tone": "warning", "href": reverse("admin:payments_donation_changelist") + "?needs_review__exact=1"},
         {"count": RoomUnit.objects.filter(booking__isnull=True, held_until__gt=now).count(), "title": "Rooms held at checkout",
          "note": "Released automatically when the hold expires", "tone": "info", "href": reverse("admin:packages_roomunit_changelist") + "?state=held"},
     ]
 
+    # Only tiles this person can open.
+    needs = {"bookings/booking": "bookings.view_booking", "bookings/lead": "bookings.view_lead",
+             "payments/payment": "payments.view_payment", "bookings/cancellationrequest": "bookings.view_cancellationrequest",
+             "payments/refund": "payments.view_refund", "payments/donation": "payments.view_donation",
+             "packages/roomunit": "packages.view_roomunit"}
+    queue = [q for q in queue if all(request.user.has_perm(p) for path, p in needs.items() if f"/{path}/" in q["href"])]
+
     collected = Payment.objects.filter(status=Payment.Status.SUCCESS).values("currency").annotate(t=Sum("amount"))
     rooms = []
     for st in StayType.objects.order_by("kind", "order"):
-        units = list(st.units.all())
+        units = list(st.units.filter(check_in__isnull=True))  # a dated row is a stay in a unit, not another unit
         sold = sum(1 for u in units if u.booking_id and not u.held_until)
         held = sum(1 for u in units if u.held_until and u.held_until > now)
         rooms.append({"name": st.name, "sold": sold, "held": held, "total": len(units),
@@ -503,6 +519,18 @@ def badge_leads(request):
 def badge_chats(request):
     from bookings.models import ChatThread
     n = ChatThread.objects.filter(needs_person=True, status=ChatThread.Status.OPEN).count()
+    return str(n) if n else ""
+
+
+def badge_cancellations(request):
+    from bookings.models import CancellationRequest
+    n = CancellationRequest.objects.filter(status="pending").count()
+    return str(n) if n else ""
+
+
+def badge_refunds(request):
+    from payments.models import Refund
+    n = Refund.objects.filter(status="pending").count()
     return str(n) if n else ""
 
 

@@ -8,6 +8,7 @@ from django.urls import path, include
 
 from bookings.reports import chat_analytics_view, reports_view
 from bookings import whatsapp
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from bookings.views import AssistantView, LeadCreateView, LeadUnsubscribeView, SiteSettingsView
 from payments.donations import DonationCreateView, DonationVerifyView
 from django.http import JsonResponse
@@ -31,6 +32,11 @@ schema_view = get_schema_view(
     public=True,
     permission_classes=[permissions.AllowAny],
 )
+
+# Sign-in token bookkeeping: nothing for staff to manage. Done here because
+# every app's admin has loaded by now.
+for model in (BlacklistedToken, OutstandingToken):
+    admin.site.unregister(model)
 
 urlpatterns = [
     path("admin/reports/", admin.site.admin_view(reports_view), name="admin-reports"),

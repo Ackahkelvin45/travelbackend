@@ -1,0 +1,23 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Create a refund · {{ booking.reference }}</h1>
+  <p class="text-subtle">For a goodwill or partial refund, an overpayment, or money that reached a closed booking. This queues the refund: nothing moves until it's paid out and marked processed in Refunds. To cancel the whole booking, use Cancel booking instead.</p>
+  {% if open_booking %}<p class="text-subtle">{% if overpaid %}The first {{ overpaid }} {{ booking.currency }} is overpayment. Anything{% else %}Everything{% endif %} above that also lowers the booking's total, so the guest won't owe it again. It's logged on the booking.</p>{% endif %}
+  {% if available > 0 %}
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="version" value="{{ version }}">
+    <label class="az-field">Amount ({{ booking.currency }}), up to {{ available }}
+      <input name="amount" type="number" step="0.01" min="0.01" max="{{ available }}" value="{{ form.amount }}" required></label>
+    <label class="az-field">Reason <textarea name="reason" rows="3" maxlength="500" required>{{ form.reason }}</textarea></label>
+    <div class="az-actions">
+      <button type="submit" class="az-btn">Create refund</button>
+      <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <p>There's nothing left to refund on this booking.</p>
+  <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Back to the booking</a>
+  {% endif %}
+</div>
+{% endblock %}

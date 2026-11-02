@@ -110,12 +110,12 @@ class TravelPackageFilter(django_filters.FilterSet):
             return qs.order_by("-price_shared")
         if value == "top_rated":
             return (
-                qs.annotate(avg_rating=Avg("reviews__rating", filter=Q(reviews__is_published=True)))
+                qs.annotate(avg_rating=Avg("reviews__rating", filter=Q(reviews__is_visible=True)))
                 .order_by("-avg_rating")
             )
         if value == "most_reviewed":
             return (
-                qs.annotate(review_count=Count("reviews", filter=Q(reviews__is_published=True)))
+                qs.annotate(review_count=Count("reviews", filter=Q(reviews__is_visible=True)))
                 .order_by("-review_count")
             )
         return qs

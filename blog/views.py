@@ -14,11 +14,13 @@ from .serializers import BlogListSerializer, BlogDetailSerializer, BlogImageSeri
 
 
 class IsAdminOrReadOnly(permissions.BasePermission):
-    """Allow anyone to read published content; only admins can write."""
+    """Allow anyone to read published content; only superusers can write."""
     def has_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
             return True
-        return request.user and request.user.is_staff
+        # These edit live prices and content with no per-model permission
+        # check, so staff work in the admin, which has one.
+        return bool(request.user and request.user.is_superuser)
 
 
 # ──────────────────────────────────────────

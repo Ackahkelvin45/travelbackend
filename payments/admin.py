@@ -6,9 +6,10 @@ from django.shortcuts import get_object_or_404
 from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
+from config.admin_tools import post_only, safe_csv
 from unfold.admin import ModelAdmin
 from unfold.contrib.filters.admin import BooleanRadioFilter, ChoicesDropdownFilter
-from unfold.decorators import display
+from unfold.decorators import action, display
 
 from config.unfold_theme import PAYMENT_STATUS_BADGE, REFUND_STATUS_BADGE
 from .models import Donation, FxRate, OpsConfig, Payment, Refund, ScheduledTask
@@ -45,7 +46,17 @@ class PaymentAdmin(ModelAdmin):
         "currency",
     ]
     search_fields = ["paystack_reference", "booking__reference", "booking__email"]
-    actions = ["mark_reviewed", "export_csv"]
+    actions = ["mark_reviewed", "clear_chargeback", "export_csv"]
+
+    def has_process_refund_permission(self, request):
+        return request.user.has_perm("payments.process_refund")
+
+    @admin.action(description="Clear chargeback flag (dispute closed on Paystack)", permissions=["process_refund"])
+    def clear_chargeback(self, request, queryset):
+        """Paystack's webhook normally does this; for one that never arrived."""
+        n = queryset.filter(disputed=True).update(
+            disputed=False, dispute_status=f"resolved: cleared by {request.user.email}"[:60])
+        self.message_user(request, f"{n} chargeback flag(s) cleared.")
     list_before_template = "admin/payments/ledger_summary.html"
     readonly_fields = [
         "payment_overview", "breakdown_table", "receipt_link",
@@ -285,7 +296,7 @@ class PaymentAdmin(ModelAdmin):
             "ledger": {"collected": collected, "refunded": refunded,
                        "review": Payment.objects.filter(needs_review=True).count()}})
 
-    @admin.action(description="Mark reviewed (no money moves)")
+    @admin.action(description="Mark reviewed (no money moves)", permissions=["change"])
     def mark_reviewed(self, request, queryset):
         """Clears the review flag after a person has checked the entry. Ledger
         rows are never edited; corrections are new entries or refunds."""
@@ -299,11 +310,10 @@ class PaymentAdmin(ModelAdmin):
 
     @admin.action(description="Export selected to CSV")
     def export_csv(self, request, queryset):
-        import csv
         from django.http import HttpResponse
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="payments.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Reference", "Booking", "Status", "Purpose", "Method", "Amount", "Currency",
                     "Charged", "Charged currency", "Rate", "Rate source", "Paid at", "Needs review"])
         for p in queryset.select_related("booking"):
@@ -341,7 +351,9 @@ class RefundAdmin(ModelAdmin):
     list_filter = [("status", ChoicesDropdownFilter), "currency"]
     search_fields = ["booking__reference", "booking__email", "external_reference"]
     ordering = ["-requested_at"]
-    readonly_fields = ["id", "booking", "payment", "amount", "currency", "breakdown", "requested_at", "updated_at"]
+    readonly_fields = ["id", "booking", "payment", "amount", "currency", "status", "processed_by", "processed_at",
+                       "breakdown", "requested_at", "updated_at"]
+    actions_detail = ["detail_mark_processed"]
     fieldsets = (
         ("Refund", {
             "fields": ("id", "booking", "payment", "amount", "currency", "status", "reason"),
@@ -351,8 +363,8 @@ class RefundAdmin(ModelAdmin):
             "fields": ("breakdown",),
         }),
         ("Execution", {
-            "description": "Execute the refund in the Paystack dashboard or by bank transfer, "
-                           "then record how and mark the status Processed.",
+            "description": "Return the money in Paystack or by bank transfer, save the reference "
+                           "here, then press Mark processed. That updates the booking's balance.",
             "fields": ("processed_by", "processed_at", "execution_note", "external_reference"),
         }),
         ("Timestamps", {
@@ -381,6 +393,27 @@ class RefundAdmin(ModelAdmin):
             except ValueError as exc:
                 self.message_user(request, f"{refund}: {exc}", messages.WARNING)
         self.message_user(request, f"{done} refund(s) marked processed.", messages.SUCCESS)
+
+    @action(description="Mark processed", url_path="mark-processed", permissions=["payments.process_refund"])
+    @post_only
+    def detail_mark_processed(self, request, object_id):
+        from django.contrib import messages
+        from django.shortcuts import redirect
+
+        from .refunds import mark_refund_processed
+
+        refund = Refund.objects.get(pk=object_id)
+        if refund.status != Refund.Status.PENDING:
+            self.message_user(request, f"This refund is already {refund.get_status_display().lower()}.", messages.WARNING)
+            return redirect("admin:payments_refund_change", object_id)
+        try:
+            mark_refund_processed(refund, by_user=request.user, external_reference=refund.external_reference or "",
+                                  execution_note=refund.execution_note or f"Marked processed by {request.user.email}")
+        except ValueError as exc:
+            self.message_user(request, str(exc), messages.WARNING)
+        else:
+            self.message_user(request, "Refund marked processed and the booking updated.", messages.SUCCESS)
+        return redirect("admin:payments_refund_change", object_id)
 
     @admin.action(description="Reject selected pending refunds", permissions=["process_refund"])
     def reject_refunds(self, request, queryset):
@@ -481,7 +514,14 @@ class DonationAdmin(ModelAdmin):
     list_filter = ["status", "source", "needs_review"]
     search_fields = ["reference", "donor_name", "donor_email", "booking__reference"]
     readonly_fields = [f.name for f in Donation._meta.fields]
-    actions = ["export_csv"]
+    actions = ["export_csv", "mark_reviewed"]
+
+    def has_review_permission(self, request):
+        return request.user.has_perm("payments.process_refund")
+
+    @admin.action(description="Mark reviewed", permissions=["review"])
+    def mark_reviewed(self, request, queryset):
+        self.message_user(request, f"{queryset.filter(needs_review=True).update(needs_review=False)} donation(s) marked reviewed.")
 
     @admin.display(description="Amount", ordering="amount")
     def amount_display(self, obj):
@@ -489,10 +529,9 @@ class DonationAdmin(ModelAdmin):
 
     @admin.action(description="Export CSV")
     def export_csv(self, request, queryset):
-        import csv
         response = HttpResponse(content_type="text/csv")
         response["Content-Disposition"] = 'attachment; filename="azura-donations.csv"'
-        w = csv.writer(response)
+        w = safe_csv(response)
         w.writerow(["Reference", "Date", "Donor", "Email", "USD", "GHS charged", "Source", "Booking", "Status"])
         for d in queryset.select_related("booking"):
             w.writerow([d.reference, d.paid_at or d.created_at, d.donor_name, d.donor_email, d.amount,
@@ -513,10 +552,17 @@ class DonationAdmin(ModelAdmin):
 @admin.register(ScheduledTask)
 class ScheduledTaskAdmin(ModelAdmin):
     list_display = ["name", "is_enabled", "last_run_at", "last_result_short"]
-    list_editable = ["is_enabled"]
-    actions = ["run_now"]
+    actions = ["run_now", "pause", "resume"]
 
-    @admin.action(description="Run now")
+    @admin.action(description="Pause", permissions=["change"])
+    def pause(self, request, queryset):
+        self.message_user(request, f"{queryset.update(is_enabled=False)} task(s) paused.")
+
+    @admin.action(description="Resume", permissions=["change"])
+    def resume(self, request, queryset):
+        self.message_user(request, f"{queryset.update(is_enabled=True)} task(s) resumed.")
+
+    @admin.action(description="Run now", permissions=["change"])
     def run_now(self, request, queryset):
         from django.utils import timezone
         from .autotasks import TASKS, _execute

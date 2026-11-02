@@ -40,6 +40,7 @@ class Review(models.Model):
     )
     title = models.CharField(max_length=200, blank=True, null=True)
     body = models.TextField()
+    is_visible = models.BooleanField(default=True, help_text="Hidden reviews stay on record but leave the site and the ratings.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

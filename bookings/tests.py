@@ -1242,10 +1242,10 @@ class AdminScreensTests(TestCase):
         from .models import Lead
         lead = Lead.objects.create(name="K", email="k@example.com", quote={"total": "1.00"}, marketing_consent=False)
         with mock.patch("payments.email.send_saved_quote") as send:
-            self.client.get(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
+            self.client.post(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
             send.assert_not_called()
             Lead.objects.filter(pk=lead.pk).update(marketing_consent=True)
-            self.client.get(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
+            self.client.post(f"/admin/bookings/lead/{lead.pk}/send-reminder/")
             send.assert_called_once()
 
     def test_move_allocation_keeps_guests_with_their_booking(self):
@@ -1261,7 +1261,7 @@ class AdminScreensTests(TestCase):
 
     def test_publish_from_package_page(self):
         from packages.models import PriceListVersion
-        self.client.get(f"/admin/packages/travelpackage/{self.pkg.pk}/publish-prices/")
+        self.client.post(f"/admin/packages/travelpackage/{self.pkg.pk}/publish-prices/")
         self.assertEqual(PriceListVersion.objects.get(package=self.pkg).number, 1)
 
 

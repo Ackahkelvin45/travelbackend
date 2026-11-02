@@ -74,7 +74,7 @@ class PackageReviewListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         return (
             Review.objects
-            .filter(package_id=self.kwargs["package_id"])
+            .filter(package_id=self.kwargs["package_id"], is_visible=True)
             .select_related("user")
             .order_by("-created_at")
         )

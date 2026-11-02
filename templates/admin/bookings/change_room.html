@@ -1,0 +1,21 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div class="az-panel">
+  <h1 class="font-bold text-xl text-important">Change room type · {{ booking.reference }}</h1>
+  <p class="text-subtle">The guests stay together and move to a free room of the new type, at the booking's price list and original group discount. The difference goes on the balance, or becomes a pending refund if they've overpaid. The guest isn't emailed automatically: tell them.</p>
+  {% if units and stays %}
+  <form method="post">{% csrf_token %}
+    <label class="az-field">Room <select name="unit" required>{% for u in units %}<option value="{{ u.pk }}">{{ u.label }}</option>{% endfor %}</select></label>
+    <label class="az-field">New type <select name="stay" required>{% for s in stays %}<option value="{{ s.code }}">{{ s.name }}</option>{% endfor %}<option value="release">Release it (empty rooms only)</option></select></label>
+    <label class="az-field">Note <input name="note" maxlength="300" placeholder="Why, and who asked"></label>
+    <div class="az-actions">
+      <button type="submit" class="az-btn">Change room</button>
+      <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Cancel</a>
+    </div>
+  </form>
+  {% else %}
+  <p>This booking has no room that can change type here. Stay-only bookings move to another unit from Room allocation.</p>
+  <a href="{% url 'admin:bookings_booking_change' booking.pk %}" class="az-link">Back to the booking</a>
+  {% endif %}
+</div>
+{% endblock %}
